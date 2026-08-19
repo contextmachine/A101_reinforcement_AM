@@ -9,7 +9,12 @@ open one from disk and the drawing viewer, the per-zone table and the analytics
 all light up. Processing is wired but disabled until a backend is pointed at the
 build — see [Backend](#backend).
 
+**Requires Node `^20.19.0 || >=22.12.0`** — the Vite 8 toolchain will not start
+on anything older (it fails on a missing `node:util` export rather than on the
+version check). `.nvmrc` pins a working major:
+
 ```bash
+nvm use              # or: nvm install 22
 npm install
 npm run dev          # http://localhost:5173
 ```

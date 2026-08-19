@@ -29,6 +29,6 @@
   "description": "Web frontend for the A101 additional-reinforcement solver.",
   "license": "UNLICENSED",
   "engines": {
-    "node": ">=20"
+    "node": "^20.19.0 || >=22.12.0"
   }
 }
