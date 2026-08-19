@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rebar-worker
+spec:
+  # KEDA owns this value after the ScaledObject is installed.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: rebar-worker
+  template:
+    metadata:
+      labels:
+        app: rebar-worker
+    spec:
+      automountServiceAccountToken: false
+      # Worker handles SIGTERM by finishing the current job and not claiming a new one.
+      # Keep this >= REBAR_MAX_SOLVER_TIMEOUT_SECONDS + a small post-processing margin.
+      terminationGracePeriodSeconds: 21630
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: worker
+          image: ghcr.io/YOUR_ORG/YOUR_REPO:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "rebar_service.worker"]
+          envFrom:
+            - configMapRef: {name: rebar-config}
+            - secretRef: {name: rebar-secrets}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: cache, mountPath: /tmp/rebar-cache}
+          resources:
+            requests: {cpu: "1", memory: 2Gi}
+            limits: {cpu: "4", memory: 8Gi}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}

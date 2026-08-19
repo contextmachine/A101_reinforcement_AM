@@ -1,0 +1,19 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rebar-redis-ingress
+spec:
+  podSelector:
+    matchLabels: {app: rebar-redis}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: rebar-api}
+        - podSelector:
+            matchLabels: {app: rebar-worker}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: keda
+      ports:
+        - {protocol: TCP, port: 6379}

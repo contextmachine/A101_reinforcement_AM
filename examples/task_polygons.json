@@ -1,0 +1,15 @@
+{
+  "n": [10, 20, 30],
+  "back_grid": [18, 300],
+  "stock": [[18, 300], [25, 150]],
+  "max_layers": 2,
+  "min_width_mm": 1000,
+  "axis": "y",
+  "input": {
+    "kind": "polygons",
+    "units": "mm",
+    "polygons": [
+      {"points": [[0, 0], [1000, 0], [1000, 1000], [0, 1000]], "load": 10.0}
+    ]
+  }
+}

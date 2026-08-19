@@ -1,0 +1,9 @@
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: rebar-redis-auth
+spec:
+  secretTargetRef:
+    - parameter: password
+      name: rebar-secrets
+      key: REBAR_REDIS_PASSWORD

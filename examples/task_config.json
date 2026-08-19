@@ -1,0 +1,22 @@
+{
+  "n": {"start": 1, "stop": 100, "coarse_step": 10},
+  "back_grid": [18, 300],
+  "stock": [[18, 300], [20, 150], [20, 100], [25, 150], [25, 100]],
+  "max_layers": 2,
+  "min_width_mm": 1000,
+  "steel_density_kg_m3": 7850,
+  "anchor_factor": 32,
+  "axis": "y",
+  "max_snap_mm": 600,
+  "min_bar_gap_mm": 50,
+  "max_concurrent_jobs": 4,
+  "solver": {
+    "backend": "highs",
+    "timeout_seconds": 120,
+    "threads": 1,
+    "cross_n_warm_start": true,
+    "emit_interval": 5,
+    "emit_heartbeat": true,
+    "prepared_max_n": 100
+  }
+}
