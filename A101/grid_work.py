@@ -249,9 +249,10 @@ def get_grid_matrix(result):
     # x: xs[ix]   -> xs[ix + 1]
     # y: ys[iy]   -> ys[iy + 1]
 
-    load_matrix = np.full(
+    # Uncovered cells are the background reinforcement class (load 0).
+    load_matrix = np.zeros(
         (len(ys) - 1, len(xs) - 1),
-        np.nan
+        dtype=float,
     )
 
     # ---------------------------------------------------------

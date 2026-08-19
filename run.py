@@ -6,14 +6,15 @@ from A101.clean_opt import visualize_rectangles
 from A101.linear_idea import generate_all_rectangles, rectangles_to_xyxy
 from A101.work_fast import run_many_with_timeout, timer
 from A101.axis_orientation import orient_grid, restore_rectangles
+from A101.work_cooperative import CooperativeRectangleSolver
 
 import numpy as np
 import matplotlib.pyplot as plt
 
 if __name__ == '__main__':
 
-    dxf_path = r"Верхнее армирование вдоль ОСИ У.dxf"
-    direction = 'y' # 'x'
+    dxf_path = r"Верхнее армирование вдоль ОСИ Х.dxf"
+    direction = 'x' # 'x'
     start_polygons = extract_polygons(dxf_path)
     orto_polygons = rect_polygons(start_polygons)
 
@@ -42,6 +43,8 @@ if __name__ == '__main__':
     x_steps = np.diff(xs)
     y_steps = np.diff(ys)
 
+    print(len(xs), len(ys))
+
     work_matrix, work_xs, work_ys, work_x_steps, work_y_steps = orient_grid(
         int_matrix,
         xs,
@@ -65,8 +68,35 @@ if __name__ == '__main__':
             holds={1: 800, 2: 900, 3: 1000},
         )
 
-    N = 87
-    S = 10
+    solver = CooperativeRectangleSolver(
+        dict(
+            value_matrix=work_matrix,
+            xs=work_x_steps,
+            ys=work_y_steps,
+            rectangles=final_vars,
+            densities=densities,
+            solver_msg=False,
+            time_limit=100,  # CBC мягко останавливается и отдаёт incumbent
+            require_optimal=True,
+        ),
+        workers=16,  # затем сравни с 24
+        threads_per_solver=1,  # один CBC = одно ядро
+        timeout=110,  # жёсткий внешний timeout
+        bootstrap=1,  # cold-start только для первой задачи
+    )
+
+    with timer():
+        solver([1], progress=False)
+    with timer():
+        first = solver([10, 20, 30])
+    with timer():
+        second = solver([15, 25, 35])
+
+    diff_vars = [solver.results[n] for n in sorted(solver.results)
+                 if solver.results[n].get("rectangles") is not None]
+
+    '''N = 87
+    S = 1
 
     kwargs = dict(
         value_matrix=work_matrix,
@@ -76,7 +106,7 @@ if __name__ == '__main__':
         densities=densities,
         solver_msg=False,
         threads=1,
-        time_limit=100,
+        time_limit=200,
         require_optimal=True,
     )
 
@@ -85,7 +115,7 @@ if __name__ == '__main__':
             kwargs,
             range(1, N + 1, S),
             workers=16,
-            timeout=110,
+            timeout=210,
         )
 
 
@@ -93,7 +123,7 @@ if __name__ == '__main__':
         result
         for result in results
         if result is not None and result["rectangles"] is not None
-    ]
+    ]'''
 
     for dv in diff_vars:
         dv["rectangles_original"] = restore_rectangles(
