@@ -3,22 +3,24 @@ name: deploy
 on:
   workflow_dispatch:
     inputs:
+      environment:
+        description: Kubernetes overlay
+        required: true
+        type: choice
+        options: [dev, prod, prod-private]
+        default: dev
       image_tag:
-        description: GHCR tag to deploy (for example latest or sha-...)
+        description: GHCR tag, for example sha-abc123 or v1.0.0
         required: true
         default: latest
       ingress_host:
-        description: Public host
-        required: true
+        description: Production ingress host; ignored by dev
+        required: false
         default: rebar.example.com
-      kustomize_dir:
-        description: Public image base or private-image overlay
-        required: true
-        type: choice
-        options:
-          - deploy/k8s
-          - deploy/k8s-private
-        default: deploy/k8s
+
+concurrency:
+  group: rebar-${{ inputs.environment }}
+  cancel-in-progress: false
 
 env:
   NAMESPACE: rebar-optimizer
@@ -26,7 +28,7 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: production
+    environment: ${{ inputs.environment }}
     permissions:
       contents: read
       packages: read
@@ -43,29 +45,20 @@ jobs:
           mkdir -p "$HOME/.kube"
           echo "$KUBE_CONFIG_B64" | base64 -d > "$HOME/.kube/config"
           chmod 600 "$HOME/.kube/config"
-      - name: Set image and host
+      - name: Render manifests
         env:
+          OVERLAY: deploy/k8s/overlays/${{ inputs.environment }}
           IMAGE_TAG: ${{ inputs.image_tag }}
           INGRESS_HOST: ${{ inputs.ingress_host }}
         run: |
-          python - <<'PY'
-          import os
-          from pathlib import Path
-          repo = os.environ["GITHUB_REPOSITORY"].lower()
-          tag = os.environ["IMAGE_TAG"]
-          for name in ("deploy/k8s/kustomization.yaml", "deploy/k8s-private/kustomization.yaml"):
-              p = Path(name)
-              s = p.read_text().replace("newName: ghcr.io/YOUR_ORG/YOUR_REPO", f"newName: ghcr.io/{repo}")
-              s = s.replace("newTag: latest", f"newTag: {tag}")
-              p.write_text(s)
-          p = Path("deploy/k8s/07-ingress.yaml")
-          p.write_text(p.read_text().replace("rebar.example.com", os.environ["INGRESS_HOST"]))
-          PY
-      - name: Validate and apply
-        env:
-          KUSTOMIZE_DIR: ${{ inputs.kustomize_dir }}
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:$IMAGE_TAG"
+          kubectl kustomize "$OVERLAY" \
+            | sed "s#ghcr.io/YOUR_ORG/YOUR_REPO:latest#$IMAGE#g; s#rebar.example.com#$INGRESS_HOST#g" \
+            > /tmp/rebar-rendered.yaml
+          grep -q "$IMAGE" /tmp/rebar-rendered.yaml
+      - name: Apply
         run: |
-          kubectl kustomize "$KUSTOMIZE_DIR" >/tmp/rebar-rendered.yaml
           kubectl apply -f /tmp/rebar-rendered.yaml
           kubectl -n "$NAMESPACE" rollout status deployment/rebar-api --timeout=5m
-          kubectl -n "$NAMESPACE" get scaledjob rebar-worker
+          kubectl -n "$NAMESPACE" get deployment/rebar-worker
+          kubectl -n "$NAMESPACE" get scaledobject/rebar-worker

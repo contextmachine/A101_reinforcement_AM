@@ -4,9 +4,9 @@ import A101.grid_quantizer as rgq
 from A101.grid_work import clean_poly, resolve_overlaps, get_grid_matrix
 from A101.clean_opt import visualize_rectangles
 from A101.linear_idea import generate_all_rectangles, rectangles_to_xyxy
-from A101.work_fast import run_many_with_timeout, timer
+from A101.work_fast import timer
 from A101.axis_orientation import orient_grid, restore_rectangles
-from A101.work_cooperative import CooperativeRectangleSolver
+from A101.old.work_cooperative import CooperativeRectangleSolver
 
 import numpy as np
 import matplotlib.pyplot as plt
