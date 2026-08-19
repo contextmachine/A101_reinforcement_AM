@@ -1,5 +1,6 @@
 import numpy as np
 from itertools import accumulate
+from functools import lru_cache
 
 def consecutive_subsets(N):
     return [
@@ -222,3 +223,130 @@ def generate_all_rectangles(
                     )
 
     return list(rectangles)
+
+def generate_recipe_rectangles(
+    int_matrix,
+    recipes,
+    x_steps,
+    y_steps,
+    xs,
+    min_w,
+    holds,
+):
+    A = np.asarray(int_matrix)
+
+    @lru_cache(None)
+    def expand(c):
+        if c == 0:
+            return ()
+        if c not in recipes:
+            return (c,)
+        return tuple(sorted(
+            (v for x in recipes[c] for v in expand(x)),
+            reverse=True,
+        ))
+
+    classes = set(map(int, np.unique(A))) | set(recipes)
+    classes |= {x for r in recipes.values() for x in r}
+
+    base = sorted(c for c in classes if c and c not in recipes)
+    req = {c: expand(c) for c in classes}
+
+    out = set()
+    seen_views = set()
+
+    for b in base:
+        # Сколько слоёв класса >= b требуется каждому классу.
+        need = {
+            c: tuple(v for v in req[c] if v >= b)
+            for c in classes
+        }
+
+        for layer in range(max(map(len, need.values()), default=0)):
+            active = {
+                c for c in classes
+                if len(need[c]) > layer
+            }
+            if not active:
+                continue
+
+            # 1. Detailed:
+            # сохраняем исходные composite-классы.
+            detailed = np.zeros_like(A)
+            for c in active:
+                detailed[A == c] = c
+
+            # 2. Promoted:
+            # убираем границу между классами, которые на данном
+            # слое требуют один и тот же тип арматуры.
+            groups = {}
+            for c in active:
+                v = need[c][layer]
+                groups[v] = max(groups.get(v, 0), c)
+
+            promoted = np.zeros_like(A)
+            for c in active:
+                promoted[A == c] = groups[need[c][layer]]
+
+            for M in (detailed, promoted):
+                key = (b, M.tobytes())
+                if key in seen_views or not np.any(M):
+                    continue
+                seen_views.add(key)
+
+                view_holds = holds
+                if isinstance(holds, dict):
+                    view_holds = {
+                        int(v): holds[b]
+                        for v in np.unique(M)
+                        if v
+                    }
+
+                rects = generate_all_rectangles(
+                    int_matrix=M,
+                    x_steps=x_steps,
+                    y_steps=y_steps,
+                    xs=xs,
+                    min_w=min_w,
+                    holds=view_holds,
+                )
+
+                # Геометрию берём из view,
+                # selectable-класс задаём базовый.
+                for x1, y1, x2, y2, _ in rects:
+                    out.add((x1, y1, x2, y2, b))
+
+    return list(out)
+
+def relabel_rectangle_candidates(rectangles, recipes):
+    """Convert requirement-class geometries into selectable base classes.
+
+    Direct base-class rectangles are retained. Composite classes are expanded
+    recursively; repeated recipe layers need only one geometry because their
+    multiplicity is represented by the optimizer variable upper bound.
+    """
+
+    recipes = {int(k): tuple(map(int, v)) for k, v in dict(recipes or {}).items()}
+    cache = {}
+
+    def expand(cls, stack=()):
+        cls = int(cls)
+        if cls <= 0:
+            return ()
+        if cls in cache:
+            return cache[cls]
+        if cls in stack:
+            raise ValueError(f"Циклический recipe: {' -> '.join(map(str, (*stack, cls)))}")
+        parts = recipes.get(cls)
+        result = (cls,) if parts is None else tuple(x for part in parts for x in expand(part, (*stack, cls)))
+        cache[cls] = result
+        return result
+
+    out = set()
+    for i, raw in enumerate(rectangles):
+        if len(raw) != 5:
+            raise ValueError(f"rectangles[{i}] должен иметь формат (x0,y0,x1,y1,class)")
+        x0, y0, x1, y1, cls = raw
+        for base in set(expand(cls)):
+            out.add((int(x0), int(y0), int(x1), int(y1), int(base)))
+    return sorted(out)

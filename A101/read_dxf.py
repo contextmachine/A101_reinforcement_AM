@@ -1,5 +1,6 @@
 import ezdxf
 import numpy as np
+from shapely.geometry import Polygon
 
 
 def extract_polygons(dxf_path):
@@ -47,5 +48,7 @@ def extract_polygons(dxf_path):
             "color": int(face.dxf.color),
             "load": color_map[int(face.dxf.color)]-1
         })
+    for poly in mosaic:
+        poly['geometry'] = Polygon(poly['points'])
 
     return mosaic
