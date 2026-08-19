@@ -34,7 +34,7 @@ if __name__ == "__main__":
     anchor_k = 32
     axis = normalize_axis("y")
     N, MAX_N = 30, 100
-    dxf_path = r"C:\Users\AM\Downloads\dxf\С2_t_700_Верхняя по оси У.dxf"
+    dxf_path = r"C:\Users\AM\Downloads\Верхнее армирование вдоль ОСИ У.dxf"
 
     start_polygons = extract_polygons(dxf_path)
     ortho_polygons = rect_polygons(start_polygons)
@@ -152,5 +152,7 @@ if __name__ == "__main__":
         diameters=diameters,
         density=iron_dens,
         axis=axis,
+        holds=base_holds,
+        polygons=poly_mos,
     )
     print(summary)
