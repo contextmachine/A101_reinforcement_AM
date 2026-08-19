@@ -144,9 +144,9 @@ figcaption{font-size:.9cqw; color:var(--ink-3); margin-top:.7cqw; line-height:1.
 }
 .inputs input:focus-visible{outline:2px solid var(--accent); outline-offset:1px}
 
-table.scope{width:100%; border-collapse:collapse; font-size:.92cqw; table-layout:fixed}
+table.scope{width:100%; border-collapse:collapse; font-size:.88cqw; table-layout:fixed}
 table.scope th,table.scope td{text-align:left; vertical-align:top;
-  padding:.46cqw .7cqw; border-bottom:1px solid var(--rule-soft); line-height:1.3}
+  padding:.4cqw .65cqw; border-bottom:1px solid var(--rule-soft); line-height:1.28}
 table.scope th{font-family:"IBM Plex Mono",monospace; font-size:.88cqw;
   letter-spacing:.11em; text-transform:uppercase; color:var(--ink-3); font-weight:500;
   border-bottom:1px solid var(--rule)}
@@ -198,33 +198,33 @@ table.scope td{color:var(--ink-2)}
 
 <!-- ══ 01 ═══════════════════════════════════════════════════════ -->
 <section class="slide">
-  <div class="rail"><span>А101 · демонстрация</span><b class="mono">01 / 16</b></div>
+  <div class="rail"><span>А101 · демонстрация</span><b class="mono">01 / 18</b></div>
   <div class="gutter"></div>
   <div class="sheet">
     <div class="hero">
       <div>
         <div class="eyebrow">Конструкции · КЖ · плиты перекрытий</div>
         <h1>Оптимальная раскладка армирования плит</h1>
-        <p class="sub">Движок читает требуемое армирование из LIRA-CAD и решает задачу
-        дискретной оптимизации: минимум массы стали, числа элементов и трудоёмкости
-        монтажа при гарантированном выполнении требований расчёта.</p>
+        <p class="sub">Движок читает требуемое армирование из LIRA-CAD, подбирает классы
+        из вашего сортамента и решает задачу дискретной оптимизации: минимум массы стали,
+        числа зон и трудоёмкости монтажа при гарантированном выполнении требований расчёта.</p>
       </div>
       <div class="stamp">
-        Вход<b> DXF / LIRA-CAD</b><br>
+        Вход<b> DXF / LIRA-CAD + сортамент</b><br>
         Метод<b> точный MILP, gap = 0</b><br>
-        Результат<b> доказанный оптимум</b><br>
+        Выход<b> стержни и спецификация</b><br>
         Управление<b> у инженера</b>
       </div>
     </div>
     <div style="margin-top:2.4cqw">
       <div class="field" id="hero-field" style="grid-template-columns:repeat(40,1fr)"></div>
       <div class="legend">
-        <em><i style="background:var(--d0)"></i>0 — армирование не требуется</em>
-        <em><i style="background:var(--d1)"></i>1</em>
-        <em><i style="background:var(--d2)"></i>2</em>
-        <em><i style="background:var(--d3)"></i>3</em>
-        <em><i style="background:var(--d4)"></i>4 — максимум</em>
-        <em style="color:var(--ink-3)">поле требований, реконструированное из цветовой шкалы</em>
+        <em><i style="background:var(--d0)"></i>только фон</em>
+        <em><i style="background:var(--d1)"></i>+1 слой</em>
+        <em><i style="background:var(--d2)"></i></em>
+        <em><i style="background:var(--d3)"></i></em>
+        <em><i style="background:var(--d4)"></i>+2 слоя</em>
+        <em style="color:var(--ink-3)">поле требуемого армирования A<sub>s</sub>, см²/м — реконструировано из цветовой шкалы</em>
       </div>
     </div>
   </div>
@@ -232,7 +232,7 @@ table.scope td{color:var(--ink-2)}
 
 <!-- ══ 02 ═══════════════════════════════════════════════════════ -->
 <section class="slide reveal">
-  <div class="rail"><span>Проблема</span><b class="mono">02 / 16</b></div>
+  <div class="rail"><span>Проблема</span><b class="mono">02 / 18</b></div>
   <div class="gutter"></div>
   <div class="sheet">
     <div class="eyebrow">Как это устроено сегодня</div>
@@ -242,14 +242,14 @@ table.scope td{color:var(--ink-2)}
         <div class="card">
           <span class="tag">Ввод</span>
           <h3>Цветная «клеёнка»</h3>
-          <p>Инженер смотрит на карту требуемого армирования и переводит цвет в число
-          глазами. Числового поля на входе нет — есть картинка.</p>
+          <p>Инженер смотрит на карту требуемого армирования и переводит цвет в площадь
+          сечения глазами. Числового поля на входе нет — есть картинка.</p>
         </div>
         <div class="card">
           <span class="tag">Решение</span>
           <h3>Один вариант из тысяч</h3>
-          <p>Границы зон выбираются вручную. Проверить, что выбранная раскладка лучшая,
-          невозможно: пространство вариантов не перебирается.</p>
+          <p>Границы зон и подбор сеток из сортамента делаются вручную. Проверить, что
+          выбранная раскладка лучшая, невозможно: пространство вариантов не перебирается.</p>
         </div>
         <div class="card">
           <span class="tag">Итог</span>
@@ -267,7 +267,7 @@ table.scope td{color:var(--ink-2)}
 
 <!-- ══ 03 ═══════════════════════════════════════════════════════ -->
 <section class="slide reveal">
-  <div class="rail"><span>Тезис</span><b class="mono">03 / 16</b></div>
+  <div class="rail"><span>Тезис</span><b class="mono">03 / 18</b></div>
   <div class="gutter"></div>
   <div class="sheet">
     <div class="eyebrow">Что мы делаем</div>
@@ -279,42 +279,42 @@ table.scope td{color:var(--ink-2)}
         <div class="card">
           <span class="tag">Параметр 01</span>
           <h3>Масса стали</h3>
-          <p>Таблица расхода по классам армирования входит прямо в целевую функцию:
-          стоимость зоны = её физическая площадь × расход класса.</p>
-          <span class="mono" style="font-size:.95cqw;color:var(--accent)">densities[w]</span>
+          <p>Расход по каждому классу считается из сортамента, а не задаётся руками:
+          диаметр и шаг дают площадь сечения на погонный метр, она входит в целевую функцию.</p>
+          <span class="mono" style="font-size:.95cqw;color:var(--accent)">stock, back_grid</span>
         </div>
         <div class="card">
           <span class="tag">Параметр 02</span>
-          <h3>Число элементов и типоразмеров</h3>
-          <p>Количество зон раскладки задаётся строго. Движок считает оптимум
-          отдельно для каждого значения — получается вся кривая, а не одна точка.</p>
-          <span class="mono" style="font-size:.95cqw;color:var(--accent)">n = 1 … N</span>
+          <h3>Число зон и типоразмеров</h3>
+          <p>Номенклатура ограничена вашим сортаментом и числом слоёв. Количество зон
+          задаётся строго — движок считает оптимум отдельно для каждого значения.</p>
+          <span class="mono" style="font-size:.95cqw;color:var(--accent)">max_lay, N</span>
         </div>
         <div class="card">
           <span class="tag">Параметр 03</span>
           <h3>Трудоёмкость монтажа</h3>
-          <p>Минимальная ширина зоны и допустимый разрыв, который можно перекрыть,
-          а не разрезать сетку — технологические ограничения на этапе генерации.</p>
-          <span class="mono" style="font-size:.95cqw;color:var(--accent)">min_w, holds[w]</span>
+          <p>Минимальная ширина зоны, длина анкеровки и минимальный зазор между
+          стержнями — технологические ограничения, входящие внутрь задачи.</p>
+          <span class="mono" style="font-size:.95cqw;color:var(--accent)">min_w, anchor_k, min_bar_gap</span>
         </div>
       </div>
       <p class="note"><b>Ключевое отличие.</b> Смена приоритетов не требует переработки
-      алгоритма — это просто другая точка на кривой компромисса и другие числа
-      в тех же трёх группах параметров.</p>
+      алгоритма — это другой набор чисел в блоке пользовательских параметров и другая
+      точка на кривой компромисса.</p>
     </div>
   </div>
 </section>
 
 <!-- ══ 04 · АРХИТЕКТУРА ════════════════════════════════════════ -->
 <section class="slide reveal">
-  <div class="rail"><span>Архитектура</span><b class="mono">04 / 16</b></div>
+  <div class="rail"><span>Архитектура</span><b class="mono">04 / 18</b></div>
   <div class="gutter"></div>
   <div class="sheet">
     <div class="eyebrow">Архитектура решения</div>
-    <h2 class="title" style="font-size:2.7cqw">Семь ступеней от DXF до доказанной раскладки</h2>
-    <div class="body" style="margin-top:1.4cqw">
+    <h2 class="title" style="font-size:2.6cqw">Четыре блока — от картинки до спецификации</h2>
+    <div class="body" style="margin-top:1.2cqw">
       <figure style="flex:1;display:flex;flex-direction:column">
-      <svg viewBox="0 0 1200 452" role="img" aria-label="Конвейер из семи ступеней: чтение DXF, ортогонализация, квантование сетки, сборка матрицы требований, генерация кандидатов, точная оптимизация, развёртка по числу зон. Приоритеты инженера параметризуют три последние ступени.">
+      <svg viewBox="0 0 1200 452" role="img" aria-label="Четыре блока конвейера: реконструкция требований, подбор классов из сортамента, точная оптимизация, раскладка стержней и выдача. Снизу — панель параметров инженера, питающая три последних блока.">
         <defs>
           <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M0,1 L9,5 L0,9 z" fill="currentColor"/>
@@ -325,101 +325,91 @@ table.scope td{color:var(--ink-2)}
         </defs>
         <g color="var(--ink-2)" font-family="IBM Plex Sans, sans-serif">
 
-          <text x="20" y="24" font-size="11" font-family="IBM Plex Mono, monospace" letter-spacing="1.6" fill="var(--ink-3)">ПРИЁМ И РЕКОНСТРУКЦИЯ ДАННЫХ</text>
-          <line x1="20" y1="34" x2="1180" y2="34" stroke="var(--rule-soft)"/>
-
-          <rect x="20" y="62" width="126" height="86" fill="var(--panel-2)" stroke="var(--rule)" stroke-dasharray="4 3"/>
-          <text x="83" y="98" text-anchor="middle" font-size="14" fill="var(--ink)">DXF</text>
-          <text x="83" y="118" text-anchor="middle" font-size="11" fill="var(--ink-3)">LIRA-CAD</text>
+          <text x="20" y="22" font-size="11" font-family="IBM Plex Mono, monospace" letter-spacing="1.4" fill="var(--ink-3)">ВХОД — DXF ИЗ LIRA-CAD</text>
+          <text x="1180" y="22" text-anchor="end" font-size="11" font-family="IBM Plex Mono, monospace" letter-spacing="1.4" fill="var(--ink-3)">ВЫХОД — СТЕРЖНИ И СПЕЦИФИКАЦИЯ</text>
+          <line x1="20" y1="32" x2="1180" y2="32" stroke="var(--rule-soft)"/>
 
           <g fill="var(--panel-2)" stroke="var(--rule)">
-            <rect x="200" y="62" width="186" height="86"/>
-            <rect x="440" y="62" width="186" height="86"/>
-            <rect x="680" y="62" width="186" height="86"/>
-            <rect x="920" y="62" width="186" height="86"/>
+            <rect x="20" y="52" width="272" height="236"/>
+            <rect x="316" y="52" width="272" height="236"/>
+            <rect x="612" y="52" width="272" height="236"/>
           </g>
+          <rect x="908" y="52" width="272" height="236" fill="var(--accent-soft)" stroke="var(--accent)"/>
+
+          <g font-size="10.5" font-family="IBM Plex Mono, monospace" fill="var(--accent)" letter-spacing="1.2">
+            <text x="40" y="78">01</text><text x="336" y="78">02</text>
+            <text x="632" y="78">03</text><text x="928" y="78">04</text>
+          </g>
+          <g font-size="15.5" fill="var(--ink)">
+            <text x="40" y="104">Реконструкция</text><text x="40" y="123">требований</text>
+            <text x="336" y="104">Подбор классов</text><text x="336" y="123">из сортамента</text>
+            <text x="632" y="104">Точная</text><text x="632" y="123">оптимизация</text>
+            <text x="928" y="104">Раскладка</text><text x="928" y="123">и выдача</text>
+          </g>
+          <g font-size="10" font-family="IBM Plex Mono, monospace" fill="var(--ink-3)">
+            <text x="40" y="146">read_dxf · poly_bbox</text>
+            <text x="40" y="160">grid_quantizer · grid_work</text>
+            <text x="336" y="146">calculate_mass</text>
+            <text x="632" y="146">linear_idea · cells_merging</text>
+            <text x="632" y="160">…_recipes · rectangle_solver</text>
+            <text x="928" y="146">fit_rebar_layout</text>
+            <text x="928" y="160">rebar_summary</text>
+          </g>
+          <g stroke="var(--rule)"><line x1="40" y1="176" x2="272" y2="176"/><line x1="336" y1="176" x2="568" y2="176"/><line x1="632" y1="176" x2="864" y2="176"/><line x1="928" y1="176" x2="1160" y2="176"/></g>
+
+          <g font-size="12" fill="var(--ink-2)">
+            <text x="40" y="200">цвет → площадь сечения, см²/м</text>
+            <text x="40" y="222">ортогонализация уровней</text>
+            <text x="40" y="244">точное квантование сетки</text>
+            <text x="40" y="266">сохранение отверстий</text>
+
+            <text x="336" y="200">фон + до 2 добавочных слоёв</text>
+            <text x="336" y="222">перебор комбинаций сортамента</text>
+            <text x="336" y="244">класс на каждое требование</text>
+            <text x="336" y="266">анкеровка 32d по диаметру</text>
+
+            <text x="632" y="200">кандидаты с min_w и анкеровкой</text>
+            <text x="632" y="222">мозаика без потери вариантов</text>
+            <text x="632" y="244">MILP: HiGHS или CBC</text>
+            <text x="632" y="266">gap = 0, оптимум доказан</text>
+
+            <text x="928" y="200">единая сетка стержней</text>
+            <text x="928" y="222">зазоры, фазы, контакты зон</text>
+            <text x="928" y="244">масса в килограммах</text>
+            <text x="928" y="266">спецификация по зонам</text>
+          </g>
+
           <g stroke="currentColor" fill="none" marker-end="url(#ah)">
-            <line x1="149" y1="105" x2="197" y2="105"/>
-            <line x1="389" y1="105" x2="437" y2="105"/>
-            <line x1="629" y1="105" x2="677" y2="105"/>
-            <line x1="869" y1="105" x2="917" y2="105"/>
+            <line x1="295" y1="176" x2="313" y2="176"/>
+            <line x1="591" y1="176" x2="609" y2="176"/>
+            <line x1="887" y1="176" x2="905" y2="176"/>
           </g>
-          <g font-size="10" font-family="IBM Plex Mono, monospace" fill="var(--ink-3)" text-anchor="middle">
-            <text x="173" y="97">3DFACE</text>
-            <text x="413" y="97">load</text>
-            <text x="653" y="97">полигон</text>
-            <text x="893" y="97">сетка</text>
-          </g>
-          <g font-size="10.5" font-family="IBM Plex Mono, monospace" fill="var(--accent)" letter-spacing="1">
-            <text x="214" y="82">01</text><text x="454" y="82">02</text>
-            <text x="694" y="82">03</text><text x="934" y="82">04</text>
-          </g>
-          <g font-size="13.5" fill="var(--ink)">
-            <text x="214" y="106">Чтение цветовой шкалы</text>
-            <text x="454" y="106">Ортогонализация слоёв</text>
-            <text x="694" y="106">Квантование сетки</text>
-            <text x="934" y="106">Сборка матрицы</text>
-          </g>
-          <g font-size="10.5" font-family="IBM Plex Mono, monospace" fill="var(--ink-3)">
-            <text x="214" y="130">read_dxf.py</text>
-            <text x="454" y="130">poly_bbox.py</text>
-            <text x="694" y="130">grid_quantizer.py</text>
-            <text x="934" y="130">grid_work.py</text>
+          <g font-size="9.5" font-family="IBM Plex Mono, monospace" fill="var(--ink-3)" text-anchor="middle">
+            <text x="304" y="132" transform="rotate(-90 304 132)">поле</text>
+            <text x="600" y="132" transform="rotate(-90 600 132)">классы</text>
+            <text x="896" y="132" transform="rotate(-90 896 132)">зоны</text>
           </g>
 
-          <path d="M1013,148 L1013,196 L293,196 L293,246" fill="none" stroke="currentColor" marker-end="url(#ah)"/>
-          <text x="1006" y="188" text-anchor="end" font-size="11" font-family="IBM Plex Mono, monospace" fill="var(--ink-2)">xs, ys, matrix[y][x] — целочисленное поле требований</text>
-
-          <text x="20" y="228" font-size="11" font-family="IBM Plex Mono, monospace" letter-spacing="1.6" fill="var(--ink-3)">ОПТИМИЗАЦИЯ</text>
-          <line x1="20" y1="238" x2="1180" y2="238" stroke="var(--rule-soft)"/>
-
-          <g fill="var(--panel-2)" stroke="var(--rule)">
-            <rect x="200" y="250" width="186" height="86"/>
-            <rect x="440" y="250" width="186" height="86"/>
-            <rect x="680" y="250" width="186" height="86"/>
-          </g>
-          <rect x="920" y="250" width="186" height="86" fill="var(--accent-soft)" stroke="var(--accent)"/>
-          <g stroke="currentColor" fill="none" marker-end="url(#ah)">
-            <line x1="389" y1="293" x2="437" y2="293"/>
-            <line x1="629" y1="293" x2="677" y2="293"/>
-            <line x1="869" y1="293" x2="917" y2="293"/>
-          </g>
-          <g font-size="10" font-family="IBM Plex Mono, monospace" fill="var(--ink-3)" text-anchor="middle">
-            <text x="413" y="285">кандид.</text>
-            <text x="653" y="285">оптимум</text>
-            <text x="893" y="285">кривая</text>
-          </g>
-          <g font-size="10.5" font-family="IBM Plex Mono, monospace" fill="var(--accent)" letter-spacing="1">
-            <text x="214" y="270">05</text><text x="454" y="270">06</text><text x="694" y="270">07</text>
-          </g>
-          <g font-size="13.5" fill="var(--ink)">
-            <text x="214" y="294">Генерация кандидатов</text>
-            <text x="454" y="294">Точная оптимизация</text>
-            <text x="694" y="294">Развёртка по n</text>
-            <text x="934" y="294">Раскладка и отчёт</text>
-          </g>
-          <g font-size="10.5" font-family="IBM Plex Mono, monospace" fill="var(--ink-3)">
-            <text x="214" y="318">linear_idea.py</text>
-            <text x="454" y="318">select_min_density…py</text>
-            <text x="694" y="318">work_fast.py · 16 проц.</text>
-            <text x="934" y="318">кривая + чертёж зон</text>
-          </g>
-
-          <rect x="20" y="250" width="126" height="86" fill="none" stroke="var(--accent)" stroke-dasharray="5 3"/>
-          <text x="83" y="286" text-anchor="middle" font-size="13.5" fill="var(--accent)">Инженер</text>
-          <text x="83" y="305" text-anchor="middle" font-size="10.5" fill="var(--accent)">приоритеты</text>
+          <rect x="20" y="330" width="1160" height="74" fill="none" stroke="var(--accent)" stroke-dasharray="5 3"/>
+          <text x="40" y="356" font-size="13.5" fill="var(--accent)">Параметры инженера</text>
+          <text x="40" y="376" font-size="10.5" font-family="IBM Plex Mono, monospace" fill="var(--ink-3)">блок «Пользовательские параметры» — один экран в начале расчёта</text>
           <g stroke="var(--accent)" fill="none" stroke-dasharray="5 3" marker-end="url(#ahA)">
-            <line x1="149" y1="293" x2="197" y2="293"/>
-            <path d="M83,336 L83,404 L533,404 L533,340"/>
-            <path d="M300,404 L773,404 L773,340"/>
+            <line x1="452" y1="328" x2="452" y2="292"/>
+            <line x1="748" y1="328" x2="748" y2="292"/>
+            <line x1="1044" y1="328" x2="1044" y2="292"/>
           </g>
-          <text x="83" y="426" font-size="10.5" font-family="IBM Plex Mono, monospace" fill="var(--accent)">min_w, holds[w] · densities[w] · n</text>
-          <text x="1106" y="426" text-anchor="end" font-size="10.5" font-family="IBM Plex Mono, monospace" fill="var(--ink-3)">алгоритм не меняется — меняются только числа</text>
+          <g font-size="10.5" font-family="IBM Plex Mono, monospace" fill="var(--accent)" text-anchor="middle">
+            <text x="452" y="396">stock, back_grid, max_lay</text>
+            <text x="748" y="396">min_w, anchor_k, N</text>
+            <text x="1044" y="396">min_bar_gap, max_snap</text>
+          </g>
+          <text x="1180" y="430" text-anchor="end" font-size="10.5" font-family="IBM Plex Mono, monospace" fill="var(--ink-3)">алгоритм не меняется — меняются только числа</text>
         </g>
       </svg>
-      <figcaption>Ступени 01–04 превращают картинку в проверяемое числовое поле; ступени 05–07 находят
-      на нём доказанный оптимум. Приоритеты инженера входят пунктирными связями и параметризуют
-      генерацию кандидатов, целевую функцию и число зон — но не сам метод решения.</figcaption>
+      <figcaption>Блок 01 превращает картинку в проверяемое числовое поле, блок 02 переводит
+      его в классы вашего сортамента, блок 03 находит доказанный оптимум, блок 04 доводит
+      зоны до реальных стержней и массы. Параметры инженера входят пунктиром в блоки 02–04
+      и не касаются метода решения.</figcaption>
       </figure>
     </div>
   </div>
@@ -427,37 +417,38 @@ table.scope td{color:var(--ink-2)}
 
 <!-- ══ 05 ═══════════════════════════════════════════════════════ -->
 <section class="slide reveal">
-  <div class="rail"><span>Ступень 01–02</span><b class="mono">05 / 16</b></div>
+  <div class="rail"><span>Блок 01</span><b class="mono">05 / 18</b></div>
   <div class="gutter"></div>
   <div class="sheet">
     <div class="eyebrow">Чтение LIRA-CAD</div>
-    <h2 class="title" style="font-size:2.7cqw">Цветовая шкала → числовое поле требований</h2>
+    <h2 class="title" style="font-size:2.7cqw">Цветовая шкала → площадь сечения в см²/м</h2>
     <div class="body">
       <div class="cols c-7-5" style="flex:1">
         <div>
           <ul class="list">
             <li><b>Легенда читается автоматически.</b> Из блока <span class="mono">KLEENKA</span>
             берутся образцы шкалы <span class="mono">COLORSCALE</span> и подписи-атрибуты,
-            сортируются по координате и связываются в соответствие «индекс цвета → число».</li>
+            сортируются по координате и связываются в соответствие «индекс цвета → A<sub>s</sub>».</li>
             <li><b>Поле собирается по граням.</b> Каждая грань <span class="mono">3DFACE</span>
-            слоя «клеёнки» получает численное требование через ту же таблицу — картинка
-            становится измеримой величиной.</li>
+            получает требуемую площадь сечения на погонный метр — картинка становится
+            измеримой инженерной величиной.</li>
             <li><b>Уровни разделяются, а не смешиваются.</b> Области группируются по уровню,
             объединяются и вычитаются сверху вниз: зона большего требования всегда
             перекрывает меньшую, наложений не остаётся.</li>
             <li><b>Отверстия сохраняются.</b> Внутренние контуры проходят через весь конвейер
             как защищённая топология и не могут схлопнуться при огрублении сетки.</li>
           </ul>
-          <p class="note"><b>Почему это важно.</b> Всё дальнейшее — арифметика над целыми
-          числами. Ни одна ступень ниже по потоку не работает с цветом, поэтому результат
-          воспроизводим и проверяем.</p>
+          <p class="note"><b>Почему это важно.</b> Всё дальнейшее — арифметика над числами
+          в физических единицах. Ни одна ступень ниже по потоку не работает с цветом,
+          поэтому результат воспроизводим и проверяем.</p>
         </div>
         <div style="display:flex;flex-direction:column;gap:1cqw">
           <div class="field" id="mini-field" style="grid-template-columns:repeat(20,1fr)"></div>
           <div class="card" style="background:transparent;border-style:dashed">
             <span class="tag">Проверка</span>
             <p>Реконструированное поле показывается инженеру поверх исходной подложки —
-            расхождение видно глазом до запуска оптимизации.</p>
+            расхождение видно глазом до запуска оптимизации. Неизвестная нагрузка,
+            не попавшая ни в один класс, останавливает расчёт с явной ошибкой.</p>
           </div>
         </div>
       </div>
@@ -467,7 +458,7 @@ table.scope td{color:var(--ink-2)}
 
 <!-- ══ 06 ═══════════════════════════════════════════════════════ -->
 <section class="slide reveal">
-  <div class="rail"><span>Ступень 03</span><b class="mono">06 / 16</b></div>
+  <div class="rail"><span>Блок 01</span><b class="mono">06 / 18</b></div>
   <div class="gutter"></div>
   <div class="sheet">
     <div class="eyebrow">Квантование сетки</div>
@@ -486,15 +477,16 @@ table.scope td{color:var(--ink-2)}
         <div class="card">
           <span class="tag">Жёсткие пределы</span>
           <h3>Линия не уходит далеко</h3>
-          <p>Сдвиг каждой линии ограничен долей от шага сетки, а защищённые пролёты
-          «оболочка → отверстие → оболочка» не могут быть склеены.</p>
+          <p>Сдвиг каждой линии ограничен долей шага сетки; защищённые пролёты
+          «оболочка → отверстие → оболочка» не склеиваются, а порядок уровней
+          нагрузки проверяется отдельно и не может нарушиться.</p>
           <span class="mono" style="font-size:.95cqw;color:var(--accent)">max_shift_fraction = 0.02</span>
         </div>
         <div class="card">
           <span class="tag">Метод</span>
           <h3>Точное динамическое программирование</h3>
-          <p>Разбиение координат на кластеры решается точным ДП по предвычисленным
-          стоимостям отрезков — это глобальный минимум, а не жадная склейка.</p>
+          <p>Разбиение координат на кластеры решается точным ДП — это глобальный минимум,
+          а не жадная склейка. Фронт по числу линий строится за один проход.</p>
           <span class="mono" style="font-size:.95cqw;color:var(--accent)">method = "exact"</span>
         </div>
       </div>
@@ -508,33 +500,87 @@ table.scope td{color:var(--ink-2)}
 
 <!-- ══ 07 ═══════════════════════════════════════════════════════ -->
 <section class="slide reveal">
-  <div class="rail"><span>Ступень 05</span><b class="mono">07 / 16</b></div>
+  <div class="rail"><span>Блок 02</span><b class="mono">07 / 18</b></div>
+  <div class="gutter"></div>
+  <div class="sheet">
+    <div class="eyebrow">Подбор классов из сортамента</div>
+    <h2 class="title" style="font-size:2.6cqw">Сортамент задаёт заказчик — движок перебирает его целиком</h2>
+    <div class="body" style="margin-top:1.4cqw">
+      <div class="cols c-5-7" style="flex:1">
+        <div style="display:flex;flex-direction:column;gap:1.1cqw">
+          <div class="formula" style="font-size:1.05cqw;line-height:1.75">
+<span># фоновая сетка — укладывается везде</span><br>
+back_grid = (<u>18</u>, <u>300</u>)<br><br>
+<span># сортамент добавочных слоёв</span><br>
+stock = [(18, 300), (20, 150), (20, 100),<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(25, 150), (25, 100)]<br><br>
+max_lay&nbsp; = <u>2</u>&nbsp;&nbsp;&nbsp;<span># слоёв поверх фона</span><br>
+anchor_k = <u>32</u>&nbsp;&nbsp;<span># анкеровка в диаметрах</span>
+          </div>
+          <p class="note" style="margin-top:0;padding-top:0"><b>Один экран настроек.</b>
+          Сменить сортамент — значит изменить один список. Ни модель, ни решатель
+          при этом не трогаются.</p>
+        </div>
+        <div>
+          <ul class="list tight">
+            <li><b>Классы считаются, а не задаются.</b> Диаметр и шаг дают площадь сечения
+            на погонный метр: Ø18@300 — это 8,5 см²/м, Ø20@150 — 20,9 см²/м. Раньше эти
+            числа вбивались руками, теперь выводятся из сортамента.</li>
+            <li><b>Перебираются все комбинации.</b> Фон плюс до двух добавочных слоёв —
+            в текущей конфигурации это <b>21 вариант</b> полного армирования
+            в диапазоне от 8,5 до 106,7 см²/м.</li>
+            <li><b>Для каждого требования берётся ближайший достаточный вариант.</b>
+            Не «примерно подходящий», а первый строго перекрывающий требование —
+            это гарантирует запас и исключает произвол.</li>
+            <li><b>Фон в оптимизацию не входит.</b> Он укладывается по всей плите
+            независимо от раскладки. Оптимизируется только добавочное армирование —
+            ровно то, на что можно повлиять.</li>
+            <li><b>Анкеровка выводится из диаметра.</b> 32d даёт 576 мм для Ø18,
+            640 мм для Ø20, 800 мм для Ø25. Эти длины дальше работают и как порог
+            сшивки зон, и как удлинение стержней в спецификации.</li>
+          </ul>
+        </div>
+      </div>
+      <p class="note"><b>Почему это важно для сметы.</b> Номенклатура перестаёт быть
+      следствием привычки конкретного инженера: движок обязан выбирать только из позиций,
+      которые вы реально закупаете, и обязан обосновать каждую выбранную позицию
+      требованием расчёта.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══ 08 ═══════════════════════════════════════════════════════ -->
+<section class="slide reveal">
+  <div class="rail"><span>Блок 03</span><b class="mono">08 / 18</b></div>
   <div class="gutter"></div>
   <div class="sheet">
     <div class="eyebrow">Генерация кандидатов</div>
     <h2 class="title" style="font-size:2.7cqw">Сокращение перебора — доказуемое, а не эвристическое</h2>
     <div class="body">
-      <div class="cols c-5-7" style="flex:1">
+      <div class="cols c-7-5" style="flex:1">
         <div>
-          <ul class="list">
+          <ul class="list tight">
             <li><b>Технология входит в перебор, а не проверяется потом.</b> Зона уже
             генерируется с соблюдением минимальной ширины и допустимого разрыва:
             недопустимых вариантов в задаче просто нет.</li>
-            <li><b>Разрыв перекрывается, если он короткий.</b> Два участка одного класса,
-            разделённые промежутком меньше порога, сшиваются в одну зону — сетку выгоднее
-            протянуть, чем резать и стыковать.</li>
+            <li><b>Разрыв короче анкеровки перекрывается.</b> Два участка одного класса,
+            разделённые промежутком меньше длины анкеровки, сшиваются в одну зону —
+            протянуть сетку дешевле, чем разрезать и заново заанкерить.</li>
+            <li><b>Составные классы раскладываются на слои.</b> Кандидат класса «фон +
+            два слоя» превращается в геометрии отдельных базовых сеток: выбирать
+            оптимизатор будет именно физически укладываемые слои.</li>
+            <li><b>Мозаика строится точно.</b> Кандидаты не удаляются эвристически:
+            геометрически одинаковые варианты разных классов не взаимозаменяемы,
+            и их сокращение испортило бы оптимум.</li>
             <li><b>Одинаковые профили считаются один раз.</b> Результат группировки
-            кэшируется по профилю столбцов, повторные вычисления исключены.</li>
-            <li><b>Пустые зоны отбрасываются сразу.</b> Кандидат, не покрывающий ни одной
-            требуемой ячейки, в задачу не попадает.</li>
+            кэшируется по профилю столбцов.</li>
           </ul>
         </div>
         <div style="display:flex;flex-direction:column;gap:1.2cqw">
           <div class="formula">
-<span># порог по классу — сколько миллиметров разрыва<br>
-# выгоднее перекрыть, чем разрезать сетку</span><br>
-holds = { <u>1</u>: 800, <u>2</u>: 900, <u>3</u>: 1000 }<br>
-min_w = 1000&nbsp;&nbsp;<span># мин. ширина зоны, мм</span>
+<span># порог сшивки = длина анкеровки класса</span><br>
+holds = { Ø18: <u>576</u>, Ø20: <u>640</u>, Ø25: <u>800</u> }<br>
+min_w = <u>1000</u>&nbsp;&nbsp;<span># мин. ширина зоны, мм</span>
           </div>
           <div class="card">
             <span class="tag">Что это даёт</span>
@@ -549,94 +595,244 @@ min_w = 1000&nbsp;&nbsp;<span># мин. ширина зоны, мм</span>
   </div>
 </section>
 
-<!-- ══ 08 ═══════════════════════════════════════════════════════ -->
+<!-- ══ 09 ═══════════════════════════════════════════════════════ -->
 <section class="slide reveal">
-  <div class="rail"><span>Ступень 06</span><b class="mono">08 / 16</b></div>
+  <div class="rail"><span>Блок 03</span><b class="mono">09 / 18</b></div>
   <div class="gutter"></div>
   <div class="sheet">
     <div class="eyebrow">Математическая модель</div>
-    <h2 class="title" style="font-size:2.7cqw">Взвешенное покрытие множества, решаемое до нуля разрыва</h2>
-    <div class="body">
+    <h2 class="title" style="font-size:2.6cqw">Многослойное покрытие: сколько слоёв требуется, столько и лежит</h2>
+    <div class="body" style="margin-top:1.4cqw">
       <div class="cols c-7-5" style="flex:1">
-        <div class="formula" style="font-size:1.22cqw">
-<span>минимизировать полную приведённую массу</span><br>
+        <div class="formula" style="font-size:1.18cqw">
+<span>минимизировать приведённую массу добавочных слоёв</span><br>
 min &nbsp; Σ<sub>r∈R</sub> &nbsp; <u>x</u><sub>r</sub> · S<sub>r</sub> · ρ<sub>w(r)</sub><br><br>
-<span>каждая требуемая ячейка накрыта зоной<br>
-достаточного класса</span><br>
-Σ &nbsp; <u>x</u><sub>r</sub> &nbsp;≥ 1 &nbsp;&nbsp;∀ c : q<sub>c</sub> &gt; 0<br>
-<span>&nbsp;&nbsp;&nbsp;r ∋ c, w(r) ≥ q<sub>c</sub></span><br><br>
+<span>для каждой ячейки и каждого порога t из её рецепта<br>
+покрывающих слоёв класса ≥ t должно быть не меньше,<br>
+чем требует рецепт</span><br>
+Σ &nbsp; <u>x</u><sub>r</sub> &nbsp;≥ k<sub>c</sub>(t) &nbsp;&nbsp;∀ c, ∀ t ∈ L<sub>c</sub><br>
+<span>&nbsp;&nbsp;&nbsp;r ∋ c, w(r) ≥ t</span><br><br>
 <span>опционально — строгое число зон</span><br>
-Σ<sub>r∈R</sub> &nbsp; <u>x</u><sub>r</sub> = n<br><br>
+Σ<sub>r∈R</sub> &nbsp; <u>x</u><sub>r</sub> = N<br><br>
 <u>x</u><sub>r</sub> ∈ {0, 1}
         </div>
         <div>
           <dl class="kv">
-            <dt>R</dt><dd>множество допустимых зон-кандидатов</dd>
+            <dt>R</dt><dd>допустимые зоны-кандидаты базовых классов</dd>
             <dt>x<sub>r</sub></dt><dd>зона выбрана или нет — единственные переменные задачи</dd>
-            <dt>S<sub>r</sub></dt><dd>физическая площадь зоны в реальных координатах</dd>
-            <dt>ρ<sub>w</sub></dt><dd>расход стали класса w — таблица заказчика</dd>
-            <dt>q<sub>c</sub></dt><dd>требуемый класс ячейки из расчёта LIRA</dd>
-            <dt>n</dt><dd>число зон, если инженер фиксирует его явно</dd>
+            <dt>S<sub>r</sub></dt><dd>физическая площадь зоны</dd>
+            <dt>ρ<sub>w</sub></dt><dd>площадь сечения класса w, см²/м — из сортамента</dd>
+            <dt>L<sub>c</sub></dt><dd>рецепт ячейки: набор слоёв, выбранный по требованию</dd>
+            <dt>k<sub>c</sub>(t)</dt><dd>сколько слоёв класса не ниже t требует рецепт</dd>
           </dl>
-          <p class="note"><b>Пересечения разрешены.</b> Зоны могут накладываться —
-          именно это соответствует реальной укладке сеток внахлёст. Ограничение
-          требует лишь, чтобы каждая ячейка была накрыта зоной класса не ниже требуемого:
-          занизить армирование модель не может по построению.</p>
+          <p class="note"><b>Что изменилось по сравнению с простым покрытием.</b>
+          Раньше достаточно было одной зоны на ячейку. Теперь ячейке, которой нужно
+          два слоя, должны соответствовать <u>две</u> реально уложенные сетки —
+          и это условие проверяется для каждого порога отдельно. Занизить армирование
+          модель не может по построению.</p>
         </div>
       </div>
-    </div>
-  </div>
-</section>
-
-<!-- ══ 09 ═══════════════════════════════════════════════════════ -->
-<section class="slide reveal">
-  <div class="rail"><span>Гарантия</span><b class="mono">09 / 16</b></div>
-  <div class="gutter"></div>
-  <div class="sheet">
-    <div class="eyebrow">Почему это гарантированный оптимум</div>
-    <h2 class="title" style="font-size:2.7cqw">Каждое сокращение задачи сохраняет оптимум — и это проверяется</h2>
-    <div class="body">
-      <div class="cols c2" style="flex:1;gap:2.2cqw">
-        <div>
-          <ul class="list tight">
-            <li><b>Свёртка доминируемых.</b> Из группы кандидатов с одинаковым покрытием
-            остаётся самый дешёвый — остальные не могут улучшить решение.</li>
-            <li><b>Отсечение бесполезных.</b> Кандидаты с нулевым полезным покрытием
-            только увеличивают положительную целевую функцию.</li>
-            <li><b>Итеративная фиксация.</b> Ячейка, покрываемая единственным кандидатом,
-            делает его обязательным; покрытия пересчитываются и шаг повторяется до
-            стабилизации.</li>
-            <li><b>Декомпозиция.</b> Независимые пятна разделяются на компоненты связности
-            и решаются отдельно — сумма их оптимумов и есть общий оптимум.</li>
-          </ul>
-        </div>
-        <div>
-          <ul class="list tight">
-            <li><b>Тёплый старт.</b> Жадное допустимое решение подаётся решателю как
-            начальное — на границы оптимума не влияет, только ускоряет доказательство.</li>
-            <li><b>Нулевой разрыв.</b> Решатель запускается с
-            <span class="mono">gapRel = 0</span> и <span class="mono">gapAbs = 0</span>:
-            он не останавливается на «достаточно хорошем» решении.</li>
-            <li><b>Явная проверка результата.</b> Режим
-            <span class="mono">require_optimal</span> возбуждает исключение, если
-            оптимальность не доказана. Недоказанное решение не выдаётся как ответ.</li>
-            <li><b>Доказательство недопустимости.</b> Если требования принципиально
-            невыполнимы при заданных ограничениях, система сообщает об этом и указывает
-            координаты непокрытых ячеек — а не выдаёт молча худший вариант.</li>
-          </ul>
-        </div>
-      </div>
-      <p class="note"><b>Что это значит для заказчика.</b> Фраза «раскладка оптимальна» —
-      не оценка, а результат, который система обязана доказать, иначе она отказывается
-      выдать ответ. Для тяжёлых плит предусмотрен резервный решатель и жёсткий лимит
-      времени с корректным снятием задачи.</p>
     </div>
   </div>
 </section>
 
 <!-- ══ 10 ═══════════════════════════════════════════════════════ -->
 <section class="slide reveal">
-  <div class="rail"><span>Управление</span><b class="mono">10 / 16</b></div>
+  <div class="rail"><span>Гарантия</span><b class="mono">10 / 18</b></div>
+  <div class="gutter"></div>
+  <div class="sheet">
+    <div class="eyebrow">Почему это гарантированный оптимум</div>
+    <h2 class="title" style="font-size:2.6cqw">Каждое сокращение задачи сохраняет оптимум — и это проверяется</h2>
+    <div class="body">
+      <div class="cols c2" style="flex:1;gap:2.2cqw">
+        <div>
+          <ul class="list tight">
+            <li><b>Свёртка доминируемых.</b> Из группы кандидатов с одинаковым покрытием
+            остаётся самый дешёвый — остальные не могут улучшить решение.</li>
+            <li><b>Итеративная фиксация.</b> Ячейка, покрываемая единственным кандидатом,
+            делает его обязательным; покрытия пересчитываются и шаг повторяется
+            до стабилизации.</li>
+            <li><b>Декомпозиция.</b> Независимые пятна разделяются на компоненты связности
+            и решаются отдельно — сумма их оптимумов и есть общий оптимум.</li>
+            <li><b>Нулевой разрыв.</b> Решатель работает с нулевым относительным
+            и абсолютным разрывом: он не останавливается на «достаточно хорошем» решении.</li>
+          </ul>
+        </div>
+        <div>
+          <ul class="list tight">
+            <li><b>Явная проверка результата.</b> Режим
+            <span class="mono">require_optimal</span> не даёт выдать недоказанное решение
+            за оптимум: либо доказательство, либо явно помеченный промежуточный результат.</li>
+            <li><b>Модель готовится один раз.</b> Вся часть задачи, не зависящая от числа
+            зон, считается однократно и переиспользуется для каждого N — вместе с кэшем
+            уже доказанных оптимумов и недопустимостей.</li>
+            <li><b>Тёплый старт между точками.</b> Решение для одного N подаётся стартовым
+            для соседнего: доказательство ускоряется, границы оптимума не меняются.</li>
+            <li><b>Промежуточные решения видны в реальном времени.</b> Улучшающиеся
+            решения стримятся наружу и сохраняются, поэтому долгий расчёт можно
+            прервать и продолжить с лучшего известного.</li>
+          </ul>
+        </div>
+      </div>
+      <p class="note"><b>Что это значит для заказчика.</b> Фраза «раскладка оптимальна» —
+      не оценка, а результат, который система обязана доказать. Два решателя на выбор
+      (HiGHS и CBC), жёсткие лимиты времени с корректным снятием задачи и структурный
+      отчёт вместо молчаливого худшего варианта.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══ 11 ═══════════════════════════════════════════════════════ -->
+<section class="slide reveal">
+  <div class="rail"><span>Блок 04</span><b class="mono">11 / 18</b></div>
+  <div class="gutter"></div>
+  <div class="sheet">
+    <div class="eyebrow">Постобработка раскладки</div>
+    <h2 class="title" style="font-size:2.6cqw">Все стержни плиты садятся на одну сетку</h2>
+    <div class="body" style="margin-top:1.2cqw">
+      <div class="cols c-7-5" style="flex:1">
+        <figure>
+          <svg viewBox="0 0 660 340" role="img" aria-label="Стык двух зон крупным планом. Сверху до привязки: зоны имеют независимые фазы, у границы просвет между крайними стержнями меньше допустимого. Снизу после привязки: правая зона сдвинута на общий модуль сетки, просвет стал равен шагу зоны.">
+            <defs>
+              <marker id="dim" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M2,2 L8,5 L2,8 z" fill="context-stroke"/>
+              </marker>
+            </defs>
+            <g font-family="IBM Plex Mono, monospace" font-size="10.5">
+
+              <text x="14" y="16" fill="var(--ink-2)" font-size="11.5">ДО — фазы зон независимы</text>
+              <rect x="60" y="34" width="212" height="76" fill="var(--accent-soft)" stroke="var(--accent)"/>
+              <rect x="272" y="34" width="316" height="76" fill="none" stroke="var(--ink-3)" stroke-dasharray="4 3"/>
+              <g stroke="var(--accent)" stroke-width="2.5">
+                <line x1="80" y1="40" x2="80" y2="104"/><line x1="140" y1="40" x2="140" y2="104"/>
+                <line x1="200" y1="40" x2="200" y2="104"/><line x1="260" y1="40" x2="260" y2="104"/>
+              </g>
+              <g stroke="var(--ink-2)" stroke-width="2.5">
+                <line x1="272" y1="40" x2="272" y2="104"/><line x1="392" y1="40" x2="392" y2="104"/>
+                <line x1="512" y1="40" x2="512" y2="104"/>
+              </g>
+              <g stroke="var(--crit)" stroke-width="1.6" marker-start="url(#dim)" marker-end="url(#dim)">
+                <line x1="260" y1="126" x2="272" y2="126"/>
+              </g>
+              <text x="284" y="124" fill="var(--crit)">просвет 30 мм</text>
+              <text x="284" y="138" fill="var(--crit)">— меньше допустимых 50</text>
+              <text x="60" y="152" fill="var(--ink-3)">зона A · Ø20@150</text>
+              <text x="380" y="152" fill="var(--ink-3)">зона B · Ø18@300</text>
+
+
+              <text x="14" y="210" fill="var(--ink-2)" font-size="11.5">ПОСЛЕ — общий модуль сетки 150 мм</text>
+              <g stroke="var(--rule-soft)">
+                <line x1="80" y1="216" x2="80" y2="304"/><line x1="140" y1="216" x2="140" y2="304"/>
+                <line x1="200" y1="216" x2="200" y2="304"/><line x1="260" y1="216" x2="260" y2="304"/>
+                <line x1="320" y1="216" x2="320" y2="304"/><line x1="380" y1="216" x2="380" y2="304"/>
+                <line x1="440" y1="216" x2="440" y2="304"/><line x1="500" y1="216" x2="500" y2="304"/>
+                <line x1="560" y1="216" x2="560" y2="304"/><line x1="620" y1="216" x2="620" y2="304"/>
+              </g>
+              <rect x="60" y="224" width="212" height="76" fill="var(--accent-soft)" stroke="var(--accent)"/>
+              <rect x="308" y="224" width="328" height="76" fill="none" stroke="var(--ink-3)" stroke-dasharray="4 3"/>
+              <g stroke="var(--accent)" stroke-width="2.5">
+                <line x1="80" y1="230" x2="80" y2="294"/><line x1="140" y1="230" x2="140" y2="294"/>
+                <line x1="200" y1="230" x2="200" y2="294"/><line x1="260" y1="230" x2="260" y2="294"/>
+              </g>
+              <g stroke="var(--ink-2)" stroke-width="2.5">
+                <line x1="320" y1="230" x2="320" y2="294"/><line x1="440" y1="230" x2="440" y2="294"/>
+                <line x1="560" y1="230" x2="560" y2="294"/>
+              </g>
+              <g stroke="var(--good)" stroke-width="1.6" marker-start="url(#dim)" marker-end="url(#dim)">
+                <line x1="260" y1="316" x2="320" y2="316"/>
+              </g>
+              <text x="332" y="314" fill="var(--good)">просвет 150 мм</text>
+              <text x="332" y="328" fill="var(--good)">— равен шагу зоны A</text>
+
+              <path d="M588,164 L588,186 L636,186 L636,218" fill="none" stroke="var(--crit)"
+                    stroke-dasharray="4 3" marker-end="url(#dim)"/>
+              <text x="576" y="182" text-anchor="end" fill="var(--crit)" font-size="10">зона B целиком сдвинута на модуль</text>
+            </g>
+          </svg>
+          <figcaption>Схема механизма. Зоны сдвигаются и подрезаются так, чтобы стержни
+          всех зон легли на один модуль, а границы соседних зон дали проектный зазор.</figcaption>
+        </figure>
+        <div>
+          <ul class="list tight">
+            <li><b>Единый модуль на всю плиту.</b> Шаги разных классов сводятся к общему
+            модулю, и фазы зон согласуются между собой — на объекте это одна разметка,
+            а не пять несогласованных.</li>
+            <li><b>Зазор между стержнями гарантирован.</b> Минимальный просвет задаётся
+            числом и проверяется: тройных стержней в одной точке и слипшихся пар
+            в результате не остаётся.</li>
+            <li><b>Контакты зон нормируются.</b> Между соседними зонами одного класса
+            выдерживается зазор, равный шагу — стык читается как продолжение сетки.</li>
+            <li><b>Покрытие перепроверяется после сдвигов.</b> Зона может быть сдвинута
+            или подрезана только если требования по-прежнему выполнены.</li>
+            <li><b>Все послабления перечислены явно.</b> Если геометрия вынудила ослабить
+            правило у края плиты, это попадает в отчёт, а не растворяется в результате.</li>
+          </ul>
+        </div>
+      </div>
+      <p class="note"><b>Это и есть трудоёмкость монтажа в явном виде.</b> Разметка одна
+      на всю плиту, стержни не сходятся ближе допустимого, стыки зон читаются как
+      продолжение сетки — то, что на объекте определяет скорость вязки и число ошибок.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══ 12 ═══════════════════════════════════════════════════════ -->
+<section class="slide reveal">
+  <div class="rail"><span>Блок 04</span><b class="mono">12 / 18</b></div>
+  <div class="gutter"></div>
+  <div class="sheet">
+    <div class="eyebrow">Спецификация и масса</div>
+    <h2 class="title" style="font-size:2.6cqw">На выходе — килограммы, а не условные единицы</h2>
+    <p class="lede">Целевая функция оптимизации пропорциональна массе. Фактическая масса
+    считается после раскладки — по реальным стержням и реальной анкеровке.</p>
+    <div class="body" style="margin-top:1.6cqw">
+      <div class="cols c-7-5" style="flex:1;gap:2cqw">
+        <div>
+          <table class="scope" style="font-size:1cqw">
+            <thead><tr><th>По каждой зоне</th><th>Что это</th></tr></thead>
+            <tbody>
+              <tr><td>Диаметр и шаг</td><td>класс, подобранный из вашего сортамента</td></tr>
+              <tr><td>Габариты зоны</td><td>ширина и длина после привязки к сетке</td></tr>
+              <tr><td>Прямоугольник зоны</td><td>исходный, финальный и финальный с анкеровкой</td></tr>
+              <tr><td>Число стержней</td><td>фактическое, по построенной сетке</td></tr>
+              <tr><td>Координаты стержней</td><td>каждый стержень отдельно, с анкеровкой и без</td></tr>
+              <tr><td>Масса зоны</td><td>кг, с анкеровкой и без неё</td></tr>
+            </tbody>
+          </table>
+          <p class="note" style="padding-top:1.4cqw"><b>Анкеровка обрезается по плите.</b>
+          Стержень удлиняется на длину анкеровки, но не выходит за фактический контур
+          перекрытия: удлинение подрезается по объединению исходных полигонов. Масса
+          анкеровки — не оценка сверху, а посчитанная величина.</p>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:1cqw">
+          <span class="tag" style="color:var(--accent)">По плите целиком</span>
+          <div class="metric" style="padding:1cqw 1.2cqw;gap:.3cqw">
+            <h3 style="font-size:1.2cqw">Масса без анкеровки</h3>
+            <small>чистая длина уложенных стержней</small>
+          </div>
+          <div class="metric" style="padding:1cqw 1.2cqw;gap:.3cqw">
+            <h3 style="font-size:1.2cqw">Масса с анкеровкой</h3>
+            <small>с удлинением 32d, подрезанным по контуру плиты</small>
+          </div>
+          <div class="metric" style="padding:1cqw 1.2cqw;gap:.3cqw">
+            <h3 style="font-size:1.2cqw">Масса анкеровки</h3>
+            <small>разность — отдельной строкой, а не внутри общей цифры</small>
+          </div>
+          <div class="metric" style="padding:1cqw 1.2cqw;gap:.3cqw;background:transparent;border-style:dashed">
+            <h3 style="font-size:1.2cqw">Число зон и предупреждения</h3>
+            <small>всё, что пришлось ослабить, перечислено явно</small>
+          </div>
+          <p class="note" style="padding-top:.6cqw;margin-top:0">Плотность стали
+          7850 кг/м³, все координаты в миллиметрах.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  </section>
+
+<!-- ══ 13 ═══════════════════════════════════════════════════════ -->
+<section class="slide reveal">
+  <div class="rail"><span>Управление</span><b class="mono">13 / 18</b></div>
   <div class="gutter"></div>
   <div class="sheet">
     <div class="eyebrow">Контроль остаётся у инженера</div>
@@ -645,33 +841,37 @@ min &nbsp; Σ<sub>r∈R</sub> &nbsp; <u>x</u><sub>r</sub> · S<sub>r</sub> · ρ
       <div class="cols c3" style="flex:1">
         <div class="card">
           <span class="tag">Если важнее сталь</span>
-          <h3>Больше зон, точнее посадка</h3>
-          <p>Инженер разрешает большее число зон и уточняет таблицу расхода. Раскладка
-          плотнее облегает поле требований, масса падает.</p>
+          <h3>Больше зон, богаче сортамент</h3>
+          <p>Инженер разрешает большее число зон и добавляет позиции в сортамент.
+          Раскладка плотнее облегает поле требований, масса падает.</p>
+          <span class="mono" style="font-size:.95cqw;color:var(--accent)">N ↑, stock ↑</span>
         </div>
         <div class="card">
           <span class="tag">Если важнее номенклатура</span>
-          <h3>Меньше зон, крупнее карты</h3>
-          <p>Число зон фиксируется жёстко. Система находит лучшую раскладку именно при
-          этом количестве — и честно показывает, во сколько тонн это обошлось.</p>
+          <h3>Меньше зон, короче сортамент</h3>
+          <p>Число зон фиксируется жёстко, список позиций сокращается. Система находит
+          лучшую раскладку именно при этих условиях и показывает, во сколько
+          килограммов это обошлось.</p>
+          <span class="mono" style="font-size:.95cqw;color:var(--accent)">N ↓, max_lay ↓</span>
         </div>
         <div class="card">
           <span class="tag">Если важнее монтаж</span>
-          <h3>Шире зоны, меньше стыков</h3>
-          <p>Растут минимальная ширина и допустимый разрыв. Мелкие карты и лишние
-          стыки исчезают из решения на этапе генерации.</p>
+          <h3>Шире зоны, свободнее сетка</h3>
+          <p>Растут минимальная ширина зоны и минимальный зазор между стержнями.
+          Мелкие карты и тесные стыки исчезают из решения.</p>
+          <span class="mono" style="font-size:.95cqw;color:var(--accent)">min_w ↑, min_bar_gap ↑</span>
         </div>
       </div>
       <p class="note"><b>Ни один из этих сценариев не требует переработки алгоритма.</b>
-      Это три набора чисел в одной и той же модели — и три разные точки на одной и той же
-      кривой компромисса.</p>
+      Это три набора чисел в одном и том же блоке пользовательских параметров —
+      и три разные точки на одной и той же кривой компромисса.</p>
     </div>
   </div>
 </section>
 
-<!-- ══ 11 ═══════════════════════════════════════════════════════ -->
+<!-- ══ 14 ═══════════════════════════════════════════════════════ -->
 <section class="slide reveal">
-  <div class="rail"><span>Результат</span><b class="mono">11 / 16</b></div>
+  <div class="rail"><span>Результат</span><b class="mono">14 / 18</b></div>
   <div class="gutter"></div>
   <div class="sheet">
     <div class="eyebrow">Кривая компромисса</div>
@@ -703,8 +903,8 @@ min &nbsp; Σ<sub>r∈R</sub> &nbsp; <u>x</u><sub>r</sub> · S<sub>r</sub> · ρ
               <text x="404" y="164" fill="var(--ink-3)" font-size="10">лёгкая раскладка,</text>
               <text x="404" y="178" fill="var(--ink-3)" font-size="10">дорогая номенклатура</text>
 
-              <text x="341" y="362" text-anchor="middle" fill="var(--ink-2)" font-size="12">число зон n</text>
-              <text x="26" y="185" fill="var(--ink-2)" font-size="12" transform="rotate(-90 26 185)" text-anchor="middle">масса стали</text>
+              <text x="341" y="362" text-anchor="middle" fill="var(--ink-2)" font-size="12">число зон N</text>
+              <text x="26" y="185" fill="var(--ink-2)" font-size="12" transform="rotate(-90 26 185)" text-anchor="middle">масса стали, кг</text>
             </g>
           </svg>
           <figcaption>Схема формы кривой. Каждая точка — отдельная задача, решённая до
@@ -712,11 +912,11 @@ min &nbsp; Σ<sub>r∈R</sub> &nbsp; <u>x</u><sub>r</sub> · S<sub>r</sub> · ρ
         </figure>
         <div>
           <ul class="list tight">
-            <li><b>Точки считаются параллельно.</b> Развёртка по числу зон идёт в
-            16 процессах с жёстким лимитом времени на задачу — вся кривая получается
-            за один проход.</li>
+            <li><b>Модель готовится один раз.</b> Всё, что не зависит от числа зон,
+            считается однократно, поэтому каждая следующая точка кривой обходится
+            заметно дешевле первой.</li>
             <li><b>Выбор делает инженер.</b> Система не решает за него, где на кривой
-            правильная точка: она показывает цену каждого варианта в тоннах и зонах.</li>
+            правильная точка: она показывает цену каждого варианта в килограммах и зонах.</li>
             <li><b>Перегиб виден.</b> Обычно есть участок, после которого рост числа зон
             почти не даёт экономии стали — это и есть рабочая область.</li>
             <li><b>Каждая точка — доказанный оптимум.</b> Кривая ограничивает область
@@ -731,9 +931,9 @@ min &nbsp; Σ<sub>r∈R</sub> &nbsp; <u>x</u><sub>r</sub> · S<sub>r</sub> · ρ
   </div>
 </section>
 
-<!-- ══ 12 · МЕТРИКИ ════════════════════════════════════════════ -->
+<!-- ══ 15 · МЕТРИКИ ════════════════════════════════════════════ -->
 <section class="slide reveal">
-  <div class="rail"><span>Экономика</span><b class="mono">12 / 16</b></div>
+  <div class="rail"><span>Экономика</span><b class="mono">15 / 18</b></div>
   <div class="gutter"></div>
   <div class="sheet">
     <div class="eyebrow">Метрики эффекта</div>
@@ -756,7 +956,8 @@ min &nbsp; Σ<sub>r∈R</sub> &nbsp; <u>x</u><sub>r</sub> · S<sub>r</sub> · ρ
           <small style="color:var(--ink-3)">ч/год — высвобождается с раскладки</small>
           <div class="big" style="font-size:1.7cqw" id="m-per-task">—</div>
           <small>ч на одну задачу вместо <span class="mono" id="m-h-manual">—</span> ч.
-          Расчёт движка — минуты: вся кривая считается в 16 процессов за один проход.</small>
+          Расчёт движка — минуты: модель готовится один раз, точки кривой считаются
+          параллельно и с тёплым стартом.</small>
         </div>
         <div class="metric">
           <span class="tag">03 · Материал</span>
@@ -765,7 +966,7 @@ min &nbsp; Σ<sub>r∈R</sub> &nbsp; <u>x</u><sub>r</sub> · S<sub>r</sub> · ρ
           <small style="color:var(--ink-3)">т/год — разница с доказанным оптимумом</small>
           <div class="big" style="font-size:1.7cqw" id="m-steel-rub">—</div>
           <small>₽/год. Это <u>нижняя оценка</u>: раскладки лучше оптимума не существует,
-          поэтому перерасход измеряется точно.</small>
+          поэтому перерасход измеряется точно — по спецификации, в килограммах.</small>
         </div>
       </div>
 
@@ -789,14 +990,14 @@ min &nbsp; Σ<sub>r∈R</sub> &nbsp; <u>x</u><sub>r</sub> · S<sub>r</sub> · ρ
       <p class="note" style="padding-top:.9cqw"><b>Значения в полях — заглушки, а не измерения.</b>
       Подставьте фактические данные А101 — карточки пересчитаются. Единственная величина,
       которую нельзя оценить со стороны, — перерасход против оптимума: он измеряется
-      на пилоте прямым сравнением текущей раскладки с найденным оптимумом.</p>
+      на пилоте прямым сравнением текущей раскладки с найденной спецификацией.</p>
     </div>
   </div>
 </section>
 
-<!-- ══ 13 ═══════════════════════════════════════════════════════ -->
+<!-- ══ 16 ═══════════════════════════════════════════════════════ -->
 <section class="slide reveal">
-  <div class="rail"><span>Экономика</span><b class="mono">13 / 16</b></div>
+  <div class="rail"><span>Экономика</span><b class="mono">16 / 18</b></div>
   <div class="gutter"></div>
   <div class="sheet">
     <div class="eyebrow">Как считаются метрики</div>
@@ -822,11 +1023,10 @@ min &nbsp; Σ<sub>r∈R</sub> &nbsp; <u>x</u><sub>r</sub> · S<sub>r</sub> · ρ
             раскладки, стоимость инженера, текущая масса арматуры и цена с монтажом.
             Это данные А101, мы их не оцениваем.</li>
             <li><b>Что измеряется на пилоте:</b> перерасход против оптимума и часы
-            на проверку результата. Обе величины получаются из прямого сравнения на
-            ваших реальных плитах.</li>
-            <li><b>Что известно из системы:</b> время расчёта. Полная кривая компромисса
-            считается за один параллельный проход с жёстким лимитом на задачу —
-            это минуты, а не часы.</li>
+            на проверку результата. Перерасход считается по спецификации — сравниваются
+            килограммы, а не проценты «на глаз».</li>
+            <li><b>Что известно из системы:</b> время расчёта. Модель готовится один раз,
+            точки кривой считаются параллельно и с тёплым стартом — это минуты, а не часы.</li>
             <li><b>Чего мы не обещаем:</b> экономии там, где текущая раскладка уже близка
             к оптимуму. Пилот покажет реальный зазор — в том числе если он мал.</li>
           </ul>
@@ -836,21 +1036,21 @@ min &nbsp; Σ<sub>r∈R</sub> &nbsp; <u>x</u><sub>r</sub> · S<sub>r</sub> · ρ
   </div>
 </section>
 
-<!-- ══ 14 · СТАНДАРТ И ОПЦИИ ═══════════════════════════════════ -->
+<!-- ══ 17 · СТАНДАРТ И ОПЦИИ ═══════════════════════════════════ -->
 <section class="slide reveal">
-  <div class="rail"><span>Состав поставки</span><b class="mono">14 / 16</b></div>
+  <div class="rail"><span>Состав поставки</span><b class="mono">17 / 18</b></div>
   <div class="gutter"></div>
   <div class="sheet">
     <div class="eyebrow">Что входит в стандарт, что — опция</div>
     <h2 class="title" style="font-size:2.5cqw">Стандартная поставка и опции</h2>
     <div class="body" style="margin-top:1.2cqw">
-      <div style="flex:1;overflow-y:auto">
+      <div style="flex:1">
       <table class="scope">
         <thead><tr><th>Блок</th><th>Стандарт</th><th>Опция</th></tr></thead>
         <tbody>
           <tr>
             <td>Ввод данных</td>
-            <td><span class="pill std">вкл.</span> DXF из LIRA-CAD, чтение цветовой шкалы и легенды, реконструкция числового поля</td>
+            <td><span class="pill std">вкл.</span> DXF из LIRA-CAD, чтение цветовой шкалы, реконструкция поля A<sub>s</sub></td>
             <td><span class="pill opt">опц.</span> Другие расчётные комплексы, обмен с Revit / IFC, подложки нестандартного оформления</td>
           </tr>
           <tr>
@@ -859,28 +1059,33 @@ min &nbsp; Σ<sub>r∈R</sub> &nbsp; <u>x</u><sub>r</sub> · S<sub>r</sub> · ρ
             <td><span class="pill opt">опц.</span> Непрямоугольные зоны — Г-образные и полигональные карты</td>
           </tr>
           <tr>
+            <td>Сортамент и классы</td>
+            <td><span class="pill std">вкл.</span> Ваш каталог сеток и фон, перебор комбинаций слоёв, класс на каждое требование, анкеровка из диаметра</td>
+            <td><span class="pill opt">опц.</span> Разные сортаменты по секциям, ограничения поставщика и складских остатков</td>
+          </tr>
+          <tr>
             <td>Оптимизация</td>
-            <td><span class="pill std">вкл.</span> Точное решение с доказательством оптимальности, оба направления и слоя, вся кривая</td>
+            <td><span class="pill std">вкл.</span> Точное решение с доказательством оптимальности, два решателя, оба направления и слоя, вся кривая</td>
             <td><span class="pill opt">опц.</span> Коммерческий решатель для тяжёлых плит, унификация раскладки между этажами и секциями</td>
           </tr>
           <tr>
-            <td>Модель стоимости</td>
-            <td><span class="pill std">вкл.</span> Таблица расхода по классам, минимальная ширина зоны, пороги перекрытия разрывов</td>
+            <td>Раскладка стержней</td>
+            <td><span class="pill std">вкл.</span> Единая сетка на всю плиту, зазоры и фазы, контакты зон, перепроверка покрытия</td>
             <td><span class="pill opt">опц.</span> Явная модель трудоёмкости — нахлёсты, стыки, крановые операции — в целевой функции</td>
           </tr>
           <tr>
-            <td>Номенклатура</td>
-            <td><span class="pill std">вкл.</span> Число зон как управляемый параметр, состав раскладки по классам</td>
-            <td><span class="pill opt">опц.</span> Привязка к каталогу типоразмеров сеток, минимизация числа различных позиций</td>
+            <td>Спецификация</td>
+            <td><span class="pill std">вкл.</span> Масса в кг с анкеровкой и без, диаметр, шаг, число и координаты стержней по зонам</td>
+            <td><span class="pill opt">опц.</span> Выгрузка в Excel / 1С, привязка к сметным расценкам, ведомость расхода по этажам</td>
           </tr>
           <tr>
             <td>Выдача</td>
-            <td><span class="pill std">вкл.</span> Чертёж зон поверх поля требований, проверка покрытия, сводка «масса / число зон»</td>
-            <td><span class="pill opt">опц.</span> Обратная запись в DXF, оформление листов КЖ, спецификация в Excel / 1С, выгрузка в смету</td>
+            <td><span class="pill std">вкл.</span> Чертёж зон поверх поля требований, отчёт о послаблениях, сводка по точкам кривой</td>
+            <td><span class="pill opt">опц.</span> Обратная запись в DXF, оформление листов КЖ, размерные цепочки</td>
           </tr>
           <tr>
             <td>Запуск</td>
-            <td><span class="pill std">вкл.</span> Пакетный расчёт, параллельное исполнение, лимиты времени, диагностика невыполнимых требований</td>
+            <td><span class="pill std">вкл.</span> Пакетный расчёт, параллельное исполнение, лимиты времени, промежуточные решения, диагностика невыполнимых требований</td>
             <td><span class="pill opt">опц.</span> Веб-интерфейс, плагин к рабочему месту, расчёт всего дома одной постановкой</td>
           </tr>
           <tr>
@@ -891,83 +1096,51 @@ min &nbsp; Σ<sub>r∈R</sub> &nbsp; <u>x</u><sub>r</sub> · S<sub>r</sub> · ρ
         </tbody>
       </table>
       </div>
-      <p class="note" style="padding-top:.8cqw"><b>Ядро поставляется целиком.</b> В стандарт входит всё,
-      что нужно, чтобы получить и проверить оптимальную раскладку. В опции вынесено то, что
-      зависит от вашего контура: интеграции, оформление документации и расширения модели
-      стоимости под конкретную практику производства работ.</p>
+      <p class="note" style="padding-top:.7cqw"><b>Ядро поставляется целиком.</b> В стандарт входит всё,
+      что нужно, чтобы получить оптимальную раскладку, довести её до стержней и посчитать
+      массу. В опции вынесено то, что зависит от вашего контура: интеграции, оформление
+      документации и расширения модели стоимости.</p>
     </div>
   </div>
 </section>
 
-<!-- ══ 15 ═══════════════════════════════════════════════════════ -->
+<!-- ══ 18 ═══════════════════════════════════════════════════════ -->
 <section class="slide reveal">
-  <div class="rail"><span>Внедрение</span><b class="mono">15 / 16</b></div>
+  <div class="rail"><span>Следующий шаг</span><b class="mono">18 / 18</b></div>
   <div class="gutter"></div>
   <div class="sheet">
-    <div class="eyebrow">Что нужно для запуска</div>
-    <h2 class="title" style="font-size:2.7cqw">Требования к контуру — минимальные</h2>
-    <div class="body">
+    <div class="eyebrow">Внедрение и пилот</div>
+    <h2 class="title" style="font-size:2.7cqw">Пилот на ваших плитах — с измеримым результатом</h2>
+    <p class="lede">Мы берём несколько реальных перекрытий, прогоняем их через движок
+    и кладём спецификацию рядом с вашей текущей раскладкой. Дальше разговор идёт
+    о конкретных килограммах и часах, а не о принципе.</p>
+    <div class="body" style="margin-top:1.4cqw">
       <div class="cols c3" style="flex:1">
         <div class="card">
-          <span class="tag">От заказчика</span>
-          <h3>Данные</h3>
-          <p>Выгрузки DXF из LIRA-CAD по нескольким реальным плитам, текущие раскладки
-          для сравнения и таблица расхода стали по классам.</p>
+          <span class="tag">Этап 01 · от вас</span>
+          <h3>Данные и сортамент</h3>
+          <p>Выгрузки DXF по нескольким реальным плитам, текущие раскладки для сравнения,
+          ваш каталог сеток и фоновая сетка. Проверяем, что реконструированное поле
+          совпадает с исходной картой требований.</p>
         </div>
         <div class="card">
-          <span class="tag">Технически</span>
-          <h3>Обычная рабочая станция</h3>
-          <p>Python-конвейер с открытым решателем. Многоядерность ускоряет построение
-          кривой, но не является обязательной. Внешние сервисы не требуются.</p>
+          <span class="tag">Этап 02 · калибровка</span>
+          <h3>Под вашу практику</h3>
+          <p>Заносим минимальную ширину зоны, коэффициент анкеровки, минимальный зазор
+          между стержнями и число слоёв. Обычная рабочая станция, открытый решатель,
+          внешние сервисы не нужны.</p>
         </div>
         <div class="card">
-          <span class="tag">Организационно</span>
-          <h3>Один инженер-владелец</h3>
-          <p>Нужен специалист, который принимает решение по точке на кривой и отвечает
-          за таблицу расхода. Это роль, а не отдельная штатная единица.</p>
+          <span class="tag">Этап 03 · результат</span>
+          <h3>Килограммы и часы</h3>
+          <p>Кривая компромисса по каждой плите, спецификация по зонам и прямое
+          сопоставление с текущей раскладкой в килограммах.</p>
         </div>
       </div>
       <p class="note"><b>Что мы сознательно не автоматизируем.</b> Выбор точки на кривой
-      компромисса и утверждение раскладки остаются за инженером. Система обязана
-      обосновать любой предложенный вариант, а не заменить собой ответственное решение.</p>
-    </div>
-  </div>
-</section>
-
-<!-- ══ 16 ═══════════════════════════════════════════════════════ -->
-<section class="slide reveal">
-  <div class="rail"><span>Следующий шаг</span><b class="mono">16 / 16</b></div>
-  <div class="gutter"></div>
-  <div class="sheet">
-    <div class="eyebrow">Предложение</div>
-    <h2 class="title">Пилот на ваших плитах — с измеримым результатом</h2>
-    <p class="lede">Мы берём несколько реальных перекрытий, прогоняем их через движок
-    и кладём рядом с вашей текущей раскладкой. Дальше разговор идёт о конкретных
-    тоннах и часах, а не о принципе.</p>
-    <div class="body">
-      <div class="cols c3" style="flex:1">
-        <div class="card">
-          <span class="tag">Этап 01</span>
-          <h3>Приёмка данных</h3>
-          <p>Проверяем чтение ваших выгрузок и совпадение реконструированного поля
-          с исходной картой требований.</p>
-        </div>
-        <div class="card">
-          <span class="tag">Этап 02</span>
-          <h3>Калибровка модели</h3>
-          <p>Заносим вашу таблицу расхода, минимальные ширины и пороги перекрытия
-          разрывов — под вашу практику производства работ.</p>
-        </div>
-        <div class="card">
-          <span class="tag">Этап 03</span>
-          <h3>Сравнение и цифры</h3>
-          <p>Кривая компромисса по каждой плите и прямое сопоставление с текущей
-          раскладкой: тонны, число зон, часы.</p>
-        </div>
-      </div>
-      <p class="note"><b>Результат пилота.</b> Заполненная таблица метрик из листа 12 —
-      с реальными числами А101 вместо заглушек. Решение о развёртывании принимается
-      уже по ней.</p>
+      и утверждение раскладки остаются за инженером — нужен один специалист-владелец,
+      это роль, а не отдельная штатная единица. Результат пилота — заполненная таблица
+      метрик из листа 15 с реальными числами А101 вместо заглушек.</p>
     </div>
   </div>
 </section>
@@ -976,7 +1149,7 @@ min &nbsp; Σ<sub>r∈R</sub> &nbsp; <u>x</u><sub>r</sub> · S<sub>r</sub> · ρ
 
 <nav class="nav" aria-label="Навигация по презентации">
   <button type="button" id="prev" aria-label="Предыдущий лист">←</button>
-  <span class="pos"><span id="cur">1</span>/16</span>
+  <span class="pos"><span id="cur">1</span>/18</span>
   <button type="button" id="next" aria-label="Следующий лист">→</button>
 </nav>
 
@@ -985,7 +1158,7 @@ min &nbsp; Σ<sub>r∈R</sub> &nbsp; <u>x</u><sub>r</sub> · S<sub>r</sub> · ρ
   "use strict";
 
   /* ── поле требований: детерминированная демонстрационная карта ──
-     Заменяется реальными данными прогона: матрица целых 0..4.        */
+     Заменяется реальными данными прогона: матрица классов 0..4.      */
   function buildField(cols, rows, zones){
     var m = [], y, x;
     for(y=0;y<rows;y++){ m.push(new Array(cols).fill(0)); }
@@ -1032,7 +1205,7 @@ min &nbsp; Σ<sub>r∈R</sub> &nbsp; <u>x</u><sub>r</sub> · S<sub>r</sub> · ρ
   ]));
 
   /* ── кривая компромисса ────────────────────────────────────────
-     ЗАМЕНИТЬ реальными точками прогона: [n, масса].
+     ЗАМЕНИТЬ реальными точками прогона: [N, масса].
      Ниже — схематическая форма, отмеченная на листе как схема.     */
   var PARETO = [[1,.98],[11,.62],[21,.41],[31,.30],[41,.25],[51,.22],[61,.205],[71,.197],[81,.193]];
   (function(){
@@ -1080,7 +1253,7 @@ min &nbsp; Σ<sub>r∈R</sub> &nbsp; <u>x</u><sub>r</sub> · S<sub>r</sub> · ρ
     set("m-steel-rub",  fmt0.format(steelRub));
     set("m-total",      fmt0.format(payroll + steelRub));
   }
-  Array.prototype.forEach.call(document.querySelectorAll("#inputs input, .inputs input"), function(i){
+  Array.prototype.forEach.call(document.querySelectorAll(".inputs input"), function(i){
     i.addEventListener("input", recalc);
   });
   recalc();
