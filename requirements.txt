@@ -1,0 +1,15 @@
+fastapi[standard]==0.128.2
+pydantic-settings>=2.10,<3
+redis[hiredis]>=6.2,<7
+zstandard>=0.23,<1
+numpy>=2.3,<2.5
+scipy>=1.17,<1.19
+shapely==2.1.2
+ezdxf==1.4.4
+highspy==1.15.1
+pulp>=3.2,<4
+python-multipart>=0.0.20,<1
+matplotlib>=3.11,<3.12
+numba>=0.66,<0.67
+psutil>=6,<8
+tqdm>=4.67,<5

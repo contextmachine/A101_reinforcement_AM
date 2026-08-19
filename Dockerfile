@@ -1,0 +1,27 @@
+FROM python:3.12-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    MPLBACKEND=Agg \
+    MPLCONFIGDIR=/tmp/matplotlib \
+    NUMBA_CACHE_DIR=/tmp/numba-cache \
+    XDG_CACHE_HOME=/tmp/.cache
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libgomp1 tini \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+COPY . .
+RUN useradd --create-home --uid 10001 appuser \
+    && mkdir -p /tmp/rebar-cache \
+    && chown -R appuser:appuser /app /tmp/rebar-cache
+USER appuser
+
+EXPOSE 8000
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["uvicorn", "rebar_service.api:app", "--host", "0.0.0.0", "--port", "8000"]

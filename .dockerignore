@@ -1,0 +1,15 @@
+.git
+.github
+__pycache__
+*.py[cod]
+.pytest_cache
+.venv
+.env
+*.pkl
+*.dxf
+results
+tests
+examples
+deploy
+README*.md
+*.zip
