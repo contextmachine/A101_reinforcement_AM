@@ -21,6 +21,8 @@ spec:
       labels: {app: rebar-redis}
     spec:
       terminationGracePeriodSeconds: 30
+      imagePullSecrets:
+        - name: ghcr-secret
       containers:
         - name: redis
           image: redis:8.2-alpine

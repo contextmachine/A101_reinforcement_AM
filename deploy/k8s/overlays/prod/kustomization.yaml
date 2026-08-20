@@ -7,6 +7,6 @@ resources:
   - worker-scaledobject.yaml
   - ingress.yaml
 images:
-  - name: ghcr.io/YOUR_ORG/YOUR_REPO
-    newName: ghcr.io/YOUR_ORG/YOUR_REPO
+  - name: ghcr.io/contextmachine/a101_reinforcement_am
+    newName: ghcr.io/contextmachine/a101_reinforcement_am
     newTag: latest

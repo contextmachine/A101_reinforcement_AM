@@ -15,11 +15,17 @@ spec:
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
-        seccompProfile: {type: RuntimeDefault}
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: ghcr-secret
       containers:
         - name: api
-          image: ghcr.io/YOUR_ORG/YOUR_REPO:latest
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/contextmachine/a101_reinforcement_am:latest
+          imagePullPolicy: Always
           envFrom:
             - configMapRef: {name: rebar-config}
             - secretRef: {name: rebar-secrets}

@@ -17,10 +17,11 @@ COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY . .
-RUN useradd --create-home --uid 10001 appuser \
+RUN useradd --create-home --uid 10001 --user-group appuser \
     && mkdir -p /tmp/rebar-cache \
     && chown -R appuser:appuser /app /tmp/rebar-cache
-USER appuser
+
+USER 10001:10001
 
 EXPOSE 8000
 ENTRYPOINT ["/usr/bin/tini", "--"]

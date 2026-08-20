@@ -19,11 +19,15 @@ spec:
       terminationGracePeriodSeconds: 21630
       securityContext:
         runAsNonRoot: true
-        seccompProfile: {type: RuntimeDefault}
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: worker
-          image: ghcr.io/YOUR_ORG/YOUR_REPO:latest
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/contextmachine/a101_reinforcement_am:latest
+          imagePullPolicy: Always
           command: ["python", "-m", "rebar_service.worker"]
           envFrom:
             - configMapRef: {name: rebar-config}
