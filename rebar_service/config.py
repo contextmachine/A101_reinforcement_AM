@@ -12,7 +12,6 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     redis_address: str = "localhost:6379"
     redis_password: str = ""
-    api_key: str = ""
 
     task_ttl_seconds: int = 2 * 24 * 3600
     event_maxlen: int = 10_000

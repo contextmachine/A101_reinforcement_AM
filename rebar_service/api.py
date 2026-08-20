@@ -7,14 +7,13 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 
 import redis.asyncio as aioredis
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from .auth import require_api_key, require_ws_key
 from .config import get_settings
 from .jsonutil import loads, to_jsonable
 from .models import CancelMutation, NMutation, TaskCreate, TaskCreated, TaskParameters, WsCommand
@@ -125,7 +124,7 @@ def ready():
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@app.post("/v1/tasks", response_model=TaskCreated, dependencies=[Depends(require_api_key)])
+@app.post("/v1/tasks", response_model=TaskCreated)
 async def create_task(request: TaskCreate):
     try:
         return await run_in_threadpool(
@@ -137,7 +136,7 @@ async def create_task(request: TaskCreate):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.post("/v1/tasks/upload", response_model=TaskCreated, dependencies=[Depends(require_api_key)])
+@app.post("/v1/tasks/upload", response_model=TaskCreated)
 async def create_task_upload(
     config: Annotated[str, Form()],
     file: Annotated[UploadFile, File()],
@@ -166,7 +165,7 @@ async def create_task_upload(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.get("/v1/tasks/{task_id}", dependencies=[Depends(require_api_key)])
+@app.get("/v1/tasks/{task_id}")
 async def get_task(task_id: str):
     snapshot = await run_in_threadpool(store.snapshot, task_id)
     if snapshot is None:
@@ -174,14 +173,14 @@ async def get_task(task_id: str):
     return JSONResponse(to_jsonable(snapshot))
 
 
-@app.get("/v1/tasks/{task_id}/results", dependencies=[Depends(require_api_key)])
+@app.get("/v1/tasks/{task_id}/results")
 async def list_results(task_id: str):
     if await run_in_threadpool(store.get_meta, task_id) is None:
         raise HTTPException(status_code=404, detail="Task not found")
     return JSONResponse(to_jsonable(await run_in_threadpool(store.get_result_metas, task_id)))
 
 
-@app.get("/v1/tasks/{task_id}/results/{n}", dependencies=[Depends(require_api_key)])
+@app.get("/v1/tasks/{task_id}/results/{n}")
 async def get_result(task_id: str, n: int):
     result = await run_in_threadpool(store.get_result, task_id, n)
     if result is None:
@@ -189,14 +188,14 @@ async def get_result(task_id: str, n: int):
     return JSONResponse(to_jsonable(result))
 
 
-@app.get("/v1/tasks/{task_id}/events", dependencies=[Depends(require_api_key)])
+@app.get("/v1/tasks/{task_id}/events")
 async def get_events(task_id: str, after: str = "0-0", count: int = 200):
     if await run_in_threadpool(store.get_meta, task_id) is None:
         raise HTTPException(status_code=404, detail="Task not found")
     return await run_in_threadpool(store.read_events, task_id, after, min(max(count, 1), 1000))
 
 
-@app.post("/v1/tasks/{task_id}/n", dependencies=[Depends(require_api_key)])
+@app.post("/v1/tasks/{task_id}/n")
 async def add_n(task_id: str, mutation: NMutation):
     ns = mutation.n if isinstance(mutation.n, list) else [mutation.n]
     try:
@@ -209,7 +208,7 @@ async def add_n(task_id: str, mutation: NMutation):
     return plan
 
 
-@app.post("/v1/tasks/{task_id}/cancel", dependencies=[Depends(require_api_key)])
+@app.post("/v1/tasks/{task_id}/cancel")
 async def cancel(task_id: str, mutation: CancelMutation):
     meta = await run_in_threadpool(store.get_meta, task_id)
     if meta is None:
@@ -233,7 +232,7 @@ def _set_paused(task_id: str, paused: bool) -> dict:
     return plan
 
 
-@app.post("/v1/tasks/{task_id}/pause", dependencies=[Depends(require_api_key)])
+@app.post("/v1/tasks/{task_id}/pause")
 async def pause_task(task_id: str):
     try:
         return await run_in_threadpool(_set_paused, task_id, True)
@@ -241,7 +240,7 @@ async def pause_task(task_id: str):
         raise HTTPException(status_code=404, detail="Task not found") from exc
 
 
-@app.post("/v1/tasks/{task_id}/resume", dependencies=[Depends(require_api_key)])
+@app.post("/v1/tasks/{task_id}/resume")
 async def resume_task(task_id: str):
     try:
         return await run_in_threadpool(_set_paused, task_id, False)
@@ -272,8 +271,7 @@ async def _ws_command(task_id: str, raw: dict) -> dict:
 
 
 @app.websocket("/v1/tasks/{task_id}/ws")
-async def task_websocket(websocket: WebSocket, task_id: str, token: str | None = None, after: str = "0-0"):
-    await require_ws_key(websocket, token)
+async def task_websocket(websocket: WebSocket, task_id: str, after: str = "0-0"):
     snapshot = await run_in_threadpool(store.snapshot, task_id)
     if snapshot is None:
         await websocket.close(code=4404)

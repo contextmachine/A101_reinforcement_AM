@@ -14,6 +14,8 @@ spec:
         app: rebar-worker
     spec:
       automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: ghcr-secret
       # Worker handles SIGTERM by finishing the current job and not claiming a new one.
       # Keep this >= REBAR_MAX_SOLVER_TIMEOUT_SECONDS + a small post-processing margin.
       terminationGracePeriodSeconds: 21630
@@ -24,8 +26,6 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
-      imagePullSecrets:
-        - name: ghcr-secret
       containers:
         - name: worker
           image: ghcr.io/contextmachine/a101_reinforcement_am:latest
