@@ -22,6 +22,8 @@ from .pipeline import normalize_input_payload
 from .planner import normalize_n_request, validate_n_request_limits, validate_solver_limits
 from .store import RedisStore
 from .dxf_export import DxfExportError, build_solution_dxf
+from .source_polygons import SourcePolygonsError, source_polygons_from_input
+
 
 settings = get_settings()
 store = RedisStore(settings)
@@ -174,6 +176,45 @@ async def get_task(task_id: str):
         raise HTTPException(status_code=404, detail="Task not found")
     return JSONResponse(to_jsonable(snapshot))
 
+@app.get("/v1/tasks/{task_id}/source-polygons")
+async def get_source_polygons(task_id: str):
+
+    if (
+        await run_in_threadpool(
+            store.get_meta,
+            task_id,
+        )
+        is None
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Task not found",
+        )
+
+    try:
+        source_input = await run_in_threadpool(
+            store.get_object,
+            task_id,
+            "input",
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Source input not found",
+        ) from exc
+
+    try:
+        polygons = await run_in_threadpool(
+            source_polygons_from_input,
+            source_input,
+        )
+    except SourcePolygonsError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+
+    return JSONResponse(polygons)
 
 @app.get("/v1/tasks/{task_id}/results")
 async def list_results(task_id: str):
