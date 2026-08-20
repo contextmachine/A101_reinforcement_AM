@@ -10,9 +10,10 @@ import redis.asyncio as aioredis
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
+from urllib.parse import quote
 
 from .config import get_settings
 from .jsonutil import loads, to_jsonable
@@ -20,6 +21,7 @@ from .models import CancelMutation, NMutation, TaskCreate, TaskCreated, TaskPara
 from .pipeline import normalize_input_payload
 from .planner import normalize_n_request, validate_n_request_limits, validate_solver_limits
 from .store import RedisStore
+from .dxf_export import DxfExportError, build_solution_dxf
 
 settings = get_settings()
 store = RedisStore(settings)
@@ -186,6 +188,63 @@ async def get_result(task_id: str, n: int):
     if result is None:
         raise HTTPException(status_code=404, detail="Result not found")
     return JSONResponse(to_jsonable(result))
+
+@app.get("/v1/tasks/{task_id}/results/{n}/dxf")
+async def get_result_dxf(task_id: str, n: int):
+    if await run_in_threadpool(store.get_meta, task_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Task not found",
+        )
+
+    result = await run_in_threadpool(
+        store.get_result,
+        task_id,
+        n,
+    )
+
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Result not found",
+        )
+
+    try:
+        source_input = await run_in_threadpool(
+            store.get_object,
+            task_id,
+            "input",
+        )
+
+        exported = await run_in_threadpool(
+            lambda: build_solution_dxf(
+                source_input,
+                result,
+                n=n,
+            )
+        )
+
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Source input not found",
+        ) from exc
+
+    except DxfExportError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+
+    return Response(
+        content=exported.content,
+        media_type="application/dxf",
+        headers={
+            "Content-Disposition":
+                "attachment; filename*=UTF-8''"
+                + quote(exported.filename)
+        },
+    )
 
 
 @app.get("/v1/tasks/{task_id}/events")
