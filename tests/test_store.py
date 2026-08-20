@@ -30,3 +30,10 @@ def test_result_rank_prefers_postprocessed_feasible_over_raw_incumbent():
     broken = {"is_feasible": False, "is_optimal": False, "total_cost": 80.0, "kind": "final", "postprocessed": True}
     assert RedisStore._result_rank(final) < RedisStore._result_rank(raw)
     assert RedisStore._result_rank(raw) < RedisStore._result_rank(broken)
+
+
+def test_store_tracks_total_outstanding_work_for_keda():
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] / "rebar_service/store.py").read_text(encoding="utf-8")
+    assert "lpush(self.settings.workload_queue, raw)" in source
+    assert "lrem(self.settings.workload_queue, 1, raw)" in source

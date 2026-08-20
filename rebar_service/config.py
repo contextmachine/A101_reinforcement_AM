@@ -25,12 +25,12 @@ class Settings(BaseSettings):
 
     ready_queue: str = "rebar:jobs:ready"
     processing_queue: str = "rebar:jobs:processing"
-    worker_idle_seconds: int = 300
+    workload_queue: str = "rebar:jobs:workload"
     worker_claim_timeout_seconds: int = 5
     job_lease_seconds: int = 90
     max_jobs_per_task: int = 4
     global_max_jobs: int = 32
-    schedule_window_factor: int = 2
+    schedule_window_factor: int = 1
 
     local_cache_dir: str = "/tmp/rebar-cache"
     local_cache_items: int = 3

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import socket
 import threading
 import time
@@ -273,10 +274,18 @@ def run_worker() -> None:
     store.ping()
     worker_id = f"{socket.gethostname()}-{os.getpid()}"
     cache = PreparedCache(settings.local_cache_dir, settings.local_cache_items)
-    last_activity = time.monotonic()
+    stop_event = threading.Event()
     last_reap = 0.0
 
-    while True:
+    def request_stop(_signum, _frame):
+        # KEDA/HPA may terminate any replica during scale-down. Do not claim
+        # new work after SIGTERM; an already running solve is allowed to finish.
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
+
+    while not stop_event.is_set():
         claimed = store.claim_job(worker_id, settings.worker_claim_timeout_seconds)
         if claimed is None:
             if time.monotonic() - last_reap >= 30:
@@ -285,10 +294,11 @@ def run_worker() -> None:
                 except Exception:
                     pass
                 last_reap = time.monotonic()
-            if time.monotonic() - last_activity >= settings.worker_idle_seconds:
-                return
             continue
         raw, job = claimed
+        if stop_event.is_set():
+            store.requeue_job(raw, job)
+            break
         task_id, kind = str(job["task_id"]), str(job["kind"])
         meta = store.get_meta(task_id)
         if meta is None or meta.get("cancelled"):
@@ -299,7 +309,6 @@ def run_worker() -> None:
             store.requeue_job(raw, job, delay=0.2)
             continue
 
-        last_activity = time.monotonic()
         try:
             with LeaseHeartbeat(store, job, worker_id):
                 if kind == "prepare":

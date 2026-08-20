@@ -326,8 +326,14 @@ class RedisStore:
     def enqueue_job(self, task_id: str, kind: str, n: int | None = None, attempt: int = 0) -> dict[str, Any]:
         job = {"job_id": uuid.uuid4().hex, "task_id": task_id, "kind": kind, "n": n, "attempt": int(attempt), "created_at": time.time()}
         raw = dumps(job)
-        self.redis.set(self.job_key(job["job_id"]), dumps({**job, "state": "pending"}), ex=self.settings.task_ttl_seconds, nx=True)
-        self.redis.lpush(self.settings.ready_queue, raw)
+        pipe = self.redis.pipeline(transaction=True)
+        pipe.set(self.job_key(job["job_id"]), dumps({**job, "state": "pending"}), ex=self.settings.task_ttl_seconds, nx=True)
+        pipe.lpush(self.settings.ready_queue, raw)
+        # KEDA scales on total outstanding work. Unlike ready_queue, this entry
+        # stays present while the job is in processing_queue and is removed only
+        # by ack_job(). This avoids under-scaling while all workers are busy.
+        pipe.lpush(self.settings.workload_queue, raw)
+        pipe.execute()
         return job
 
     def claim_job(self, worker_id: str, timeout: int) -> tuple[str, dict[str, Any]] | None:
@@ -338,6 +344,7 @@ class RedisStore:
         job = loads(text, None)
         if not isinstance(job, dict):
             self.redis.lrem(self.settings.processing_queue, 1, raw)
+            self.redis.lrem(self.settings.workload_queue, 1, raw)
             return None
         lease = self.job_key(job["job_id"]) + ":lease"
         self.redis.set(lease, worker_id, ex=self.settings.job_lease_seconds)
@@ -354,6 +361,7 @@ class RedisStore:
 
     def ack_job(self, raw: str, job: Mapping[str, Any], state: str = "done") -> None:
         self.redis.lrem(self.settings.processing_queue, 1, raw)
+        self.redis.lrem(self.settings.workload_queue, 1, raw)
         self.redis.delete(self.job_key(str(job["job_id"])) + ":lease")
         self.redis.zrem(self.task_key(str(job["task_id"]), "slots"), str(job["job_id"]))
         self.redis.set(self.job_key(str(job["job_id"])), dumps({**job, "state": state, "finished_at": time.time()}), ex=self.settings.task_ttl_seconds)
@@ -389,6 +397,7 @@ class RedisStore:
                     continue
                 if state.get("state") in {"done", "cancelled", "discarded"}:
                     self.redis.lrem(self.settings.processing_queue, 1, raw)
+                    self.redis.lrem(self.settings.workload_queue, 1, raw)
                     continue
                 self.redis.lrem(self.settings.processing_queue, 1, raw)
                 self.redis.rpush(self.settings.ready_queue, raw)
