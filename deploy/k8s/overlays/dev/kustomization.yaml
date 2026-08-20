@@ -7,6 +7,7 @@ resources:
   - keda-auth.yaml
   - worker-scaledobject.yaml
   - redis-networkpolicy.yaml
+  - ingress.yaml
 patches:
   - path: api-patch.yaml
 images:
