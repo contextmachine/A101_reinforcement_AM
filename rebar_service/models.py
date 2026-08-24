@@ -82,6 +82,9 @@ class TaskParameters(BaseModel):
     axis: Literal["x", "y"] = "y"
     max_snap_mm: float = Field(default=600.0, ge=0)
     min_bar_gap_mm: float = Field(default=50.0, ge=0)
+    # share_same_class: совпадающие стержни зон одного класса - один физический стержень.
+    # stack: у каждой зоны свой стержень, поэтому нахлёст зон одного класса запрещён.
+    coincident_policy: Literal["share_same_class", "stack"] = "share_same_class"
     max_concurrent_jobs: int | None = Field(default=None, ge=1)
     quantizer: QuantizerOptions = Field(default_factory=QuantizerOptions)
     solver: SolverOptions = Field(default_factory=SolverOptions)

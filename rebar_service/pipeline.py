@@ -219,6 +219,7 @@ def prepare_pipeline(input_payload: Mapping[str, Any], params: Mapping[str, Any]
         "steel_density_kg_m3": float(params.get("steel_density_kg_m3", 7850.0)),
         "max_snap_mm": float(params.get("max_snap_mm", 600.0)),
         "min_bar_gap_mm": float(params.get("min_bar_gap_mm", 50.0)),
+        "coincident_policy": str(params.get("coincident_policy", "share_same_class")),
     }
     public = {
         "problem_id": prepared["problem_id"],
@@ -261,6 +262,7 @@ def finalize_solution(solver_result: Mapping[str, Any], context: Mapping[str, An
         field=None,
         max_snap=context["max_snap_mm"],
         min_bar_gap=context["min_bar_gap_mm"],
+        coincident_policy=context.get("coincident_policy", "share_same_class"),
     )
     summary = rebar_summary(
         rec_opt=rec_opt,

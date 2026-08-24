@@ -890,7 +890,13 @@ def fit_rebar_layout(polygons, rectangles, recipes, divisors, values=None, densi
     triples, close = _issues(fitted, steps, axis, round(float(min_bar_gap)*s))
     all_new_overlaps=[(i,j,_area_overlap(fitted[i],fitted[j])) for i,j in combinations(range(len(fitted)),2)
                       if fitted[i][4]==fitted[j][4] and _area_overlap(rr[i],rr[j])<=_EPS and _area_overlap(fitted[i],fitted[j])>_EPS]
-    new_overlaps=[x for x in all_new_overlaps if created[x[0]] is None and created[x[1]] is None]
+    share = coincident_policy == 'share_same_class'
+    # Нахлёст двух зон ОДНОГО класса фатален только при policy='stack': там каждая зона
+    # получает свой стержень, и в пересечении их оказалось бы два в одной точке.
+    # При 'share_same_class' совпадающие стержни объединяются в один физический,
+    # что и есть корректная раскладка, поэтому это предупреждение, а не ошибка.
+    new_overlaps=[] if share else [x for x in all_new_overlaps
+                                   if created[x[0]] is None and created[x[1]] is None]
     repair_overlaps=[x for x in all_new_overlaps if x not in new_overlaps]
     cov_errors, cov_relax = _coverage(fitted, boxes, recipes, recipe_mode, steps, q, axis)
     errors += cov_errors
@@ -905,7 +911,6 @@ def fit_rebar_layout(polygons, rectangles, recipes, divisors, values=None, densi
         return {'status': 'Infeasible', 'is_feasible': False, 'is_optimal': False, 'axis': axis,
                 'errors': errors, 'rectangles': None, 'candidate_rectangles': out,
                 'structural_rectangles': structural_out, 'zones': [], 'bars': [], 'warnings': []}
-    share = coincident_policy == 'share_same_class'
     bars, zone_bars = _bars(fitted, steps, axis, s, share)
     actual_gap, max_layers = _bar_stats(fitted, steps, axis, bars)
     contact_relax = []

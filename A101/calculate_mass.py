@@ -218,6 +218,7 @@ def rebar_summary(
         }
 
     zones = []
+    all_bars, all_anchored = {}, {}
     for i, z in enumerate(fit_zones):
         try:
             cls = int(z["class"])
@@ -253,6 +254,8 @@ def rebar_summary(
             factor = float(density) * area / 1000
             base_mass = factor * sum(hypot(x1 - x0, y1 - y0) for x0, y0, x1, y1 in bars)
             anchored_mass = factor * sum(hypot(x1 - x0, y1 - y0) for x0, y0, x1, y1 in anchored_bars)
+            all_bars.setdefault(cls, []).extend(bars)
+            all_anchored.setdefault(cls, []).extend(anchored_bars)
 
         zones.append({
             "primary rectangle": prim,
@@ -276,12 +279,56 @@ def rebar_summary(
         values = [z[key] for z in zones]
         return sum(values) if values and all(v is not None for v in values) else None
 
-    base_total, anchored_total = total("zone mass without anchorage"), total("zone mass with anchorage")
+    def merged_total(per_class):
+        """Масса по объединённой геометрии стержней.
+
+        Зоны одного класса могут перекрываться, и тогда стержень в общей полосе
+        физически один, а в bars каждой зоны он свой. Поэлементная сумма считает
+        такую сталь дважды, поэтому пролёты сливаются перед взвешиванием.
+        """
+        out = 0.0
+        for cls, segs in per_class.items():
+            d = diameters.get(cls)
+            if d is None:
+                return None
+            factor = float(density) * (pi * (float(d) / 1000) ** 2 / 4) / 1000
+            lines = {}
+            for x0, y0, x1, y1 in segs:
+                if axis == "y":
+                    p, a, b = x0, min(y0, y1), max(y0, y1)
+                else:
+                    p, a, b = y0, min(x0, x1), max(x0, x1)
+                lines.setdefault(round(float(p), 6), []).append((a, b))
+            length = 0.0
+            for spans in lines.values():
+                spans.sort()
+                a0, b0 = spans[0]
+                for a, b in spans[1:]:
+                    if a <= b0 + 1e-7:
+                        b0 = max(b0, b)
+                    else:
+                        length += b0 - a0
+                        a0, b0 = a, b
+                length += b0 - a0
+            out += factor * length
+        return out
+
+    zone_total = total("zone mass without anchorage")
+    zone_anchored = total("zone mass with anchorage")
+    base_total = None if zone_total is None else merged_total(all_bars)
+    anchored_total = None if zone_anchored is None else merged_total(all_anchored)
+    if base_total is not None and zone_total is not None and zone_total - base_total > 1e-6:
+        warnings.append(
+            "Совпадающие стержни зон одного класса учтены один раз: "
+            f"{zone_total:.1f} -> {base_total:.1f} кг"
+        )
     return {
         "N": len(zones),
         "mass": base_total,
         "mass without anchorage": base_total,
         "mass with anchorage": anchored_total,
+        "mass by zones": zone_total,
+        "mass by zones with anchorage": zone_anchored,
         "anchorage mass": None if base_total is None or anchored_total is None else anchored_total - base_total,
         "zones": zones,
         "warnings": warnings,
