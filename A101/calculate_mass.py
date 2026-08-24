@@ -290,7 +290,7 @@ def rebar_summary(
 def ds_arm(d, s):
     return round(10*(d/2)**2*pi/s, 1)
 
-def make_rebar_classes(loads, back_grid, stock, max_lay=2):
+def make_rebar_classes(loads, back_grid, stock, max_lay=2, *, clamp_over_capacity=True):
     back = ds_arm(*back_grid)
     arm = [ds_arm(*x) for x in stock]
 
@@ -307,14 +307,28 @@ def make_rebar_classes(loads, back_grid, stock, max_lay=2):
         key=lambda x: (x[0], len(x[1]), x[1]),
     )
     values = [x[0] for x in variants]
+    capacity = values[-1]
 
     # Сохраняет старую логику np.searchsorted(..., side="right"):
     # выбираем первое значение СТРОГО больше load.
     selected = {}
+    over_loads = []
     for load in sorted(set(loads)):
         j = bisect_right(values, load)
         if j == len(variants):
-            raise ValueError(f"Недостаточно армирования для load={load}")
+            # Нагрузка выше максимума (фон + max_lay слоёв из stock). Как правило это
+            # единичные КЭ у граней колонн - сингулярность точечной опоры в МКЭ-расчёте.
+            # Такие пики закрываются локальным армированием, а не зонами по всей плите,
+            # поэтому по умолчанию срезаем их до максимума и сообщаем об этом наверх.
+            if not clamp_over_capacity:
+                raise ValueError(
+                    f"Недостаточно армирования для load={load}: максимум {capacity} "
+                    f"(фон {back} + {max_lay} сл. из stock). Увеличьте max_layers, "
+                    f"добавьте позицию в stock или включите clamp_peak_loads."
+                )
+            over_loads.append(load)
+            selected[load] = variants[-1][1]
+            continue
         selected[load] = variants[j][1]
 
     # Базовые сетки, реально используемые выбранными комбинациями
@@ -357,6 +371,15 @@ def make_rebar_classes(loads, back_grid, stock, max_lay=2):
         for load, c in selected.items()
     }
 
+    over_capacity = [
+        {
+            "load": float(load),
+            "capacity": float(capacity),
+            "cls": int(load2cls[load]),
+        }
+        for load in over_loads
+    ]
+
     return {
         "load2cls": load2cls,
         "recipes": recipes,
@@ -364,6 +387,8 @@ def make_rebar_classes(loads, back_grid, stock, max_lay=2):
         "diameters": diameters,
         "steps": steps,
         "back_arm": back,
+        "capacity": float(capacity),
+        "over_capacity": over_capacity,
     }
 
 def loads_to_classes(load_matrix, load2cls, *, atol=1e-8):

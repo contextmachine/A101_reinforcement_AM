@@ -85,6 +85,37 @@ def _polygon_input(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _peak_load_report(over_capacity, polygons, *, max_locations=8):
+    """Geometry context for peak loads clamped to the max available reinforcement.
+
+    Such loads are almost always single finite elements at column heads, so the
+    caller needs to know how much area is affected and where it sits before
+    deciding to handle them with local detailing or to raise ``max_layers``.
+    """
+    if not over_capacity:
+        return []
+
+    total_area = sum(p["geometry"].area for p in polygons if p["geometry"].is_valid)
+    report = []
+    for item in over_capacity:
+        faces = [p for p in polygons if float(p["load"]) == item["load"]]
+        area = sum(p["geometry"].area for p in faces if p["geometry"].is_valid)
+        locations = [
+            [round(float(p["geometry"].centroid.x), 1), round(float(p["geometry"].centroid.y), 1)]
+            for p in faces[:max_locations]
+            if p["geometry"].is_valid
+        ]
+        report.append({
+            **item,
+            "faces": len(faces),
+            "area_m2": area / 1e6,
+            "area_fraction": (area / total_area) if total_area else None,
+            "locations": locations,
+            "locations_omitted": max(0, len(faces) - len(locations)),
+        })
+    return report
+
+
 def prepare_pipeline(input_payload: Mapping[str, Any], params: Mapping[str, Any], progress: Progress | None = None):
     axis = normalize_axis(params.get("axis", "y"))
     _emit(progress, "input")
@@ -117,7 +148,11 @@ def prepare_pipeline(input_payload: Mapping[str, Any], params: Mapping[str, Any]
         tuple(params.get("back_grid", (18, 300))),
         [tuple(x) for x in params.get("stock", [])],
         max_lay=int(params.get("max_layers", 2)),
+        clamp_over_capacity=bool(params.get("clamp_peak_loads", True)),
     )
+    peak_loads = _peak_load_report(cfg.get("over_capacity", []), start_polygons)
+    if peak_loads:
+        _emit(progress, "peak_loads", peak_loads=peak_loads)
     load2cls, recipes = cfg["load2cls"], cfg["recipes"]
     densities, diameters, steps = cfg["densities"], cfg["diameters"], cfg["steps"]
     anchor_factor = float(params.get("anchor_factor", 32.0))
@@ -195,6 +230,8 @@ def prepare_pipeline(input_payload: Mapping[str, Any], params: Mapping[str, Any]
         "diameters": diameters,
         "steps": steps,
         "prepared_stats": prepared.get("stats", {}),
+        "reinforcement_capacity": cfg["capacity"],
+        "peak_loads": peak_loads,
     }
     _emit(progress, "prepared", **public)
     return prepared, context, public

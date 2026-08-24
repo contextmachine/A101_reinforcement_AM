@@ -136,11 +136,18 @@ def _fit(old, req, step, minimum, axis, B):
     return None if X is None or Y is None or X[0] >= X[1] or Y[0] >= Y[1] else (X[0], Y[0], X[1], Y[1], old[4])
 
 
-def _inside_field(r, field, scale):
+def _inside_field(r, field, scale, rel_tol=1e-6):
     if field is None:
         return True
     from shapely.geometry import box
-    return field.covers(box(*(x/scale for x in r[:4])))
+    b = box(*(x/scale for x in r[:4]))
+    if field.covers(b):
+        return True
+    # covers() - точный предикат: он даёт False и из-за микрощелей в unary_union
+    # триангулированной мозаики, и из-за округления координат зоны. Реальный выход
+    # за контур - это проценты площади зоны, артефакт - 1e-9 и меньше, поэтому
+    # различаем их по площади, а не по предикату.
+    return b.difference(field).area <= rel_tol * b.area
 
 
 def _stages(boxes, recipes, mode):
@@ -449,7 +456,8 @@ def _issues(rects, steps, axis, gap):
     return triples, close
 
 
-def _local_score(R, i, originals, assigned, contacts, steps, priority, axis, gap, boxes=None, B=None):
+def _local_score(R, i, originals, assigned, contacts, steps, priority, axis, gap, boxes=None, B=None,
+                 all_zones=False):
     r, p = R[i], set(_positions(R[i], steps[R[i][4]], axis))
     new_n = new_a = triple = close_n = close_d = phase_n = phase_d = 0
     edge_n = edge_d = cover_n = cover_d = 0
@@ -466,7 +474,11 @@ def _local_score(R, i, originals, assigned, contacts, steps, priority, axis, gap
     module = lcm(*steps.values())
     pi = priority[i]
     for j, q in enumerate(R):
-        if i == j or priority[j] > pi: continue
+        # priority-фильтр нужен только на этапе последовательной раскладки (_choose),
+        # где зоны с большим priority ещё не поставлены. После раскладки все зоны
+        # уже имеют реальные координаты, поэтому конфликт с ними реален и его
+        # нельзя не замечать - иначе перестановка зоны молча ломает соседей.
+        if i == j or (not all_zones and priority[j] > pi): continue
         if r[4] == q[4] and _area_overlap(originals[i], originals[j]) <= _EPS:
             a = _area_overlap(r, q)
             if a > _EPS: new_n += 1; new_a += a
@@ -533,8 +545,13 @@ def _minimize_cross(R, candidates, originals, assigned, contacts, steps, priorit
         for i in sorted(range(len(R)), key=lambda i: priority[i]):
             old = R[i]; ow = _cross(old, axis)[1]-_cross(old, axis)[0]
             def compact_key():
-                z=_local_score(R, i, originals, assigned, contacts, steps, priority, axis, gap, boxes, B)
-                return z[:9] + (z[13],) + z[9:13] + (z[14],)
+                z=_local_score(R, i, originals, assigned, contacts, steps, priority, axis, gap, boxes, B,
+                               all_zones=True)
+                # Счётчики жёстких нарушений (new_n, triple, close_n) идут строго впереди
+                # их величин (new_a, close_d). Иначе лексикографическое сравнение обрывается
+                # на мизерном выигрыше по площади нахлёста и берёт вариант, добавляющий
+                # нарушения bar_gap - раскладка становится Infeasible из-за экономии 0.1%.
+                return (z[0], z[2], z[3]) + (z[1], z[4]) + z[5:9] + (z[13],) + z[9:13] + (z[14],)
             best = (compact_key(), old)
             for r in candidates[i]:
                 if _cross(r, axis)[1]-_cross(r, axis)[0] > ow+_EPS or breaks_exact(i,r): continue
@@ -546,11 +563,24 @@ def _minimize_cross(R, candidates, originals, assigned, contacts, steps, priorit
     return R
 
 
-def _repair_spacing(R, candidates, steps, axis, gap, passes=3):
+def _new_overlaps(X, originals, created=None):
+    """Нахлёсты одного класса, которых не было в исходных зонах (жёсткая ошибка)."""
+    if originals is None: return 0
+    return sum(1 for i, j in combinations(range(len(X)), 2)
+               if X[i][4] == X[j][4]
+               and _area_overlap(originals[i], originals[j]) <= _EPS
+               and _area_overlap(X[i], X[j]) > _EPS
+               and (created is None or (created[i] is None and created[j] is None)))
+
+
+def _repair_spacing(R, candidates, steps, axis, gap, passes=3, *, originals=None, created=None):
     R=list(R)
     def score(X):
         t,c=_issues(X,steps,axis,gap)
-        return len(t),len(c),sum((r[2]-r[0])*(r[3]-r[1]) for r in X)
+        o=_new_overlaps(X,originals,created)
+        # Сначала общее число жёстких нарушений: иначе починка bar_gap может
+        # разменять его на new_overlap, и раскладка всё равно останется Infeasible.
+        return o+len(t)+len(c),o,len(t),len(c),sum((r[2]-r[0])*(r[3]-r[1]) for r in X)
     best=score(R)
     for _ in range(passes):
         changed=False
@@ -798,7 +828,7 @@ def _bar_stats(rects, steps, axis, physical):
 
 def fit_rebar_layout(polygons, rectangles, recipes, divisors, values=None, densities=None, *,
                      min_width=None, axis='y', recipe_mode='threshold', field=None,
-                     strict_field=True, scale=1, origin=None, drop_unused=False,
+                     strict_field=True, field_tol=None, scale=1, origin=None, drop_unused=False,
                      max_snap=None, allow_new_zones=True, preserve_zone_count=True, min_bar_gap=50,
                      layout_passes=8, strict_layout=True, coincident_policy='stack'):
     """Иерархическая топологическая постобработка зон и единая сетка стержней."""
@@ -808,7 +838,12 @@ def fit_rebar_layout(polygons, rectangles, recipes, divisors, values=None, densi
     geoms, vals = _polygons(polygons, values); source_rects = _rectangles(rectangles)
     field_geom = _field_geometry(geoms, field)
     boxes, rr, steps, mins, B, s = _scaled(geoms, vals, source_rects, divisors, min_width, scale, field_geom)
-    exact = field_geom.buffer(1e-7) if strict_field else None
+    # Координаты зон квантуются до целых единиц (floor/ceil в _scaled), поэтому зона
+    # может выступать за контур на величину до одной единицы. Проверять вхождение с
+    # допуском 1e-7 строже, чем собственное округление алгоритма: раскладка падала
+    # из-за срезов в десятки мм² у зон размером в десятки метров.
+    field_eps = (1.0/s) if field_tol is None else max(0.0, float(field_tol))
+    exact = field_geom.buffer(field_eps) if strict_field else None
     snap = 2*max(map(float, divisors.values())) if max_snap is None else max(0, float(max_snap))
     allowed = {r[4] for r in rr} | {int(c) for c in densities if int(c) > 0 and int(c) not in recipes}
     req, assigned, source, created, priority, order, errors = _assign(
@@ -838,12 +873,18 @@ def fit_rebar_layout(polygons, rectangles, recipes, divisors, values=None, densi
                 'axis': axis, 'errors': errors, 'rectangles': None, 'zones': [], 'bars': [], 'warnings': [],
                 'structural_rectangles': [(a/s, b/s, c/s, d/s, k) for a, b, c, d, k in structural]}
     fitted = _choose(candidates, rr, assigned, contacts, steps, priority, axis, round(float(min_bar_gap)*s), layout_passes, boxes, B)
-    fitted = _repair_spacing(fitted, candidates, steps, axis, round(float(min_bar_gap)*s))
+    fitted = _repair_spacing(fitted, candidates, steps, axis, round(float(min_bar_gap)*s),
+                             originals=rr, created=created)
     fitted = _repair_contacts(fitted, candidates, contacts, steps, axis, round(float(min_bar_gap)*s))
     area_before_cleanup = sum((r[2]-r[0])*(r[3]-r[1]) for r in fitted)/(s*s)
     fitted = _minimize_cross(fitted, candidates, rr, assigned, contacts, steps, priority, axis, round(float(min_bar_gap)*s), boxes, B)
     fitted = _repair_edge_pairs(fitted, candidates, rr, assigned, boxes, recipes, recipe_mode, steps, axis, B, round(float(min_bar_gap)*s))
     fitted = _shrink_long(fitted, boxes, recipes, recipe_mode, steps, q, axis, B)
+    # _minimize_cross/_repair_edge_pairs/_shrink_long двигают зоны по своим критериям и
+    # могут вернуть нарушения, снятые ранее. Финальная починка идёт по глобальному числу
+    # жёстких нарушений и принимает только строгие улучшения, поэтому безопасна.
+    fitted = _repair_spacing(fitted, candidates, steps, axis, round(float(min_bar_gap)*s),
+                             originals=rr, created=created)
     area_after_cleanup = sum((r[2]-r[0])*(r[3]-r[1]) for r in fitted)/(s*s)
     edge_relax = _edge_relaxations(fitted, boxes, recipes, recipe_mode, axis, B)
     triples, close = _issues(fitted, steps, axis, round(float(min_bar_gap)*s))

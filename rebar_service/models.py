@@ -73,6 +73,9 @@ class TaskParameters(BaseModel):
         min_length=1,
     )
     max_layers: int = Field(default=2, ge=1)
+    # Пиковые нагрузки выше max_layers слоёв (обычно единичные КЭ у колонн)
+    # срезаются до максимума и возвращаются в preparation.peak_loads.
+    clamp_peak_loads: bool = True
     min_width_mm: float = Field(default=1000.0, gt=0)
     steel_density_kg_m3: float = Field(default=7850.0, gt=0)
     anchor_factor: float = Field(default=32.0, ge=0)
