@@ -89,15 +89,16 @@ def validate_n_request_limits(value, *, max_values: int, max_n: int) -> None:
 
 
 
-def validate_solver_limits(solver, *, max_threads: int, max_timeout: float) -> None:
+def validate_solver_limits(solver, *, max_threads: int, max_timeout: float | None) -> None:
     threads = int(solver.get("threads", 1))
-    timeout = float(solver.get("timeout_seconds", 120.0))
+    raw_timeout = solver.get("timeout_seconds")
+    timeout = None if raw_timeout is None else float(raw_timeout)
     inner = solver.get("solver_time_limit")
     if threads > int(max_threads):
         raise ValueError(f"solver.threads={threads} превышает серверный лимит {max_threads}")
-    if timeout > float(max_timeout):
+    if timeout is not None and max_timeout is not None and timeout > float(max_timeout):
         raise ValueError(f"solver.timeout_seconds={timeout} превышает серверный лимит {max_timeout}")
-    if inner is not None and float(inner) > timeout:
+    if inner is not None and timeout is not None and float(inner) > timeout:
         raise ValueError("solver_time_limit не может превышать timeout_seconds")
 
 def normalize_n_request(value) -> tuple[str, list[int], dict]:

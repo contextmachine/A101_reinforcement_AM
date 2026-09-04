@@ -13,4 +13,4 @@ patches:
 images:
   - name: ghcr.io/contextmachine/a101_reinforcement_am
     newName: ghcr.io/contextmachine/a101_reinforcement_am
-    newTag: latest
+    newTag: am-super-branch

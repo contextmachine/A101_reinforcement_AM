@@ -739,7 +739,17 @@ def _kill_process_tree(process) -> None:
         process.join(timeout=5)
 
 
-def _run_worker(call: dict[str, Any], timeout: float) -> tuple[str, Any, float]:
+def _normalize_timeout(timeout: float | None) -> float | None:
+    if timeout is None:
+        return None
+    value = float(timeout)
+    if not np.isfinite(value) or value <= 0:
+        raise ValueError("timeout должен быть положительным или None")
+    return value
+
+
+def _run_worker(call: dict[str, Any], timeout: float | None) -> tuple[str, Any, float]:
+    timeout = _normalize_timeout(timeout)
     ctx = get_context("spawn")
     parent, child = ctx.Pipe(False)
     process = ctx.Process(target=_worker, args=(child, call))
@@ -750,8 +760,8 @@ def _run_worker(call: dict[str, Any], timeout: float) -> tuple[str, Any, float]:
     try:
         while True:
             elapsed = time.monotonic() - started
-            remaining = timeout - elapsed
-            if remaining <= 0:
+            remaining = None if timeout is None else timeout - elapsed
+            if remaining is not None and remaining <= 0:
                 if parent.poll(0):
                     try:
                         status, payload = parent.recv()
@@ -762,7 +772,8 @@ def _run_worker(call: dict[str, Any], timeout: float) -> tuple[str, Any, float]:
                 _kill_process_tree(process)
                 return "timeout", None, time.monotonic() - started
 
-            if parent.poll(min(0.05, remaining)):
+            poll_timeout = 0.05 if remaining is None else min(0.05, remaining)
+            if parent.poll(poll_timeout):
                 try:
                     status, payload = parent.recv()
                 except EOFError:
@@ -786,8 +797,10 @@ def _run_worker(call: dict[str, Any], timeout: float) -> tuple[str, Any, float]:
         parent.close()
 
 
-def _default_solver_time_limit(timeout: float) -> float:
-    timeout = float(timeout)
+def _default_solver_time_limit(timeout: float | None) -> float | None:
+    timeout = _normalize_timeout(timeout)
+    if timeout is None:
+        return None
     return max(0.0001, timeout - min(5.0, max(0.001, timeout * 0.05)))
 
 
@@ -981,7 +994,7 @@ def _solve_rectangle_job_raw(
     holds: Mapping[int, float] | None = None,
     axis: str | int | None = None,
     mosaic: Sequence[Sequence[int]] | None = None,
-    timeout: float = 100.0,
+    timeout: float | None = 100.0,
     solver_time_limit: float | None = None,
     threads: int = 1,
     solver_msg: bool = False,
@@ -1015,9 +1028,7 @@ def _solve_rectangle_job_raw(
     if isinstance(N, bool) or int(N) != N or int(N) < 0:
         raise ValueError("N должен быть неотрицательным целым")
     N = int(N)
-    timeout = float(timeout)
-    if not np.isfinite(timeout) or timeout <= 0:
-        raise ValueError("timeout должен быть положительным")
+    timeout = _normalize_timeout(timeout)
     if isinstance(threads, bool) or int(threads) != threads or int(threads) <= 0:
         raise ValueError("threads должен быть положительным целым")
     threads = int(threads)
@@ -1141,15 +1152,15 @@ def _solve_rectangle_job_raw(
         warm_indices = warm_from_N = warm_cost = None
     warm_lookup_seconds = time.monotonic() - warm_lookup_started
 
+    hard_solver_limit = _default_solver_time_limit(timeout)
     if solver_time_limit is None:
-        solver_time_limit = _default_solver_time_limit(timeout)
+        solver_time_limit = hard_solver_limit
     else:
         solver_time_limit = float(solver_time_limit)
         if not np.isfinite(solver_time_limit) or solver_time_limit <= 0:
             raise ValueError("solver_time_limit должен быть положительным или None")
-        solver_time_limit = min(
-            solver_time_limit, _default_solver_time_limit(timeout)
-        )
+        if hard_solver_limit is not None:
+            solver_time_limit = min(solver_time_limit, hard_solver_limit)
 
     call: dict[str, Any] = {
         "value_matrix": value_matrix,
@@ -1341,7 +1352,7 @@ def _solve_rectangle_job_prepared(
     data: Mapping[str, Any] | None,
     N: int,
     *,
-    timeout: float,
+    timeout: float | None,
     solver_time_limit: float | None,
     threads: int,
     solver_msg: bool,
@@ -1360,9 +1371,7 @@ def _solve_rectangle_job_prepared(
     if isinstance(N, bool) or int(N) != N or int(N) < 0:
         raise ValueError("N должен быть неотрицательным целым")
     N = int(N)
-    timeout = float(timeout)
-    if not np.isfinite(timeout) or timeout <= 0:
-        raise ValueError("timeout должен быть положительным")
+    timeout = _normalize_timeout(timeout)
     if isinstance(threads, bool) or int(threads) != threads or int(threads) <= 0:
         raise ValueError("threads должен быть положительным целым")
     threads = int(threads)
@@ -1435,15 +1444,15 @@ def _solve_rectangle_job_prepared(
         warm_indices = warm_from_N = warm_cost = None
     warm_lookup_seconds = time.monotonic() - warm_lookup_started
 
+    hard_solver_limit = _default_solver_time_limit(timeout)
     if solver_time_limit is None:
-        solver_time_limit = _default_solver_time_limit(timeout)
+        solver_time_limit = hard_solver_limit
     else:
         solver_time_limit = float(solver_time_limit)
         if not np.isfinite(solver_time_limit) or solver_time_limit <= 0:
             raise ValueError("solver_time_limit должен быть положительным или None")
-        solver_time_limit = min(
-            solver_time_limit, _default_solver_time_limit(timeout)
-        )
+        if hard_solver_limit is not None:
+            solver_time_limit = min(solver_time_limit, hard_solver_limit)
 
     # Passing a path is preferable on Windows/cluster nodes: the spawn process
     # receives a tiny string and loads the already-prepared pickle locally.
@@ -1578,7 +1587,7 @@ def solve_rectangle_job(
     holds: Mapping[int, float] | None = None,
     axis: str | int | None = None,
     mosaic: Sequence[Sequence[int]] | None = None,
-    timeout: float = 100.0,
+    timeout: float | None = 100.0,
     solver_time_limit: float | None = None,
     threads: int = 1,
     solver_msg: bool = False,
