@@ -21,45 +21,71 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       imagePullSecrets:
-        - name: ghcr-secret
+      - name: ghcr-secret
       containers:
-        - name: api
-          image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
-          imagePullPolicy: Always
-          envFrom:
-            - configMapRef: {name: rebar-config}
-            - secretRef: {name: rebar-secrets}
-          ports:
-            - {name: http, containerPort: 8000}
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities: {drop: ["ALL"]}
-            readOnlyRootFilesystem: true
-          volumeMounts:
-            - {name: tmp, mountPath: /tmp}
-          resources:
-            requests: {cpu: 250m, memory: 512Mi}
-            limits: {cpu: "2", memory: 2Gi}
-          readinessProbe:
-            httpGet: {path: /health/ready, port: http}
-            initialDelaySeconds: 5
-            periodSeconds: 5
-          livenessProbe:
-            httpGet: {path: /health/live, port: http}
-            initialDelaySeconds: 15
-            periodSeconds: 10
-      volumes:
+      - name: api
+        image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
+        imagePullPolicy: Always
+        envFrom:
+        - configMapRef:
+            name: rebar-config
+        - secretRef:
+            name: rebar-secrets
+        ports:
+        - name: http
+          containerPort: 8000
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
         - name: tmp
-          emptyDir: {}
+          mountPath: /tmp
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: '2'
+            memory: 2Gi
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        command:
+        - python
+        args:
+        - run3.py
+        - api
+        - --host
+        - 0.0.0.0
+        - --port
+        - '8000'
+      volumes:
+      - name: tmp
+        emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: rebar-api
 spec:
-  selector: {app: rebar-api}
+  selector:
+    app: rebar-api
   ports:
-    - {name: http, port: 80, targetPort: http}
+  - name: http
+    port: 80
+    targetPort: http
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -68,4 +94,5 @@ metadata:
 spec:
   minAvailable: 1
   selector:
-    matchLabels: {app: rebar-api}
+    matchLabels:
+      app: rebar-api

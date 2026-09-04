@@ -6,23 +6,26 @@ spec:
   scaleTargetRef:
     name: rebar-worker
   pollingInterval: 5
-  # Keep workers warm for five minutes after the outstanding-work list becomes empty.
   cooldownPeriod: 300
   minReplicaCount: 0
-  # Global limit across all user tasks. Keep aligned with REBAR_GLOBAL_MAX_JOBS.
-  maxReplicaCount: 32
+  maxReplicaCount: 28031998
   advanced:
     horizontalPodAutoscalerConfig:
       behavior:
         scaleDown:
           stabilizationWindowSeconds: 300
   triggers:
-    - type: redis
-      metadata:
-        addressFromEnv: REBAR_REDIS_ADDRESS
-        # This list contains both queued and currently running jobs.
-        listName: rebar:jobs:workload
-        listLength: "1"
-        activationListLength: "0"
-      authenticationRef:
-        name: rebar-redis-auth
+  - type: redis
+    metadata:
+      addressFromEnv: REBAR_REDIS_ADDRESS
+      listName: rebar:jobs:workload
+      listLength: '1'
+      activationListLength: '0'
+    authenticationRef: &id001
+      name: rebar-redis-auth
+  - type: redis
+    metadata:
+      listName: rebar:component:workload
+      listLength: '1'
+      activationListLength: '0'
+    authenticationRef: *id001

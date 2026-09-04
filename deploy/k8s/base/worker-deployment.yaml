@@ -3,7 +3,6 @@ kind: Deployment
 metadata:
   name: rebar-worker
 spec:
-  # KEDA owns this value after the ScaledObject is installed.
   replicas: 0
   selector:
     matchLabels:
@@ -15,9 +14,7 @@ spec:
     spec:
       automountServiceAccountToken: false
       imagePullSecrets:
-        - name: ghcr-secret
-      # Worker handles SIGTERM by finishing the current job and not claiming a new one.
-      # Keep this >= REBAR_MAX_SOLVER_TIMEOUT_SECONDS + a small post-processing margin.
+      - name: ghcr-secret
       terminationGracePeriodSeconds: 21630
       securityContext:
         runAsNonRoot: true
@@ -27,25 +24,39 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: worker
-          image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
-          imagePullPolicy: Always
-          command: ["python", "-m", "rebar_service.worker"]
-          envFrom:
-            - configMapRef: {name: rebar-config}
-            - secretRef: {name: rebar-secrets}
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities: {drop: ["ALL"]}
-            readOnlyRootFilesystem: true
-          volumeMounts:
-            - {name: tmp, mountPath: /tmp}
-            - {name: cache, mountPath: /tmp/rebar-cache}
-          resources:
-            requests: {cpu: "1", memory: 2Gi}
-            limits: {cpu: "4", memory: 8Gi}
-      volumes:
+      - name: worker
+        image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
+        imagePullPolicy: Always
+        command:
+        - python
+        envFrom:
+        - configMapRef:
+            name: rebar-config
+        - secretRef:
+            name: rebar-secrets
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
         - name: tmp
-          emptyDir: {}
+          mountPath: /tmp
         - name: cache
-          emptyDir: {}
+          mountPath: /tmp/rebar-cache
+        resources:
+          requests:
+            cpu: '1'
+            memory: 2Gi
+          limits:
+            cpu: '4'
+            memory: 8Gi
+        args:
+        - run3.py
+        - worker
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: cache
+        emptyDir: {}
