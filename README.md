@@ -282,7 +282,7 @@ Secret в git не коммить.
 ```bash
 IMAGE=ghcr.io/MY_ORG/MY_REPO:latest
 kubectl kustomize deploy/k8s/overlays/dev \
-  | sed "s#ghcr.io/contextmachine/a101_reinforcement_am:latest#$IMAGE#g" \
+  | sed "s#ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch#$IMAGE#g" \
   | kubectl apply -f -
 ```
 
@@ -338,7 +338,7 @@ kubectl apply -f /tmp/rebar-secrets.yaml
 IMAGE=ghcr.io/MY_ORG/MY_REPO:sha-abc123
 HOST=rebar.my-domain.ru
 kubectl kustomize deploy/k8s/overlays/prod \
-  | sed "s#ghcr.io/contextmachine/a101_reinforcement_am:latest#$IMAGE#g; s#rebar.example.com#$HOST#g" \
+  | sed "s#ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch#$IMAGE#g; s#rebar.example.com#$HOST#g" \
   | kubectl apply -f -
 ```
 

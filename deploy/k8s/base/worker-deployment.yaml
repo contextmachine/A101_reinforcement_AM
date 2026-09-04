@@ -28,7 +28,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: worker
-          image: ghcr.io/contextmachine/a101_reinforcement_am:latest
+          image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
           imagePullPolicy: Always
           command: ["python", "-m", "rebar_service.worker"]
           envFrom:

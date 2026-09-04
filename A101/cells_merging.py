@@ -7,7 +7,8 @@ def reduce_mosaic(
     target=520,
     rect_target=None,
     force_reduce=True,
-    show=True
+    show=True,
+    printed=False,
 ):
     a = np.asarray(int_matrix)
     R = list(map(tuple, rectangles))
@@ -285,20 +286,21 @@ def reduce_mosaic(
 
     n1 = mosaic.max() + 1
 
-    print(f"Мозаика: {n0} → {n1}")
-    print(
-        f"Прямоугольники: "
-        f"{len(R)} → {len(result)} "
-        f"(удалено {len(removed)})"
-    )
-    print(
-        f"Из них удалено без изменения мозаики: "
-        f"{safe_removed}"
-    )
-    print(
-        f"Минимум без смешивания классов: "
-        f"{minimum}"
-    )
+    if printed:
+        print(f"Мозаика: {n0} → {n1}")
+        print(
+            f"Прямоугольники: "
+            f"{len(R)} → {len(result)} "
+            f"(удалено {len(removed)})"
+        )
+        print(
+            f"Из них удалено без изменения мозаики: "
+            f"{safe_removed}"
+        )
+        print(
+            f"Минимум без смешивания классов: "
+            f"{minimum}"
+        )
 
     if show:
 

@@ -24,7 +24,7 @@ spec:
         - name: ghcr-secret
       containers:
         - name: api
-          image: ghcr.io/contextmachine/a101_reinforcement_am:latest
+          image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
           imagePullPolicy: Always
           envFrom:
             - configMapRef: {name: rebar-config}

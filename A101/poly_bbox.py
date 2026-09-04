@@ -151,6 +151,8 @@ def plot_poly(result, title="Result"):
     plt.show()
 
 
+
+
 def fill_notches(polys, threshold, eps=1e-9):
 
     def cross(a, b):
@@ -549,10 +551,14 @@ def polygons_to_grid(polygons, min_size=300, eps=1e-9):
 
         result = np.array([z[0] for z in c])
 
-        if len(result) > 1 and np.diff(result).min() < min_size - eps:
+        # Если весь диапазон меньше min_size, две крайние координаты
+        # всё равно образуют одну корректную ячейку. Для локальных
+        # component-задач это нормальный случай: минимальная физическая
+        # ширина зоны обеспечивается позже, а сетка обязана сохранить
+        # реальный контур требования.
+        if len(result) > 2 and np.diff(result).min() < min_size - eps:
             raise ValueError(
-                f"Размер всей области меньше min_size={min_size}, "
-                "поэтому выполнить условие невозможно."
+                f"Не удалось кластеризовать координаты с min_size={min_size}"
             )
 
         return result

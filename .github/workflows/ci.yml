@@ -2,15 +2,19 @@ name: ci
 
 on:
   push:
-    branches: [main, master]
-    tags: ["v*"]
-  pull_request:
-    branches: [main, master]
-  workflow_dispatch:
+    branches:
+      - main
+      - master
+      - am-super-branch
+    tags:
+      - "v*"
 
-permissions:
-  contents: read
-  packages: write
+  pull_request:
+    branches:
+      - main
+      - master
+
+  workflow_dispatch:
 
 jobs:
   test:

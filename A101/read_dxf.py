@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO, StringIO, TextIOWrapper
-
+from copy import deepcopy
 import ezdxf
 import numpy as np
 from ezdxf.filemanagement import dxf_stream_info
@@ -105,6 +105,7 @@ def extract_polygons_from_bytes(content: bytes):
 
 
 def smooth_load(polys, threshold=.6, eps=1e-9):
+    polys = deepcopy(polys)
     n = len(polys)
     if not n:
         return polys

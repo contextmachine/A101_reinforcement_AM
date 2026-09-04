@@ -1,6 +1,7 @@
-from math import pi, hypot
 from itertools import combinations_with_replacement
 from bisect import bisect_right
+from collections import defaultdict
+from math import pi, hypot, isfinite
 
 def comb_indices(length, n):
     return list(combinations_with_replacement(range(length), n))
@@ -364,6 +365,222 @@ def make_rebar_classes(loads, back_grid, stock, max_lay=2):
         "diameters": diameters,
         "steps": steps,
         "back_arm": back,
+    }
+
+REBAR_CATALOG = {
+    (14, 300): (
+        (14, 300), #(14, 150),
+        (20, 150), (20, 100),
+        (25, 100), (28, 100), (32, 100),
+    ),
+    (16, 300): (
+        (16, 300), #(16, 150),
+        (20, 150), (20, 100),
+        (25, 100), (28, 100),
+        (32, 100), (36, 100),
+    ),
+    (18, 300): (
+        (18, 300), (18, 150),
+        (20, 150), (20, 100),
+        (25, 100), (28, 100),
+        (32, 100), (36, 100),
+    ),
+    (20, 300): (
+        (20, 300), #(20, 150),
+        (25, 150), (25, 100),
+        (28, 100), (32, 100), (36, 100),
+        #(32, 50),  # 32×2 @100
+    ),
+    (22, 300): (
+        (22, 300), #(22, 150),
+        (25, 150), (25, 100),
+        (28, 100), (32, 100), (36, 100),
+        #(32, 50),  # 32×2 @100
+        #(36, 50),  # 36×2 @100
+    ),
+    (25, 300): (
+        (25, 300), #(25, 150),
+        (28, 100), (32, 100), (36, 100),
+        #(32, 50),  # 32×2 @100
+        #(36, 50),  # 36×2 @100
+    ),
+
+    (12, 300): (
+        (12, 300), #(12, 150),
+        (16, 150), (16, 100),
+    ),
+    (10, 300): (
+        (10, 300), #(10, 150),
+        (12, 150), (12, 100),
+        (16, 150), (16, 100),
+    ),
+
+    (12, 300): (
+        (12, 300), #(12, 150),
+        (16, 150), (16, 100),
+    ),
+    (10, 240): (
+        (10, 240), #(10, 120),
+        (12, 120), (16, 120),
+    ),
+}
+
+
+def select_rebar_config(
+    data,
+    *,
+    max_lay=2,
+    strategy="min_background",
+):
+    """
+    Выбирает back_grid и разрешённый для него stock.
+
+    data:
+        iterable нагрузок
+        или start_polygons с ключами load/geometry.
+
+    strategy:
+        "min_background" — минимальный допустимый фон;
+        "min_proxy"      — минимум приближённой средней As.
+    """
+    if strategy not in {"min_background", "min_proxy"}:
+        raise ValueError(
+            "strategy должен быть 'min_background' или 'min_proxy'"
+        )
+
+    weights = defaultdict(float)
+
+    for item in data:
+        if isinstance(item, dict):
+            load = float(item["load"])
+            g = item.get("geometry")
+            weight = float(getattr(g, "area", 1.0))
+        else:
+            load = float(item)
+            weight = 1.0
+
+        if (
+            isfinite(load)
+            and load > 0
+            and isfinite(weight)
+            and weight > 0
+        ):
+            weights[load] += weight
+
+    if not weights:
+        raise ValueError(
+            "Не найдено положительных требований армирования"
+        )
+
+    loads = sorted(weights)
+    min_load, max_load = loads[0], loads[-1]
+    candidates = []
+
+    for back_grid, stock in REBAR_CATALOG.items():
+        stock = tuple(stock)
+        back_arm = ds_arm(*back_grid)
+
+        # Минимальное требование должно закрываться только фоном.
+        if back_arm <= min_load:
+            continue
+
+        # ВАЖНО: make_rebar_classes использует строго большее As.
+        # Поэтому максимальная доступная комбинация тоже должна
+        # быть строго больше максимального требования.
+        capacity = (
+            back_arm
+            + max_lay * max(ds_arm(*x) for x in stock)
+        )
+
+        if capacity <= max_load:
+            continue
+
+        try:
+            cfg = make_rebar_classes(
+                loads,
+                back_grid,
+                stock,
+                max_lay=max_lay,
+                #clamp_over_capacity=False,
+            )
+        except ValueError:
+            continue
+
+        def installed_arm(load):
+            cls = cfg["load2cls"][load]
+            base = cfg["back_arm"]
+
+            if cls == 0:
+                return base
+
+            if cls in cfg["densities"]:
+                return base + cfg["densities"][cls]
+
+            return base + sum(
+                cfg["densities"][layer]
+                for layer in cfg["recipes"][cls]
+            )
+
+        total_weight = sum(weights.values())
+
+        proxy_arm = sum(
+            weights[load] * installed_arm(load)
+            for load in loads
+        ) / total_weight
+
+        if strategy == "min_background":
+            rank = (
+                back_arm,
+                proxy_arm,
+                len(stock),
+                back_grid,
+            )
+        else:
+            rank = (
+                proxy_arm,
+                back_arm,
+                len(stock),
+                back_grid,
+            )
+
+        candidates.append((
+            rank,
+            tuple(back_grid),
+            list(stock),
+            cfg,
+            proxy_arm,
+            capacity,
+        ))
+
+    if not candidates:
+        raise ValueError(
+            "Не найден допустимый набор армирования: "
+            f"min_load={min_load}, max_load={max_load}, "
+            f"max_lay={max_lay}"
+        )
+
+    (
+        _,
+        back_grid,
+        stock,
+        cfg,
+        proxy_arm,
+        capacity,
+    ) = min(candidates, key=lambda x: x[0])
+
+    return {
+        **cfg,
+        "back_grid": back_grid,
+        "stock": stock,
+        "background_arm": float(ds_arm(*back_grid)),
+        "background_margin": float(
+            ds_arm(*back_grid) - min_load
+        ),
+        "proxy_arm_cm2_m": float(proxy_arm),
+        "capacity": float(capacity),
+        "min_load": float(min_load),
+        "max_load": float(max_load),
+        "selection_strategy": strategy,
     }
 
 def loads_to_classes(load_matrix, load2cls, *, atol=1e-8):
