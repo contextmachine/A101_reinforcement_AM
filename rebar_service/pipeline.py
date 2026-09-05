@@ -19,6 +19,21 @@ from .config import Settings
 from .store import RedisStore
 
 
+WHOLE_COMPONENT_ID = -1
+WHOLE_COMPONENT_KEY = "whole"
+
+
+def component_storage_id(component_id: int | str) -> int | str:
+    """Map the public pseudo-component ``-1`` to the internal whole-field key."""
+    if component_id == WHOLE_COMPONENT_KEY:
+        return WHOLE_COMPONENT_KEY
+    try:
+        value = int(component_id)
+    except (TypeError, ValueError):
+        return component_id
+    return WHOLE_COMPONENT_KEY if value == WHOLE_COMPONENT_ID else value
+
+
 class JobKind(str, Enum):
     prepare_field = "prepare_field"
     prepare_component = "prepare_component"
@@ -217,17 +232,6 @@ def _compatibility_zones(layout: Mapping[str, Any]) -> tuple[list[dict[str, Any]
 def to_compat_result(solution: Mapping[str, Any]) -> dict[str, Any]:
     """Return the historical result shape, backed by the current component solution."""
     row = dict(solution)
-    choices = row.get("component_choices", {}) or {}
-    solver_results = {
-        str(cid): dict(value.get("solver_result", {}) or {})
-        for cid, value in choices.items()
-        if isinstance(value, Mapping)
-    }
-    fit_results = {
-        str(cid): dict(value.get("fit_result", {}) or {})
-        for cid, value in choices.items()
-        if isinstance(value, Mapping)
-    }
     rectangles = list(row.get("rectangles", []) or [])
     anchored = list(row.get("anchored_boxes", []) or [])
     layout = dict(row.get("bar_layout", {}) or {})
@@ -243,15 +247,15 @@ def to_compat_result(solution: Mapping[str, Any]) -> dict[str, Any]:
         "total_cost": proxy_mass,
         "solver_result": {
             "is_feasible": feasible,
-            "component_results": solver_results,
+            "is_optimal": bool(row.get("is_optimal", False)),
+            "status": row.get("status", "feasible" if feasible else "infeasible"),
+            "total_cost": proxy_mass,
             "component_ns": dict(row.get("component_ns", {}) or {}),
         },
         "primary_rectangles": rectangles or anchored,
-        "rectangles": rectangles,
-        "anchored_boxes": anchored,
         "fit_result": {
             "is_feasible": feasible,
-            "component_results": fit_results,
+            "is_optimal": bool(row.get("is_optimal", False)),
             "rectangles": rectangles,
             "zones": fit_zones,
         },
@@ -269,8 +273,6 @@ def to_compat_result(solution: Mapping[str, Any]) -> dict[str, Any]:
         "component_ns": dict(row.get("component_ns", {}) or {}),
         "proxy_mass": proxy_mass,
         "actual_mass_kg": actual_mass,
-        "bar_layout": layout,
-        "metadata": dict(row.get("metadata", {}) or {}),
     }
 
 
@@ -307,10 +309,12 @@ class PipelineWorkflow:
         )
         return self.store.enqueue_pipeline_job(job.to_dict())
 
-    def bootstrap_task(self, task_id: str) -> bool:
+    def prepare_task(self, task_id: str, *, auto_solve: bool | None = None) -> bool:
         meta = self.store.get_meta(task_id)
         if meta is None:
             raise KeyError(task_id)
+        if auto_solve is None:
+            auto_solve = not bool(meta.get("manual_mode", False))
         self.store.patch_meta(task_id, state="queued_preparation", generation=self.store.generation(task_id))
         self._publish(
             task_id,
@@ -319,9 +323,13 @@ class PipelineWorkflow:
                 "requested_n": list(meta.get("requested_n", [])),
                 "scan_mode": meta.get("scan_mode", "requested"),
                 "whole": bool(meta.get("whole", False)),
+                "auto_solve": bool(auto_solve),
             },
         )
-        return self.enqueue(JobKind.prepare_field, task_id)
+        return self.enqueue(JobKind.prepare_field, task_id, {"auto_solve": bool(auto_solve)})
+
+    def bootstrap_task(self, task_id: str) -> bool:
+        return self.prepare_task(task_id, auto_solve=True)
 
     def dispatch(self, job: PipelineJob) -> None:
         if int(job.generation) != self.store.generation(job.task_id):
@@ -354,6 +362,7 @@ class PipelineWorkflow:
         from A101.reinforcement_components import split_reinforcement_components
 
         task_id = job.task_id
+        auto_solve = bool(job.payload.get("auto_solve", True))
         self.store.patch_meta(task_id, state="preparing_components")
         self._publish(task_id, {"type": "component_prepare_started"})
         input_obj = self.store.get_object(task_id, "input")
@@ -401,9 +410,10 @@ class PipelineWorkflow:
                 cid,
                 {"component": component, "info": component_public_info(component), "state": "queued"},
             )
-            self.enqueue(JobKind.prepare_component, task_id, {"component_id": cid})
-        if bool((self.store.get_meta(task_id) or {}).get("whole")):
-            self.enqueue(JobKind.prepare_whole, task_id)
+            self.enqueue(JobKind.prepare_component, task_id, {"component_id": cid, "auto_solve": auto_solve})
+        meta = self.store.get_meta(task_id) or {}
+        if (not auto_solve) or bool(meta.get("whole")):
+            self.enqueue(JobKind.prepare_whole, task_id, {"auto_solve": auto_solve})
         self.store.patch_meta(task_id, state="components_ready", component_count=len(split.get("components", [])))
         self._publish(
             task_id,
@@ -527,7 +537,8 @@ class PipelineWorkflow:
                 "fallback_single_box": force_single,
             },
         )
-        self._schedule_plan(task_id, cid, plan, force_single)
+        if bool(job.payload.get("auto_solve", True)):
+            self._schedule_plan(task_id, cid, plan, force_single)
 
     def _single_component_frontier(self, task_id: str, component_id: Any, source: str = "components") -> dict[str, Any]:
         from A101.axis_orientation import add_box_anchorage
@@ -904,6 +915,13 @@ class PipelineWorkflow:
             "expanded_polygons": [],
         }
 
+    def whole_component_info(self, task_id: str) -> dict[str, Any]:
+        record = self.store.load_component(task_id, WHOLE_COMPONENT_KEY)
+        if record is not None:
+            return dict(record.get("info", record))
+        component = self._whole_component(task_id)
+        return component_public_info(component, max_useful_n=None, state="available")
+
     def handle_prepare_whole(self, job: PipelineJob) -> None:
         task_id = job.task_id
         if job.payload.get("schedule_only"):
@@ -925,11 +943,18 @@ class PipelineWorkflow:
         )
         prepared = self._prepare_problem(task_id, "whole", component)
         meta = self.store.get_meta(task_id) or {}
-        plan, force_single = choose_component_ns(
-            meta.get("requested_n", [1]),
-            prepared["max_useful_n"],
-            str(meta.get("scan_mode")) == "hard",
-        )
+        explicit_requested = job.payload.get("requested_n")
+        invalid: list[int] = []
+        if explicit_requested is not None:
+            plan = list(dict.fromkeys(int(n) for n in explicit_requested))
+            invalid = [n for n in plan if n < 1 or n > int(prepared["max_useful_n"])]
+            force_single = False
+        else:
+            plan, force_single = choose_component_ns(
+                meta.get("requested_n", [1]),
+                prepared["max_useful_n"],
+                str(meta.get("scan_mode")) == "hard",
+            )
         record = {
             "component": component,
             "state": "prepared",
@@ -940,7 +965,12 @@ class PipelineWorkflow:
             "info": component_public_info(component, prepared["max_useful_n"], "prepared"),
         }
         self.store.save_component(task_id, "whole", record)
-        self._schedule_plan(task_id, "whole", plan, force_single, whole=True)
+        if invalid:
+            raise ValueError(
+                f"n вне допустимого диапазона 1..{prepared['max_useful_n']}: {invalid}"
+            )
+        if bool(job.payload.get("auto_solve", True)):
+            self._schedule_plan(task_id, "whole", plan, force_single, whole=True)
 
     def handle_solve_whole(self, job: PipelineJob) -> None:
         from A101.reinforcement_components import solve_component_frontier
@@ -1065,18 +1095,42 @@ class PipelineWorkflow:
         return queued
 
     def schedule_component_n(self, task_id: str, component_id: int, values: Sequence[int]) -> list[int]:
-        record = self.store.load_component(task_id, component_id)
+        storage_id = component_storage_id(component_id)
+        requested = list(dict.fromkeys(int(n) for n in values))
+        invalid_basic = [n for n in requested if n < 1 or n > int(self.settings.max_n_value)]
+        if invalid_basic:
+            raise ValueError(f"n вне допустимого диапазона 1..{self.settings.max_n_value}: {invalid_basic}")
+        record = self.store.load_component(task_id, storage_id)
+        if storage_id == WHOLE_COMPONENT_KEY and (record is None or not record.get("max_useful_n")):
+            if not self.store.load_field(task_id):
+                raise KeyError("field не подготовлен; сначала вызовите /components/prepare")
+            self.enqueue(
+                JobKind.prepare_whole,
+                task_id,
+                {"auto_solve": True, "requested_n": requested},
+                dedupe_key=(
+                    f"prepare-whole-explicit:{task_id}:{self.store.generation(task_id)}:"
+                    f"{stable_digest(requested)}"
+                ),
+            )
+            return requested
         if record is None or not record.get("max_useful_n"):
             raise KeyError("component не подготовлена")
         max_n = int(record["max_useful_n"])
-        requested = list(dict.fromkeys(int(n) for n in values))
         invalid = [n for n in requested if n < 1 or n > max_n]
         if invalid:
             raise ValueError(f"n вне допустимого диапазона 1..{max_n}: {invalid}")
+        whole = storage_id == WHOLE_COMPONENT_KEY
+        kind = JobKind.solve_whole if whole else JobKind.solve_component
         for n in requested:
             self.enqueue(
-                JobKind.solve_component,
+                kind,
                 task_id,
-                {"component_id": int(component_id), "n": n, "force_single_box": False, "source": "components"},
+                {
+                    "component_id": WHOLE_COMPONENT_KEY if whole else int(storage_id),
+                    "n": n,
+                    "force_single_box": False,
+                    "source": "whole" if whole else "components",
+                },
             )
         return requested

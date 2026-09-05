@@ -919,7 +919,7 @@ def solve_component_frontier(
     n_values: Sequence[int],
     *,
     data: Mapping[str, Any] | None = None,
-    timeout: float | None = 120.0,
+    timeout: float | None = None,
     solver_time_limit: float | None = None,
     threads: int = 1,
     backend: str = "highs",

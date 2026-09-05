@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -26,7 +27,13 @@ from .models import (
     TaskParameters,
     WsCommand,
 )
-from .pipeline import PipelineWorkflow, normalize_input_payload, public_value
+from .pipeline import (
+    PipelineWorkflow,
+    component_storage_id,
+    normalize_input_payload,
+    public_value,
+    to_compat_result,
+)
 from .planner import normalize_n_request, validate_n_request_limits, validate_solver_limits
 from .source_polygons import SourcePolygonsError, source_polygons_from_input
 from .store import RedisStore
@@ -54,7 +61,13 @@ app.add_middleware(
 )
 
 
-def _build_task(parameters: TaskParameters, input_obj: dict) -> TaskCreated:
+def _build_task(
+    parameters: TaskParameters,
+    input_obj: dict,
+    *,
+    start_pipeline: bool = True,
+    manual_mode: bool = False,
+) -> TaskCreated:
     validate_n_request_limits(
         parameters.n,
         max_values=settings.max_planned_n_values,
@@ -83,9 +96,10 @@ def _build_task(parameters: TaskParameters, input_obj: dict) -> TaskCreated:
     task_id = uuid.uuid4().hex
     now = time.time()
     limit = int(requested_limit or settings.max_jobs_per_task)
+    initial_state = "queued_preparation" if start_pipeline else "uploaded"
     meta = {
         "task_id": task_id,
-        "state": "queued_preparation",
+        "state": initial_state,
         "created_at": now,
         "updated_at": now,
         "expires_at": now + settings.task_ttl_seconds,
@@ -100,6 +114,7 @@ def _build_task(parameters: TaskParameters, input_obj: dict) -> TaskCreated:
         "component_result_top_k": int(parameters.component_result_top_k),
         "validate_results": bool(parameters.validate_results),
         "max_concurrent_jobs": limit,
+        "manual_mode": bool(manual_mode),
     }
     plan = {
         "mode": mode,
@@ -110,14 +125,56 @@ def _build_task(parameters: TaskParameters, input_obj: dict) -> TaskCreated:
         "window": max(1, limit * settings.schedule_window_factor),
     }
     store.create_task(task_id, meta, plan, input_obj)
-    store.publish_event(task_id, "task_created", {"state": meta["state"], "n_mode": mode, "planned": len(order)})
-    workflow.bootstrap_task(task_id)
+    store.publish_event(
+        task_id,
+        "task_created",
+        {
+            "state": meta["state"],
+            "n_mode": mode,
+            "planned": len(order),
+            "manual_mode": bool(manual_mode),
+        },
+    )
+    if start_pipeline:
+        workflow.bootstrap_task(task_id)
     return TaskCreated(
         task_id=task_id,
         state=meta["state"],
         websocket_url=f"/v1/tasks/{task_id}/ws",
         status_url=f"/v1/tasks/{task_id}",
     )
+
+
+async def _read_upload_input(file: UploadFile, *, dxf_only: bool = False) -> dict:
+    content = await file.read(settings.max_upload_bytes + 1)
+    if len(content) > settings.max_upload_bytes:
+        raise HTTPException(status_code=413, detail="Input file is too large")
+
+    filename = file.filename or "input.dxf"
+    suffix = filename.lower()
+    if suffix.endswith(".dxf"):
+        return {"kind": "dxf", "filename": filename, "content": content}
+    if dxf_only:
+        raise HTTPException(status_code=415, detail="Supported file: .dxf")
+    if suffix.endswith(".json"):
+        payload = loads(content, None)
+        try:
+            return normalize_input_payload(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    raise HTTPException(status_code=415, detail="Supported files: .dxf or .json")
+
+
+def _manual_parameters_from_json(config: str) -> TaskParameters:
+    try:
+        payload = json.loads(config or "{}")
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON config: {exc.msg}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("config должен быть JSON-объектом")
+    payload = dict(payload)
+    payload.setdefault("n", [1])
+    return TaskParameters.model_validate(payload)
 
 
 def _apply_upload_overrides(
@@ -183,26 +240,48 @@ async def create_task_upload(
         )
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
-
-    content = await file.read(settings.max_upload_bytes + 1)
-    if len(content) > settings.max_upload_bytes:
-        raise HTTPException(status_code=413, detail="Input file is too large")
-    suffix = (file.filename or "").lower()
-    if suffix.endswith(".dxf"):
-        input_obj = {"kind": "dxf", "filename": file.filename or "input.dxf", "content": content}
-    elif suffix.endswith(".json"):
-        payload = loads(content, None)
-        try:
-            input_obj = normalize_input_payload(payload)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-    else:
-        raise HTTPException(status_code=415, detail="Supported files: .dxf or .json")
+    input_obj = await _read_upload_input(file)
 
     try:
         return await run_in_threadpool(_build_task, parameters, input_obj)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/v1/tasks/upload-only", response_model=TaskCreated)
+async def create_task_upload_only(
+    file: Annotated[UploadFile, File()],
+    config: Annotated[str, Form()] = "{}",
+):
+    """Persist a DXF task without starting preparation or any solver jobs."""
+    try:
+        parameters = _manual_parameters_from_json(config)
+    except (ValidationError, ValueError) as exc:
+        detail = exc.errors() if isinstance(exc, ValidationError) else str(exc)
+        raise HTTPException(status_code=422, detail=detail) from exc
+    input_obj = await _read_upload_input(file, dxf_only=True)
+    try:
+        return await run_in_threadpool(
+            lambda: _build_task(
+                parameters,
+                input_obj,
+                start_pipeline=False,
+                manual_mode=True,
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/v1/source-polygons/upload")
+async def source_polygons_upload(file: Annotated[UploadFile, File()]):
+    """Parse a DXF and return source polygons without creating a task or writing Redis state."""
+    input_obj = await _read_upload_input(file, dxf_only=True)
+    try:
+        polygons = await run_in_threadpool(source_polygons_from_input, input_obj)
+    except SourcePolygonsError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse(polygons)
 
 
 @app.get("/v1/tasks/{task_id}")
@@ -245,11 +324,7 @@ async def list_components(task_id: str):
                 "active_indices": split.get("active_indices", []),
                 "background_only_indices": split.get("background_only_indices", []),
                 "degenerate_indices": split.get("degenerate_indices", []),
-                "components": [
-                    row.get("info", row)
-                    for row in components
-                    if row.get("component", {}).get("id") != -1
-                ],
+                "components": [row.get("info", row) for row in components],
             }
         )
     )
@@ -260,13 +335,21 @@ async def list_components(task_id: str):
 async def prepare_existing_task(task_id: str):
     if await run_in_threadpool(store.get_meta, task_id) is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    queued = await run_in_threadpool(workflow.enqueue, "prepare_field", task_id)
+    queued = await run_in_threadpool(workflow.prepare_task, task_id)
     return {"task_id": task_id, "queued": bool(queued)}
 
 
 @app.get("/v1/tasks/{task_id}/components/{component_id}")
 async def get_component(task_id: str, component_id: int):
-    row = await run_in_threadpool(store.load_component, task_id, component_id)
+    storage_id = component_storage_id(component_id)
+    row = await run_in_threadpool(store.load_component, task_id, storage_id)
+    if row is None and storage_id == "whole":
+        try:
+            info = await run_in_threadpool(workflow.whole_component_info, task_id)
+        except (KeyError, ValueError):
+            info = None
+        if info is not None:
+            return JSONResponse(to_jsonable({"task_id": task_id, **info}))
     if row is None:
         raise HTTPException(status_code=404, detail="Component not found")
     return JSONResponse(to_jsonable({"task_id": task_id, **row.get("info", row)}))
@@ -287,7 +370,7 @@ async def schedule_component_n(task_id: str, component_id: int, body: ComponentN
 async def list_component_results(task_id: str, component_id: int):
     if await run_in_threadpool(store.get_meta, task_id) is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    frontier = await run_in_threadpool(store.load_frontier, task_id, component_id)
+    frontier = await run_in_threadpool(store.load_frontier, task_id, component_storage_id(component_id))
     return {
         "task_id": task_id,
         "component_id": component_id,
@@ -306,7 +389,9 @@ async def list_component_results(task_id: str, component_id: int):
 
 @app.get("/v1/tasks/{task_id}/components/{component_id}/results/{n}")
 async def get_component_result(task_id: str, component_id: int, n: int):
-    row = (await run_in_threadpool(store.load_frontier, task_id, component_id)).get(int(n))
+    row = (
+        await run_in_threadpool(store.load_frontier, task_id, component_storage_id(component_id))
+    ).get(int(n))
     if row is None:
         raise HTTPException(status_code=404, detail="Component result not found")
     return JSONResponse(public_value(row))
@@ -368,7 +453,12 @@ async def list_results(task_id: str):
 
 @app.get("/v1/tasks/{task_id}/results/{n}")
 async def get_result(task_id: str, n: int):
-    result = await run_in_threadpool(store.get_result, task_id, n)
+    solution = await run_in_threadpool(store.best_solution, task_id, n)
+    result = (
+        to_compat_result(solution)
+        if solution is not None
+        else await run_in_threadpool(store.get_result, task_id, n)
+    )
     if result is None:
         raise HTTPException(status_code=404, detail="Result not found")
     return JSONResponse(to_jsonable(result))
@@ -378,7 +468,12 @@ async def get_result(task_id: str, n: int):
 async def get_result_dxf(task_id: str, n: int):
     if await run_in_threadpool(store.get_meta, task_id) is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    result = await run_in_threadpool(store.get_result, task_id, n)
+    solution = await run_in_threadpool(store.best_solution, task_id, n)
+    result = (
+        to_compat_result(solution)
+        if solution is not None
+        else await run_in_threadpool(store.get_result, task_id, n)
+    )
     if result is None:
         raise HTTPException(status_code=404, detail="Result not found")
     try:

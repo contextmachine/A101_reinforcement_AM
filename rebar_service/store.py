@@ -641,6 +641,10 @@ class RedisStore:
         pending = self.pending_jobs(task_id)
         if pending:
             state = "running"
+        elif meta.get("manual_mode"):
+            # A manually controlled task is intentionally allowed to be idle with
+            # zero solutions: the client can schedule component/whole N values later.
+            state = "ready" if self.load_field(task_id) else "uploaded"
         else:
             state = "completed" if self.solutions(task_id) else "completed_with_errors"
         if state != meta.get("state"):
