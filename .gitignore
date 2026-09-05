@@ -8,4 +8,5 @@ __pycache__/
 *.dxf
 redis-data/
 /deploy/k8s-private/
-/deploy/k8s/secrets/
+/deploy/k8s/secrets/*.yaml
+!/deploy/k8s/secrets/*.example.yaml

@@ -62,13 +62,14 @@ def test_configmap_points_to_existing_postgres_service_and_has_no_durable_redis_
     assert "REBAR_EVENT_MAXLEN" not in text
 
 
-def test_repository_contains_no_committed_redis_password_value():
+def test_repository_contains_safe_redis_secret_example():
     root = Path(__file__).resolve().parents[1]
-    secret = root / "deploy/k8s/secrets/rebar-secrets.dev.yaml"
-    assert not secret.exists()
-    example = (root / "deploy/k8s/secrets/rebar-secrets.dev.example.yaml").read_text(encoding="utf-8")
-    assert "<replace-me>" in example
-    assert "a8e47b955fea42ab99bf32230bf14bc8" not in example
+    example_path = root / "deploy/k8s/secrets/rebar-secrets.dev.example.yaml"
+    assert example_path.exists()
+    doc = yaml.safe_load(example_path.read_text(encoding="utf-8"))
+    values = doc["stringData"]
+    assert values["REBAR_REDIS_PASSWORD"] == "<replace-me>"
+    assert "<replace-me>" in values["REBAR_REDIS_URL"]
 
 
 def test_database_migration_job_runs_alembic_with_existing_postgres_secret():
