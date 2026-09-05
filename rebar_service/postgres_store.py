@@ -38,6 +38,38 @@ def json_safe_value(value: Any) -> Any:
     return to_jsonable(value)
 
 
+_GEOJSON_GEOMETRY_TYPES = {
+    "Point",
+    "LineString",
+    "Polygon",
+    "MultiPoint",
+    "MultiLineString",
+    "MultiPolygon",
+    "GeometryCollection",
+}
+
+
+def restore_json_geometries(value: Any) -> Any:
+    """Rehydrate GeoJSON geometries stored inside algorithm JSON results."""
+
+    if isinstance(value, Mapping):
+        geometry_type = value.get("type")
+        if (
+            geometry_type in _GEOJSON_GEOMETRY_TYPES
+            and ("coordinates" in value or "geometries" in value)
+        ):
+            from shapely.geometry import shape
+
+            try:
+                return shape(dict(value))
+            except (TypeError, ValueError):
+                pass
+        return {str(key): restore_json_geometries(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [restore_json_geometries(item) for item in value]
+    return value
+
+
 def _json_param(value: Any) -> str:
     return dumps(json_safe_value(value))
 
@@ -2360,7 +2392,10 @@ class PostgresStore:
                     "component_id": self.component_db_id(component_id),
                 },
             ).mappings().all()
-        return {int(row["n"]): dict(_json_value(row["result"], {}) or {}) for row in rows}
+        return {
+            int(row["n"]): dict(restore_json_geometries(_json_value(row["result"], {}) or {}))
+            for row in rows
+        }
 
     def all_frontiers(
         self, task_id: str, include_whole: bool = False, *, variant: str = "raw", overlay_id: int | None = 0
