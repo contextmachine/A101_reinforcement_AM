@@ -1,4 +1,5 @@
 from rebar_service.models import TaskCreate
+from rebar_service.pipeline import to_compat_result
 
 
 def test_task_create_scalar_n():
@@ -14,25 +15,55 @@ def test_task_create_scalar_n():
     assert task.n == 30
     assert task.axis == "y"
 
-def test_finalize_solution_marks_grid_optimality_scope(monkeypatch):
-    import rebar_service.pipeline as pipeline
 
-    monkeypatch.setattr(pipeline, "world_rectangles", lambda *_: [(0, 0, 1, 1, 1)])
-    monkeypatch.setattr(
-        pipeline,
-        "fit_rebar_layout",
-        lambda **_: {"is_feasible": True, "is_optimal": False, "zones": [], "rectangles": []},
-    )
-    monkeypatch.setattr(pipeline, "rebar_summary", lambda **_: {"N": 1, "mass": 1.0, "zones": []})
-    context = {
-        "poly_mos": [], "recipes": {}, "steps": {1: 1}, "densities": {1: 1},
-        "min_width_mm": 1, "axis": "y", "max_snap_mm": 0, "min_bar_gap_mm": 0,
-        "diameters": {1: 1}, "steel_density_kg_m3": 7850, "base_holds": {1: 0},
+def test_current_solution_is_exposed_in_historical_result_shape():
+    solution = {
+        "solution_id": "s1",
+        "source": "components",
+        "total_N": 3,
+        "component_ns": {"0": 1, "1": 2},
+        "proxy_mass": 12.5,
+        "actual_mass_kg": 10.25,
+        "is_feasible": True,
+        "is_optimal": True,
+        "rectangles": [(0, 0, 1000, 2000, 1)],
+        "anchored_boxes": [(0, 0, 1000, 2000, 1)],
+        "component_choices": {
+            0: {"solver_result": {"is_feasible": True}, "fit_result": {"is_feasible": True}},
+        },
+        "bar_layout": {
+            "is_feasible": True,
+            "zones": [
+                {
+                    "id": 4,
+                    "class": 1,
+                    "background": False,
+                    "diameter": 20,
+                    "step": 150,
+                    "primary_bounds": (0, 0, 1000, 2000),
+                    "bounds": (0, 0, 1200, 2000),
+                    "bars": [(0, 0, 0, 2000)],
+                }
+            ],
+        },
     }
-    result = pipeline.finalize_solution(
-        {"is_feasible": True, "is_optimal": True, "rectangles": [(0, 0, 0, 0, 1)], "total_cost": 1.0},
-        context,
-    )
-    assert result["solver_is_optimal"] is True
-    assert result["postprocess_is_optimal"] is False
-    assert result["optimality_scope"] == "prepared_grid"
+    result = to_compat_result(solution)
+    assert result["solution_id"] == "s1"
+    assert result["total_N"] == 3
+    assert result["component_ns"] == {"0": 1, "1": 2}
+    assert result["summary"]["N"] == 3
+    assert result["summary"]["mass"] == 10.25
+    assert result["summary"]["zones"][0]["final rectangle"] == (0.0, 0.0, 1200.0, 2000.0)
+    assert result["fit_result"]["zones"][0]["class"] == 1
+
+
+def test_settings_accept_unlimited_timeout_markers(monkeypatch):
+    from rebar_service.config import Settings
+
+    monkeypatch.setenv("REBAR_SOLVER_TIMEOUT", "none")
+    monkeypatch.setenv("REBAR_SOLVER_TIME_LIMIT", "unlimited")
+    monkeypatch.setenv("REBAR_FIT_TIME_LIMIT", "null")
+    settings = Settings()
+    assert settings.solver_timeout is None
+    assert settings.solver_time_limit is None
+    assert settings.fit_time_limit is None

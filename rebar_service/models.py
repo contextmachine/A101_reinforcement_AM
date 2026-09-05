@@ -47,7 +47,7 @@ class QuantizerOptions(BaseModel):
 
 class SolverOptions(BaseModel):
     backend: Literal["highs", "cbc"] = "highs"
-    timeout_seconds: float = Field(default=120.0, gt=0)
+    timeout_seconds: float | None = Field(default=None, gt=0)
     solver_time_limit: float | None = Field(default=None, gt=0)
     threads: int = Field(default=1, ge=1)
     require_optimal: bool = True
@@ -79,6 +79,10 @@ class TaskParameters(BaseModel):
     axis: Literal["x", "y"] = "y"
     max_snap_mm: float = Field(default=600.0, ge=0)
     min_bar_gap_mm: float = Field(default=50.0, ge=0)
+    scan_mode: Literal["requested", "hard"] = "requested"
+    whole: bool = False
+    component_result_top_k: int = Field(default=5, ge=1, le=100)
+    validate_results: bool = False
     max_concurrent_jobs: int | None = Field(default=None, ge=1)
     quantizer: QuantizerOptions = Field(default_factory=QuantizerOptions)
     solver: SolverOptions = Field(default_factory=SolverOptions)
@@ -127,3 +131,39 @@ class ResultEnvelope(BaseModel):
     n: int
     status: str
     result: dict | None = None
+
+
+class ComponentNRequest(BaseModel):
+    n: list[int] = Field(min_length=1)
+
+    @field_validator("n")
+    @classmethod
+    def validate_n(cls, value: list[int]) -> list[int]:
+        values = list(dict.fromkeys(int(v) for v in value))
+        if not values or any(v < 1 for v in values):
+            raise ValueError("n должен содержать положительные целые значения")
+        return values
+
+
+class ComponentInfo(BaseModel):
+    id: int
+    polygon_indices: list[int] = Field(default_factory=list)
+    classes: list[int] = Field(default_factory=list)
+    loads: list[float] = Field(default_factory=list)
+    bounds: list[float] | None = None
+    demand_bounds: list[float] | None = None
+    max_useful_n: int | None = None
+    prepared: bool = False
+    state: str = "created"
+
+
+class SolutionSummary(BaseModel):
+    solution_id: str
+    source: str
+    total_N: int
+    component_ns: dict[str, int] = Field(default_factory=dict)
+    proxy_mass: float | None = None
+    actual_mass_kg: float | None = None
+    is_feasible: bool = False
+    status: str = "unknown"
+    result_url: str | None = None

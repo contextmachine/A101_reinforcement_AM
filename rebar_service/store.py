@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import contextlib
-import json
 import time
 import uuid
 from typing import Any, Iterator, Mapping
 
 try:
     import redis
-except ImportError:  # pragma: no cover - dependency is installed in the image
+except ImportError:  # pragma: no cover - installed in the production image
     redis = None
 
 from .codec import decode_object, encode_object, sha256
@@ -17,6 +16,22 @@ from .jsonutil import dumps, loads, to_jsonable
 
 
 class RedisStore:
+    """Single Redis store for tasks, component work, solutions and worker jobs."""
+
+    ENQUEUE_LUA = """
+    local dedupe = KEYS[1]
+    local ready = KEYS[2]
+    local workload = KEYS[3]
+    local pending = KEYS[4]
+    if redis.call('SETNX', dedupe, ARGV[1]) == 0 then return 0 end
+    redis.call('EXPIRE', dedupe, ARGV[2])
+    redis.call('LPUSH', ready, ARGV[3])
+    redis.call('LPUSH', workload, ARGV[3])
+    redis.call('SADD', pending, ARGV[1])
+    redis.call('EXPIRE', pending, ARGV[2])
+    return 1
+    """
+
     def __init__(self, settings: Settings):
         if redis is None:
             raise ImportError("Установите пакет redis")
@@ -34,12 +49,17 @@ class RedisStore:
     def job_key(job_id: str) -> str:
         return f"rebar:job:{job_id}"
 
+    @staticmethod
+    def dedupe_key(value: str) -> str:
+        return f"rebar:job-dedupe:{sha256(value.encode())}"
+
     def _expire(self, *keys: str) -> None:
-        if keys:
-            pipe = self.redis.pipeline(transaction=False)
-            for key in keys:
-                pipe.expire(key, self.settings.task_ttl_seconds)
-            pipe.execute()
+        if not keys:
+            return
+        pipe = self.redis.pipeline(transaction=False)
+        for key in keys:
+            pipe.expire(key, self.settings.task_ttl_seconds)
+        pipe.execute()
 
     def _task_expire_at(self, task_id: str) -> int:
         raw = loads(self.redis.get(self.task_key(task_id, "meta")), None)
@@ -70,7 +90,7 @@ class RedisStore:
             """
             try:
                 self.redis.eval(script, 1, key, token)
-            except redis.RedisError:
+            except Exception:
                 pass
 
     # ---------- task metadata ----------
@@ -80,8 +100,9 @@ class RedisStore:
         pipe = self.redis.pipeline()
         pipe.set(meta_key, dumps(meta), ex=self.settings.task_ttl_seconds, nx=True)
         pipe.set(plan_key, dumps(plan), ex=self.settings.task_ttl_seconds, nx=True)
+        pipe.set(self.task_key(task_id, "generation"), 0, ex=self.settings.task_ttl_seconds, nx=True)
         created = pipe.execute()
-        if not all(created):
+        if not created[0] or not created[1]:
             raise ValueError(f"Задача {task_id} уже существует")
         self.put_object(task_id, "input", input_obj)
 
@@ -89,7 +110,11 @@ class RedisStore:
         return loads(self.redis.get(self.task_key(task_id, "meta")), None)
 
     def set_meta(self, task_id: str, meta: Mapping[str, Any]) -> None:
-        self.redis.set(self.task_key(task_id, "meta"), dumps(meta), exat=int(meta.get("expires_at", time.time() + self.settings.task_ttl_seconds)))
+        self.redis.set(
+            self.task_key(task_id, "meta"),
+            dumps(meta),
+            exat=int(meta.get("expires_at", time.time() + self.settings.task_ttl_seconds)),
+        )
 
     def patch_meta(self, task_id: str, **changes: Any) -> dict[str, Any]:
         with self.lock(f"task:{task_id}:meta"):
@@ -101,6 +126,13 @@ class RedisStore:
             self.set_meta(task_id, meta)
             return meta
 
+    # Names used by the pipeline are intentionally aliases of the canonical task metadata.
+    def task_meta(self, task_id: str) -> dict[str, Any]:
+        return dict(self.get_meta(task_id) or {})
+
+    def update_task_meta(self, task_id: str, **changes: Any) -> dict[str, Any]:
+        return self.patch_meta(task_id, **changes)
+
     def get_plan(self, task_id: str) -> dict[str, Any]:
         plan = loads(self.redis.get(self.task_key(task_id, "plan")), None)
         if plan is None:
@@ -110,7 +142,32 @@ class RedisStore:
     def set_plan(self, task_id: str, plan: Mapping[str, Any]) -> None:
         self.redis.set(self.task_key(task_id, "plan"), dumps(plan), exat=self._task_expire_at(task_id))
 
-    # ---------- chunked blobs ----------
+    def add_requested_ns(self, task_id: str, ns: list[int]) -> dict[str, Any]:
+        if self.get_meta(task_id) is None:
+            raise KeyError(task_id)
+        values = list(dict.fromkeys(int(n) for n in ns))
+        if not values or any(n < 1 for n in values):
+            raise ValueError("N должен быть положительным")
+        if any(n > self.settings.max_n_value for n in values):
+            raise ValueError(f"N превышает серверный лимит {self.settings.max_n_value}")
+        with self.lock(f"task:{task_id}:plan"):
+            plan = self.get_plan(task_id)
+            order = list(map(int, plan.get("order", [])))
+            for n in values:
+                if n not in order:
+                    order.append(n)
+            if len(order) > self.settings.max_planned_n_values:
+                raise ValueError(f"План превысит лимит {self.settings.max_planned_n_values} значений N")
+            plan["order"] = order
+            plan["paused"] = False
+            plan["exhausted"] = False
+            self.set_plan(task_id, plan)
+        meta = self.get_meta(task_id) or {}
+        requested = list(dict.fromkeys([*map(int, meta.get("requested_n", [])), *values]))
+        self.patch_meta(task_id, requested_n=requested, state="running", cancelled=False)
+        return plan
+
+    # ---------- chunked objects ----------
     def put_object(self, task_id: str, name: str, value: Any) -> dict[str, Any]:
         payload, codec = encode_object(value)
         return self.put_blob(task_id, name, payload, codec)
@@ -158,6 +215,12 @@ class RedisStore:
         if keys:
             self.redis.delete(*keys)
 
+    def _get_object_optional(self, task_id: str, name: str, default: Any = None) -> Any:
+        try:
+            return self.get_object(task_id, name)
+        except KeyError:
+            return default
+
     # ---------- events ----------
     def publish_event(self, task_id: str, event_type: str, payload: Mapping[str, Any]) -> str:
         key = self.task_key(task_id, "events")
@@ -173,9 +236,20 @@ class RedisStore:
 
     def read_events(self, task_id: str, after: str = "0-0", count: int = 200) -> list[dict[str, Any]]:
         rows = self.redis.xrange(self.task_key(task_id, "events"), min=f"({after}", max="+", count=count)
-        return [{"id": eid.decode() if isinstance(eid, bytes) else str(eid), **loads(fields.get(b"json"), {})} for eid, fields in rows]
+        return [
+            {"id": eid.decode() if isinstance(eid, bytes) else str(eid), **loads(fields.get(b"json"), {})}
+            for eid, fields in rows
+        ]
 
-    # ---------- N states / results ----------
+    def all_events(self, task_id: str, start: int = 0, limit: int = 10_000) -> list[dict[str, Any]]:
+        rows = self.redis.xrange(self.task_key(task_id, "events"), min="-", max="+", count=max(1, int(limit)))
+        values = [
+            {"id": eid.decode() if isinstance(eid, bytes) else str(eid), **loads(fields.get(b"json"), {})}
+            for eid, fields in rows
+        ]
+        return values[max(0, int(start)) :]
+
+    # ---------- compatibility N states / results ----------
     def set_n_status(self, task_id: str, n: int, status: str, **extra: Any) -> None:
         key = self.task_key(task_id, "n-status")
         value = {"n": int(n), "status": status, "updated_at": time.time(), **to_jsonable(extra)}
@@ -184,10 +258,7 @@ class RedisStore:
 
     def get_n_statuses(self, task_id: str) -> dict[str, dict[str, Any]]:
         raw = self.redis.hgetall(self.task_key(task_id, "n-status"))
-        return {
-            (k.decode() if isinstance(k, bytes) else str(k)): loads(v, {})
-            for k, v in raw.items()
-        }
+        return {(k.decode() if isinstance(k, bytes) else str(k)): loads(v, {}) for k, v in raw.items()}
 
     @staticmethod
     def _result_rank(meta: Mapping[str, Any]) -> tuple[int, int, float, int]:
@@ -202,7 +273,7 @@ class RedisStore:
             0 if meta.get("kind") == "final" else 1,
         )
 
-    def save_best_result(self, task_id: str, n: int, result: Mapping[str, Any], kind: str) -> tuple[bool, dict[str, Any]]:
+    def save_best_result(self, task_id: str, n: int, result: Mapping[str, Any], kind: str = "final") -> tuple[bool, dict[str, Any]]:
         solver_result = result.get("solver_result") if isinstance(result.get("solver_result"), Mapping) else {}
         total_cost = result.get("total_cost")
         if total_cost is None:
@@ -241,49 +312,153 @@ class RedisStore:
         raw = self.redis.hgetall(self.task_key(task_id, "result-meta"))
         return {(k.decode() if isinstance(k, bytes) else str(k)): loads(v, {}) for k, v in raw.items()}
 
-    # ---------- compact solver data ----------
-    @staticmethod
-    def merge_data_values(current: Mapping[str, Any] | None, incoming: Mapping[str, Any] | None) -> dict[str, Any]:
-        a, b = dict(current or {}), dict(incoming or {})
-        problem_id = b.get("problem_id") or a.get("problem_id")
-        if a.get("problem_id") and b.get("problem_id") and a["problem_id"] != b["problem_id"]:
-            raise ValueError("Нельзя объединить solver data разных problem_id")
-        out = {"schema_version": max(int(a.get("schema_version", 0)), int(b.get("schema_version", 0)), 3), "problem_id": problem_id, "solutions": {}, "infeasible": []}
-        for source in (a, b):
-            for n, entry in dict(source.get("solutions", {})).items():
-                if not isinstance(entry, Mapping) or not entry.get("indices"):
-                    continue
-                old = out["solutions"].get(str(n))
-                cost = entry.get("cost")
-                rank = (0 if entry.get("optimal") else 1, float("inf") if cost is None else float(cost))
-                old_cost = None if old is None else old.get("cost")
-                old_rank = (9, float("inf")) if old is None else (
-                    0 if old.get("optimal") else 1,
-                    float("inf") if old_cost is None else float(old_cost),
-                )
-                if rank < old_rank:
-                    out["solutions"][str(n)] = to_jsonable(entry)
-        infeasible = {int(x) for source in (a, b) for x in source.get("infeasible", [])}
-        infeasible -= {int(n) for n in out["solutions"]}
-        out["infeasible"] = sorted(infeasible)
+    # ---------- component pipeline data ----------
+    def save_field(self, task_id: str, value: Mapping[str, Any]) -> None:
+        self.put_object(task_id, "field", dict(value))
+
+    def load_field(self, task_id: str) -> dict[str, Any]:
+        return dict(self._get_object_optional(task_id, "field", {}) or {})
+
+    def save_component(self, task_id: str, component_id: Any, value: Mapping[str, Any]) -> None:
+        cid = str(component_id)
+        self.put_object(task_id, f"component-{cid}", dict(value))
+        key = self.task_key(task_id, "components")
+        self.redis.sadd(key, cid)
+        self.redis.expireat(key, self._task_expire_at(task_id))
+
+    def load_component(self, task_id: str, component_id: Any) -> dict[str, Any] | None:
+        value = self._get_object_optional(task_id, f"component-{component_id}", None)
+        return None if value is None else dict(value)
+
+    def component_ids(self, task_id: str) -> list[str]:
+        values = self.redis.smembers(self.task_key(task_id, "components")) or []
+        out = [v.decode() if isinstance(v, bytes) else str(v) for v in values]
+        return sorted(out, key=lambda x: (x == "whole", int(x) if x.lstrip("-").isdigit() else x))
+
+    def components(self, task_id: str) -> list[dict[str, Any]]:
+        return [value for cid in self.component_ids(task_id) if (value := self.load_component(task_id, cid)) is not None]
+
+    def save_problem(self, task_id: str, component_id: Any, value: Mapping[str, Any]) -> None:
+        self.put_object(task_id, f"problem-{component_id}", dict(value))
+
+    def load_problem(self, task_id: str, component_id: Any) -> dict[str, Any] | None:
+        value = self._get_object_optional(task_id, f"problem-{component_id}", None)
+        return None if value is None else dict(value)
+
+    def save_solver_result(self, task_id: str, component_id: Any, n: int, value: Mapping[str, Any]) -> None:
+        self.put_object(task_id, f"solver-{component_id}-{int(n)}", dict(value))
+
+    def load_solver_result(self, task_id: str, component_id: Any, n: int) -> dict[str, Any] | None:
+        value = self._get_object_optional(task_id, f"solver-{component_id}-{int(n)}", None)
+        return None if value is None else dict(value)
+
+    def save_frontier_result(self, task_id: str, component_id: Any, n: int, value: Mapping[str, Any]) -> None:
+        cid = str(component_id)
+        self.put_object(task_id, f"frontier-{cid}-{int(n)}", dict(value))
+        n_key = self.task_key(task_id, f"frontier-n:{cid}")
+        version_key = self.task_key(task_id, "frontier-version")
+        pipe = self.redis.pipeline(transaction=False)
+        pipe.sadd(n_key, int(n))
+        pipe.incr(version_key)
+        pipe.expireat(n_key, self._task_expire_at(task_id))
+        pipe.expireat(version_key, self._task_expire_at(task_id))
+        pipe.execute()
+
+    def frontier_version(self, task_id: str) -> int:
+        return int(self.redis.get(self.task_key(task_id, "frontier-version")) or 0)
+
+    def load_frontier(self, task_id: str, component_id: Any) -> dict[int, dict[str, Any]]:
+        cid = str(component_id)
+        values = self.redis.smembers(self.task_key(task_id, f"frontier-n:{cid}")) or []
+        out: dict[int, dict[str, Any]] = {}
+        for raw in values:
+            n = int(raw)
+            value = self._get_object_optional(task_id, f"frontier-{cid}-{n}", None)
+            if value is not None:
+                out[n] = dict(value)
+        return dict(sorted(out.items()))
+
+    def all_frontiers(self, task_id: str, include_whole: bool = False) -> dict[Any, dict[int, dict[str, Any]]]:
+        out: dict[Any, dict[int, dict[str, Any]]] = {}
+        for cid in self.component_ids(task_id):
+            if cid == "whole" and not include_whole:
+                continue
+            frontier = self.load_frontier(task_id, cid)
+            if frontier:
+                key: Any = int(cid) if cid.lstrip("-").isdigit() else cid
+                out[key] = frontier
         return out
 
-    def get_solver_data(self, task_id: str) -> dict[str, Any]:
-        return loads(self.redis.get(self.task_key(task_id, "solver-data")), {})
+    def save_candidate(self, task_id: str, candidate_id: str, value: Mapping[str, Any]) -> None:
+        self.put_object(task_id, f"candidate-{candidate_id}", dict(value))
 
-    def merge_solver_data(self, task_id: str, incoming: Mapping[str, Any]) -> dict[str, Any]:
-        key = self.task_key(task_id, "solver-data")
-        with self.lock(f"task:{task_id}:solver-data"):
-            merged = self.merge_data_values(loads(self.redis.get(key), {}), incoming)
-            self.redis.set(key, dumps(merged), exat=self._task_expire_at(task_id))
-            return merged
+    def load_candidate(self, task_id: str, candidate_id: str) -> dict[str, Any] | None:
+        value = self._get_object_optional(task_id, f"candidate-{candidate_id}", None)
+        return None if value is None else dict(value)
 
-    # ---------- cancellation ----------
+    def save_solution(self, task_id: str, solution: Mapping[str, Any]) -> None:
+        row = dict(solution)
+        sid = str(row["solution_id"])
+        total_n = int(row["total_N"])
+        source = str(row.get("source", "components"))
+        score = float(row.get("actual_mass_kg", row.get("proxy_mass", float("inf"))))
+        self.put_object(task_id, f"solution-{sid}", row)
+        total_key = self.task_key(task_id, f"solutions:{total_n}")
+        source_key = self.task_key(task_id, f"solution-source:{source}")
+        all_key = self.task_key(task_id, "solution-ids")
+        pipe = self.redis.pipeline(transaction=False)
+        pipe.zadd(total_key, {sid: score})
+        pipe.sadd(source_key, sid)
+        pipe.sadd(all_key, sid)
+        expires = self._task_expire_at(task_id)
+        pipe.expireat(total_key, expires)
+        pipe.expireat(source_key, expires)
+        pipe.expireat(all_key, expires)
+        pipe.execute()
+
+    def load_solution(self, task_id: str, solution_id: str) -> dict[str, Any] | None:
+        value = self._get_object_optional(task_id, f"solution-{solution_id}", None)
+        return None if value is None else dict(value)
+
+    def solutions(self, task_id: str, total_n: int | None = None, source: str | None = None) -> list[dict[str, Any]]:
+        if total_n is not None:
+            ids = self.redis.zrange(self.task_key(task_id, f"solutions:{int(total_n)}"), 0, -1) or []
+        elif source is not None:
+            ids = self.redis.smembers(self.task_key(task_id, f"solution-source:{source}")) or []
+        else:
+            ids = self.redis.smembers(self.task_key(task_id, "solution-ids")) or []
+        decoded = [x.decode() if isinstance(x, bytes) else str(x) for x in ids]
+        rows = [row for sid in decoded if (row := self.load_solution(task_id, sid)) is not None]
+        if total_n is not None:
+            rows = [r for r in rows if int(r.get("total_N", -1)) == int(total_n)]
+        if source is not None:
+            rows = [r for r in rows if str(r.get("source")) == str(source)]
+        return sorted(
+            rows,
+            key=lambda r: (
+                not bool(r.get("is_feasible")),
+                float(r.get("actual_mass_kg", float("inf"))),
+                float(r.get("proxy_mass", float("inf"))),
+            ),
+        )
+
+    def best_solution(self, task_id: str, total_n: int) -> dict[str, Any] | None:
+        rows = self.solutions(task_id, total_n=total_n)
+        return rows[0] if rows else None
+
+    # ---------- generation / cancellation / pause ----------
+    def generation(self, task_id: str) -> int:
+        return int(self.redis.get(self.task_key(task_id, "generation")) or 0)
+
+    def bump_generation(self, task_id: str) -> int:
+        key = self.task_key(task_id, "generation")
+        value = int(self.redis.incr(key))
+        self.redis.expireat(key, self._task_expire_at(task_id))
+        return value
+
     def cancel_ns(self, task_id: str, ns: list[int]) -> None:
         key = self.task_key(task_id, "cancelled")
-        statuses = self.get_n_statuses(task_id)
-        terminal = {"optimal", "feasible", "infeasible"}
-        targets = sorted({int(n) for n in ns if statuses.get(str(int(n)), {}).get("status") not in terminal})
+        targets = sorted({int(n) for n in ns if int(n) > 0})
         if targets:
             self.redis.sadd(key, *map(str, targets))
             self.redis.expireat(key, self._task_expire_at(task_id))
@@ -293,51 +468,68 @@ class RedisStore:
 
     def is_n_cancelled(self, task_id: str, n: int) -> bool:
         meta = self.get_meta(task_id) or {}
-        return bool(meta.get("cancelled")) or bool(self.redis.sismember(self.task_key(task_id, "cancelled"), str(int(n))))
+        return bool(meta.get("cancelled")) or bool(
+            self.redis.sismember(self.task_key(task_id, "cancelled"), str(int(n)))
+        )
 
     def cancel_task(self, task_id: str) -> dict[str, Any]:
-        meta = self.get_meta(task_id)
-        if meta is None:
+        if self.get_meta(task_id) is None:
             raise KeyError(task_id)
-        plan = self.get_plan(task_id)
-        statuses = self.get_n_statuses(task_id)
-        terminal = {"optimal", "feasible", "infeasible"}
-        ns = sorted(
-            n for n in set(map(int, plan.get("order", [])))
-            if statuses.get(str(n), {}).get("status") not in terminal
-        )
-        cancelled_key = self.task_key(task_id, "cancelled")
-        status_key = self.task_key(task_id, "n-status")
-        expires = self._task_expire_at(task_id)
-        pipe = self.redis.pipeline(transaction=False)
-        if ns:
-            pipe.sadd(cancelled_key, *map(str, ns))
-            now = time.time()
-            for n in ns:
-                pipe.hset(status_key, str(n), dumps({"n": n, "status": "cancelled", "updated_at": now}))
-            pipe.expireat(cancelled_key, expires)
-            pipe.expireat(status_key, expires)
-        pipe.execute()
-        meta = self.patch_meta(task_id, cancelled=True, state="cancelled")
-        self.publish_event(task_id, "task_cancelled", {"n_count": len(ns)})
+        generation = self.bump_generation(task_id)
+        meta = self.patch_meta(task_id, cancelled=True, state="cancelled", generation=generation)
+        self.publish_event(task_id, "task_cancelled", {"generation": generation})
         return meta
 
-    # ---------- queue / jobs ----------
-    def enqueue_job(self, task_id: str, kind: str, n: int | None = None, attempt: int = 0) -> dict[str, Any]:
-        job = {"job_id": uuid.uuid4().hex, "task_id": task_id, "kind": kind, "n": n, "attempt": int(attempt), "created_at": time.time()}
-        raw = dumps(job)
-        pipe = self.redis.pipeline(transaction=True)
-        pipe.set(self.job_key(job["job_id"]), dumps({**job, "state": "pending"}), ex=self.settings.task_ttl_seconds, nx=True)
-        pipe.lpush(self.settings.ready_queue, raw)
-        # KEDA scales on total outstanding work. Unlike ready_queue, this entry
-        # stays present while the job is in processing_queue and is removed only
-        # by ack_job(). This avoids under-scaling while all workers are busy.
-        pipe.lpush(self.settings.workload_queue, raw)
-        pipe.execute()
-        return job
+    def set_paused(self, task_id: str, paused: bool) -> dict[str, Any]:
+        with self.lock(f"task:{task_id}:plan"):
+            plan = self.get_plan(task_id)
+            plan["paused"] = bool(paused)
+            self.set_plan(task_id, plan)
+        meta = self.patch_meta(task_id, paused=bool(paused), state="paused" if paused else "running")
+        self.publish_event(task_id, "range_paused" if paused else "range_resumed", {})
+        return meta
+
+    # ---------- single job queue ----------
+    def enqueue_pipeline_job(self, job: Mapping[str, Any]) -> bool:
+        row = dict(job)
+        raw = dumps(row)
+        job_id = str(row["job_id"])
+        task_id = str(row["task_id"])
+        dedupe = self.dedupe_key(str(row["dedupe_key"]))
+        pending = self.task_key(task_id, "pending")
+        try:
+            result = self.redis.eval(
+                self.ENQUEUE_LUA,
+                4,
+                dedupe,
+                self.settings.ready_queue,
+                self.settings.workload_queue,
+                pending,
+                job_id,
+                self.settings.task_ttl_seconds,
+                raw,
+            )
+            queued = bool(result)
+        except Exception:
+            if not self.redis.set(dedupe, job_id, nx=True, ex=self.settings.task_ttl_seconds):
+                return False
+            pipe = self.redis.pipeline(transaction=True)
+            pipe.lpush(self.settings.ready_queue, raw)
+            pipe.lpush(self.settings.workload_queue, raw)
+            pipe.sadd(pending, job_id)
+            pipe.expire(pending, self.settings.task_ttl_seconds)
+            pipe.execute()
+            queued = True
+        if queued:
+            self.redis.set(
+                self.job_key(job_id),
+                dumps({**row, "state": "pending"}),
+                ex=self.settings.task_ttl_seconds,
+            )
+        return queued
 
     def claim_job(self, worker_id: str, timeout: int) -> tuple[str, dict[str, Any]] | None:
-        raw = self.redis.brpoplpush(self.settings.ready_queue, self.settings.processing_queue, timeout=timeout)
+        raw = self.redis.brpoplpush(self.settings.ready_queue, self.settings.processing_queue, timeout=int(timeout))
         if raw is None:
             return None
         text = raw.decode() if isinstance(raw, bytes) else str(raw)
@@ -346,10 +538,10 @@ class RedisStore:
             self.redis.lrem(self.settings.processing_queue, 1, raw)
             self.redis.lrem(self.settings.workload_queue, 1, raw)
             return None
-        lease = self.job_key(job["job_id"]) + ":lease"
+        lease = self.job_key(str(job["job_id"])) + ":lease"
         self.redis.set(lease, worker_id, ex=self.settings.job_lease_seconds)
         state = {**job, "state": "claimed", "worker_id": worker_id, "claimed_at": time.time()}
-        self.redis.set(self.job_key(job["job_id"]), dumps(state), ex=self.settings.task_ttl_seconds)
+        self.redis.set(self.job_key(str(job["job_id"])), dumps(state), ex=self.settings.task_ttl_seconds)
         return text, job
 
     def heartbeat_job(self, job: Mapping[str, Any], worker_id: str) -> None:
@@ -360,25 +552,35 @@ class RedisStore:
         self.redis.expire(self.task_key(task_id, "slots"), self.settings.task_ttl_seconds)
 
     def ack_job(self, raw: str, job: Mapping[str, Any], state: str = "done") -> None:
+        task_id = str(job["task_id"])
+        job_id = str(job["job_id"])
         self.redis.lrem(self.settings.processing_queue, 1, raw)
         self.redis.lrem(self.settings.workload_queue, 1, raw)
-        self.redis.delete(self.job_key(str(job["job_id"])) + ":lease")
-        self.redis.zrem(self.task_key(str(job["task_id"]), "slots"), str(job["job_id"]))
-        self.redis.set(self.job_key(str(job["job_id"])), dumps({**job, "state": state, "finished_at": time.time()}), ex=self.settings.task_ttl_seconds)
+        self.redis.delete(self.job_key(job_id) + ":lease")
+        self.redis.zrem(self.task_key(task_id, "slots"), job_id)
+        self.redis.srem(self.task_key(task_id, "pending"), job_id)
+        if job.get("dedupe_key"):
+            self.redis.delete(self.dedupe_key(str(job["dedupe_key"])))
+        self.redis.set(
+            self.job_key(job_id),
+            dumps({**job, "state": state, "finished_at": time.time()}),
+            ex=self.settings.task_ttl_seconds,
+        )
 
     def requeue_job(self, raw: str, job: Mapping[str, Any], delay: float = 0.0) -> None:
         self.redis.lrem(self.settings.processing_queue, 1, raw)
         self.redis.delete(self.job_key(str(job["job_id"])) + ":lease")
         self.redis.zrem(self.task_key(str(job["task_id"]), "slots"), str(job["job_id"]))
-        self.redis.set(self.job_key(str(job["job_id"])), dumps({**job, "state": "pending"}), ex=self.settings.task_ttl_seconds)
+        self.redis.set(
+            self.job_key(str(job["job_id"])),
+            dumps({**job, "state": "pending"}),
+            ex=self.settings.task_ttl_seconds,
+        )
         if delay:
             time.sleep(delay)
-        # Producers LPUSH and workers BRPOP. LPUSH here puts a throttled job
-        # behind already queued work instead of immediately reclaiming it.
         self.redis.lpush(self.settings.ready_queue, raw)
 
     def requeue_stale_jobs(self, grace_seconds: float = 10.0) -> int:
-        """Return jobs whose worker lease disappeared after a pod/process crash."""
         recovered = 0
         with self.lock("queue-reaper", timeout=2.0):
             now = time.time()
@@ -395,13 +597,17 @@ class RedisStore:
                 claimed_at = float(state.get("claimed_at", job.get("created_at", 0)))
                 if now - claimed_at < self.settings.job_lease_seconds + grace_seconds:
                     continue
-                if state.get("state") in {"done", "cancelled", "discarded"}:
+                if state.get("state") in {"done", "cancelled", "discarded", "failed"}:
                     self.redis.lrem(self.settings.processing_queue, 1, raw)
                     self.redis.lrem(self.settings.workload_queue, 1, raw)
                     continue
                 self.redis.lrem(self.settings.processing_queue, 1, raw)
                 self.redis.rpush(self.settings.ready_queue, raw)
-                self.redis.set(self.job_key(str(job["job_id"])), dumps({**job, "state": "pending", "recovered_at": now}), ex=self.settings.task_ttl_seconds)
+                self.redis.set(
+                    self.job_key(str(job["job_id"])),
+                    dumps({**job, "state": "pending", "recovered_at": now}),
+                    ex=self.settings.task_ttl_seconds,
+                )
                 recovered += 1
         return recovered
 
@@ -421,103 +627,28 @@ class RedisStore:
             self.redis.expireat(key, self._task_expire_at(task_id))
         return ok
 
-    # ---------- plan / scheduling ----------
-    def add_ns(self, task_id: str, ns: list[int]) -> dict[str, Any]:
+    def pending_jobs(self, task_id: str) -> int:
+        return int(self.redis.scard(self.task_key(task_id, "pending")) or 0)
+
+    def refresh_pipeline_state(self, task_id: str) -> dict[str, Any] | None:
         meta = self.get_meta(task_id)
         if meta is None:
-            raise KeyError(task_id)
-        max_n = int(meta.get("parameters", {}).get("solver", {}).get("prepared_max_n", 0))
-        status_key = self.task_key(task_id, "n-status")
-        cancelled_key = self.task_key(task_id, "cancelled")
-        with self.lock(f"task:{task_id}:plan"):
-            plan = self.get_plan(task_id)
-            order = list(map(int, plan.get("order", [])))
-            seen = set(order)
-            statuses = self.get_n_statuses(task_id)
-            additions = {int(n) for n in ns if int(n) not in seen}
-            if len(order) + len(additions) > self.settings.max_planned_n_values:
-                raise ValueError(
-                    f"План превысит лимит {self.settings.max_planned_n_values} значений N"
-                )
-            for n in ns:
-                n = int(n)
-                if n < 0:
-                    raise ValueError("N должен быть неотрицательным")
-                if n > self.settings.max_n_value:
-                    raise ValueError(f"N={n} превышает серверный лимит {self.settings.max_n_value}")
-                if max_n and n > max_n:
-                    raise ValueError(f"N={n} превышает prepared_max_n={max_n}")
-                current = statuses.get(str(n), {}).get("status")
-                if n not in seen:
-                    order.append(n); seen.add(n)
-                elif current in {"error", "cancelled", "postprocess_infeasible", "feasible", "incumbent"}:
-                    order.append(n)  # explicit add acts as retry
-                    self.redis.hdel(status_key, str(n))
-                    self.redis.srem(cancelled_key, str(n))
-            plan["order"] = order
-            plan["exhausted"] = False
-            self.set_plan(task_id, plan)
-        self.patch_meta(task_id, state="running", cancelled=False)
-        self.refill_task(task_id)
-        return plan
-
-    def refill_task(self, task_id: str) -> int:
-        with self.lock(f"task:{task_id}:schedule"):
-            meta = self.get_meta(task_id)
-            if not meta or meta.get("cancelled") or meta.get("state") in {"failed", "preparing", "queued_preparation"}:
-                return 0
-            plan = self.get_plan(task_id)
-            if plan.get("paused"):
-                return 0
-            statuses = self.get_n_statuses(task_id)
-            active = sum(1 for v in statuses.values() if v.get("status") in {"queued", "running", "incumbent"})
-            window = int(plan.get("window", self.settings.schedule_window))
-            cursor, order, queued = int(plan.get("cursor", 0)), list(map(int, plan.get("order", []))), 0
-            while cursor < len(order) and active < window:
-                n = order[cursor]
-                cursor += 1
-                status = statuses.get(str(n), {}).get("status")
-                if status in {"queued", "running", "optimal", "feasible", "infeasible", "cancelled"} or self.is_n_cancelled(task_id, n):
-                    continue
-                self.enqueue_job(task_id, "solve", n)
-                self.set_n_status(task_id, n, "queued")
-                self.publish_event(task_id, "n_queued", {"n": n})
-                active += 1
-                queued += 1
-            plan["cursor"] = cursor
-            plan["exhausted"] = cursor >= len(order)
-            self.set_plan(task_id, plan)
-            return queued
-
-    def refresh_task_state(self, task_id: str) -> dict[str, Any]:
-        meta = self.get_meta(task_id)
-        if meta is None:
-            raise KeyError(task_id)
-        plan, statuses = self.get_plan(task_id), self.get_n_statuses(task_id)
-        active = any(v.get("status") in {"queued", "running", "incumbent"} for v in statuses.values())
+            return None
         if meta.get("cancelled"):
-            state = "cancelled"
-        elif meta.get("state") == "failed":
-            state = "failed"
-        elif meta.get("state") in {"queued_preparation", "preparing"}:
-            state = meta["state"]
-        elif active:
+            return meta
+        if meta.get("paused"):
+            return meta
+        pending = self.pending_jobs(task_id)
+        if pending:
             state = "running"
-        elif plan.get("paused"):
-            state = "paused"
-        elif plan.get("exhausted"):
-            has_errors = any(
-                value.get("status") in {"error", "postprocess_infeasible"}
-                for value in statuses.values()
-            )
-            state = "completed_with_errors" if has_errors else "completed"
         else:
-            state = "ready"
+            state = "completed" if self.solutions(task_id) else "completed_with_errors"
         if state != meta.get("state"):
             meta = self.patch_meta(task_id, state=state)
             self.publish_event(task_id, "task_state", {"state": state})
         return meta
 
+    # ---------- public snapshot ----------
     def snapshot(self, task_id: str) -> dict[str, Any] | None:
         meta = self.get_meta(task_id)
         if meta is None:

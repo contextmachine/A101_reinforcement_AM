@@ -15,11 +15,11 @@ spec:
         scaleDown:
           stabilizationWindowSeconds: 300
   triggers:
-  - type: redis
-    metadata:
-      address: rebar-redis.rebar-optimizer.svc.cluster.local:6379
-      listName: rebar:jobs:workload
-      listLength: '1'
-      activationListLength: '0'
-    authenticationRef:
-      name: rebar-redis-auth
+    - type: redis
+      metadata:
+        address: rebar-redis.rebar-optimizer.svc.cluster.local:6379
+        listName: rebar:jobs:workload
+        listLength: "1"
+        activationListLength: "0"
+      authenticationRef:
+        name: rebar-redis-auth

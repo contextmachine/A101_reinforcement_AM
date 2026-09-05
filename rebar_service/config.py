@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,8 +10,6 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="REBAR_", extra="ignore")
 
     redis_url: str = "redis://localhost:6379/0"
-    redis_address: str = "localhost:6379"
-    redis_password: str = ""
 
     task_ttl_seconds: int = 2 * 24 * 3600
     event_maxlen: int = 10_000
@@ -19,30 +17,52 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 64 * 1024 * 1024
     max_planned_n_values: int = 10_000
     max_n_value: int = 100_000
-    max_solver_threads: int = 4
-    max_solver_timeout_seconds: float = 21_600.0
 
     ready_queue: str = "rebar:jobs:ready"
     processing_queue: str = "rebar:jobs:processing"
     workload_queue: str = "rebar:jobs:workload"
     worker_claim_timeout_seconds: int = 5
     job_lease_seconds: int = 90
-    max_jobs_per_task: int = 4
-    global_max_jobs: int = 32
+    max_jobs_per_task: int = 28_031_998
     schedule_window_factor: int = 1
 
-    local_cache_dir: str = "/tmp/rebar-cache"
-    local_cache_items: int = 3
 
-    default_solver_timeout: float = 120.0
     default_solver_threads: int = 1
-    default_emit_interval: float = 5.0
-    default_prepared_max_n: int = 0
+    max_solver_threads: int = 4
+    max_solver_timeout_seconds: float | None = None
+    solver_timeout: float | None = None
+    solver_time_limit: float | None = None
+    solver_backend: str = "highs"
+    require_optimal: bool = False
+    fit_time_limit: float | None = None
+    fit_milp_backend: str = "auto"
+
+    grid_size: float = 300.0
+    fill_notches: float = 1000.0
+    short_edge: float = 300.0
+    simplify_step: float = 1000.0
+    use_mosaic: bool = True
+    min_internal_step: float = 100.0
+    scheduler_batch_size: int = 256
+    combine_batch_size: int = 256
+    frontier_top_k: int = 5
 
     cors_origins: str = "*"
-    log_level: str = "INFO"
-    service_name: str = "rebar-optimizer"
-    image_tag: str = "dev"
+
+    @field_validator(
+        "max_solver_timeout_seconds",
+        "solver_timeout",
+        "solver_time_limit",
+        "fit_time_limit",
+        mode="before",
+    )
+    @classmethod
+    def parse_optional_timeout(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, str) and value.strip().lower() in {"", "none", "null", "off", "unlimited"}:
+            return None
+        return value
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -53,6 +73,13 @@ class Settings(BaseSettings):
     @property
     def schedule_window(self) -> int:
         return max(1, self.max_jobs_per_task * self.schedule_window_factor)
+
+    def effective_threads(self, requested: object = None) -> int:
+        try:
+            value = int(requested)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            value = self.default_solver_threads
+        return max(1, min(value, self.max_solver_threads))
 
 
 @lru_cache(maxsize=1)

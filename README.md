@@ -1,549 +1,318 @@
-# Rebar Optimizer API
+# A101 reinforcement optimizer
 
-Сервис оборачивает вычислительный pipeline проекта в FastAPI + Redis + распределённые workers. Один тяжёлый этап подготовки создаёт `prepared`, после чего разные `N` решаются параллельно и обмениваются лучшими incumbents через Redis.
+Сервис расчёта дополнительного армирования: один FastAPI API, один Redis-store, один тип worker и один актуальный component-aware pipeline.
 
-## Архитектура
+`run.py`, `run2.py`, `run3.py` — только локальные тестовые сценарии. Kubernetes их не запускает.
 
-```text
-client
-  ├─ POST /v1/tasks
-  ├─ GET  /v1/tasks/{id}
-  └─ WS   /v1/tasks/{id}/ws
-             │
-             ▼
-          FastAPI
-             │
-             ▼
-           Redis
-      ┌──────┼────────────┐
-      │      │            │
-    queues  events     blobs/data
-      │
-      ▼
-worker Deployment ← KEDA ScaledObject
-      │
-      ├─ prepare task → prepared/context
-      └─ solve task   → N result/incumbents/data
-```
-
-Workers — обычный `Deployment`, а не `ScaledJob`. KEDA масштабирует его от 0 до заданного лимита. После опустошения очереди pods остаются тёплыми ещё 300 секунд (`cooldownPeriod`). Worker сам по idle timeout не завершается.
-
-### Почему три Redis-очереди
+## Production architecture
 
 ```text
-rebar:jobs:ready       ожидают worker
-rebar:jobs:processing  уже взяты worker
-rebar:jobs:workload    все незавершённые jobs
+client/frontend
+      |
+      v
+rebar_service.api:app
+      |
+      +-- old frontend-compatible endpoints
+      +-- component / solution endpoints
+      |
+      v
+RedisStore
+  rebar:jobs:ready
+  rebar:jobs:processing
+  rebar:jobs:workload
+      |
+      v
+rebar_service.worker
+      |
+      v
+PipelineWorkflow
+  prepare_field
+  prepare_component
+  solve_component
+  fit_component
+  combine_frontiers
+  layout_solution
+  validate_solution (optional)
+  prepare_whole / solve_whole / fit_whole (optional)
+      |
+      +--> /v1/tasks/{id}/solutions
+      +--> /v1/tasks/{id}/results/{total_N}
 ```
 
-`ready → processing` нужен для надёжного claim/recovery. `workload` создаётся отдельно для autoscaling: запись находится в нём от постановки job до `ack_job()`. Поэтому долгий solver остаётся видим KEDA даже после удаления из `ready`.
+`/results/{total_N}` сохраняет формат, который использовал существующий frontend, но данные берутся из того же актуального solution, что и `/solutions`.
 
-## Что поддерживается
+## Component semantics
 
-`N` может быть:
+`n: [1, 2, 3]` означает кандидаты `N=1,2,3` **для каждой компоненты отдельно**. Для компоненты считаются только значения `N <= max_useful_n`.
 
-```json
-{"n": 30}
+Если все запрошенные `N` больше `max_useful_n`, для этой компоненты создаётся fallback `N=1` — один прямоугольник, покрывающий компоненту.
+
+После расчёта component frontiers они комбинируются. Поэтому итоговый `total_N` обычно не равен одному из исходных `N`:
+
+```text
+component 0 -> N=1
+component 1 -> N=2
+component 2 -> N=1
+------------------
+total_N = 4
 ```
 
-```json
-{"n": [10, 20, 30, 40]}
-```
+`scan_mode=hard` перебирает `1..max_useful_n` для каждой компоненты. `whole=true` дополнительно запускает расчёт всего поля как одной компоненты.
 
-или адаптивным диапазоном:
-
-```json
-{"n": {"start": 1, "stop": 100, "coarse_step": 10}}
-```
-
-Для диапазона сначала идут крупные точки, затем промежуточные и только потом оставшиеся значения. Через WebSocket можно добавлять новые `N`, отменять отдельные `N`, ставить диапазон на паузу и получать incumbents/финальные решения.
-
----
-
-# 1. Локальный запуск
-
-Требования:
-
-- Docker + Docker Compose;
-- для запуска без Docker — Python 3.12 и Redis.
-
-Создай `.env`:
-
-```bash
-cp .env.example .env
-```
-
-Для локальной машины дефолты уже согласованы с `docker-compose.yml`:
-
-```dotenv
-REBAR_REDIS_PASSWORD=dev-password
-REBAR_API_KEY=dev-api-key
-REBAR_MAX_JOBS_PER_TASK=4
-REBAR_GLOBAL_MAX_JOBS=32
-```
-
-Запуск API + Redis + 4 workers:
-
-```bash
-docker compose up --build --scale worker=4
-```
-
-Проверка:
-
-```bash
-curl http://localhost:8000/health/ready
-```
+## API
 
 Swagger:
 
 ```text
-http://localhost:8000/docs
+https://rebar.contextmachine.cloud/docs
 ```
 
-Остановка:
+### Создание задачи
 
-```bash
-docker compose down
-```
+`POST /v1/tasks/upload` — multipart upload DXF/JSON.
 
-Удалить локальные данные Redis:
-
-```bash
-docker compose down -v
-```
-
----
-
-# 2. Создание задачи
-
-## JSON с полигонами
-
-Пример находится в `examples/task_polygons.json`.
-
-```bash
-curl -X POST http://localhost:8000/v1/tasks \
-  -H 'content-type: application/json' \
-  -H 'x-api-key: dev-api-key' \
-  --data-binary @examples/task_polygons.json
-```
-
-## DXF
-
-Основная конфигурация находится в `examples/task_config.json`.
-
-```bash
-curl -X POST http://localhost:8000/v1/tasks/upload \
-  -H 'x-api-key: dev-api-key' \
-  -F 'config=<examples/task_config.json' \
-  -F 'file=@/path/to/input.dxf'
-```
-
-После POST вернётся `task_id`.
-
----
-
-# 3. HTTP API
-
-| Method | URL | Назначение |
-|---|---|---|
-| POST | `/v1/tasks` | JSON задача |
-| POST | `/v1/tasks/upload` | DXF/JSON upload |
-| GET | `/v1/tasks/{id}` | snapshot статуса |
-| GET | `/v1/tasks/{id}/events` | журнал событий |
-| GET | `/v1/tasks/{id}/results` | метаданные результатов |
-| GET | `/v1/tasks/{id}/results/{N}` | полный результат N |
-| POST | `/v1/tasks/{id}/n` | добавить/retry N |
-| POST | `/v1/tasks/{id}/cancel` | отменить N или задачу |
-| POST | `/v1/tasks/{id}/pause` | пауза диапазона |
-| POST | `/v1/tasks/{id}/resume` | продолжить диапазон |
-
-Добавить N:
-
-```bash
-curl -X POST http://localhost:8000/v1/tasks/TASK_ID/n \
-  -H 'content-type: application/json' \
-  -H 'x-api-key: dev-api-key' \
-  -d '{"n":[35,45]}'
-```
-
-Отменить N:
-
-```bash
-curl -X POST http://localhost:8000/v1/tasks/TASK_ID/cancel \
-  -H 'content-type: application/json' \
-  -H 'x-api-key: dev-api-key' \
-  -d '{"n":[45]}'
-```
-
----
-
-# 4. WebSocket
-
-```text
-ws://localhost:8000/v1/tasks/TASK_ID/ws?token=dev-api-key&after=0-0
-```
-
-Основные события:
-
-```text
-preparation_started
-preparation_progress
-prepared
-n_queued
-n_started
-solver_heartbeat
-incumbent
-n_finished
-n_error
-task_state
-```
-
-Команды клиента:
+Поле `config` — **JSON-строка**, например:
 
 ```json
-{"action":"add","n":[35,45]}
-{"action":"cancel","n":[45]}
-{"action":"pause_range"}
-{"action":"resume_range"}
-{"action":"snapshot"}
-{"action":"cancel_task"}
+{
+  "n": [1, 2, 3],
+  "back_grid": [18, 300],
+  "stock": [[18, 300], [20, 150], [20, 100], [25, 150], [25, 100]],
+  "max_layers": 2,
+  "axis": "y",
+  "anchor_factor": 32,
+  "min_width_mm": 1000,
+  "solver": {
+    "backend": "highs",
+    "threads": 1,
+    "timeout_seconds": null,
+    "solver_time_limit": null
+  }
+}
 ```
 
-Готовый клиент:
+Минимальный smoke-test:
+
+```json
+{"n":[1,2,3]}
+```
+
+Пример curl:
 
 ```bash
-python examples/ws_client.py TASK_ID
+curl -X POST 'https://rebar.contextmachine.cloud/v1/tasks/upload' \
+  -F 'config={"n":[1,2,3]}' \
+  -F 'file=@drawing.dxf'
 ```
 
----
+Дополнительные query-параметры upload:
 
-# 5. Параллелизм
+- `scan_mode=requested|hard`
+- `whole=true|false`
+- `component_result_top_k=5`
+- `validate_results=true|false`
 
-На одну пользовательскую задачу ограничение выполняется приложением через Redis semaphore:
+### Frontend-compatible endpoints
 
-```dotenv
-REBAR_MAX_JOBS_PER_TASK=4
+Сохранены старые URL и основные response shapes:
+
+```text
+POST /v1/tasks
+POST /v1/tasks/upload
+GET  /v1/tasks/{task_id}
+GET  /v1/tasks/{task_id}/source-polygons
+GET  /v1/tasks/{task_id}/results
+GET  /v1/tasks/{task_id}/results/{total_N}
+GET  /v1/tasks/{task_id}/results/{total_N}/dxf
+GET  /v1/tasks/{task_id}/events
+POST /v1/tasks/{task_id}/n
+POST /v1/tasks/{task_id}/cancel
+POST /v1/tasks/{task_id}/pause
+POST /v1/tasks/{task_id}/resume
+WS   /v1/tasks/{task_id}/ws
 ```
 
-Пользователь может запросить меньше через `max_concurrent_jobs`, но не должен обходить серверный предел.
+### Component / solution endpoints
 
-Глобальный предел в Kubernetes задаётся в `worker-scaledobject.yaml`:
+```text
+GET  /v1/tasks/{task_id}/components
+GET  /v1/tasks/{task_id}/components/{component_id}
+POST /v1/tasks/{task_id}/components/{component_id}/n
+GET  /v1/tasks/{task_id}/components/{component_id}/results
+GET  /v1/tasks/{task_id}/components/{component_id}/results/{n}
+POST /v1/tasks/{task_id}/components/prepare
+GET  /v1/tasks/{task_id}/component-events
+GET  /v1/tasks/{task_id}/solutions
+GET  /v1/tasks/{task_id}/solutions/{solution_id}
+```
+
+Для `POST .../components/{component_id}/n` значения выше `max_useful_n` отклоняются с HTTP 422.
+
+## Local `run3.py`
+
+`run3.py` не запускает API и worker. Это локальный запуск текущей схемы без Redis:
+
+```bash
+python run3.py drawing.dxf -n 1 2 3
+python run3.py drawing.dxf -n 1 2 3 --hard-scan
+python run3.py drawing.dxf -n 1 2 3 --whole
+```
+
+По умолчанию solver/fit не имеют ограничения по времени. При необходимости его можно задать явно:
+
+```bash
+python run3.py drawing.dxf -n 1 2 3 --timeout 3600 --time-limit 3500
+```
+
+Результаты пишутся в `run3_output/run3_result.pkl` и `run3_output/run3_summary.json`.
+
+## Production entrypoints
+
+API:
+
+```bash
+python -m uvicorn rebar_service.api:app --host 0.0.0.0 --port 8000
+```
+
+Worker:
+
+```bash
+python -m rebar_service.worker
+```
+
+Docker image по умолчанию стартует API. Worker Deployment переопределяет command.
+
+## Redis
+
+Используется одна физическая семья очередей:
+
+```text
+rebar:jobs:ready
+rebar:jobs:processing
+rebar:jobs:workload
+```
+
+`workload` хранит все незавершённые jobs до `ack`, поэтому KEDA видит не только ожидающие, но и уже выполняющиеся работы.
+
+`REBAR_JOB_LEASE_SECONDS` — не ограничение времени вычисления. Worker продлевает lease heartbeat-ом; lease нужен для возврата job после реального падения Pod.
+
+## Solver time limits
+
+В Kubernetes по умолчанию:
+
+```text
+REBAR_SOLVER_TIMEOUT=none
+REBAR_SOLVER_TIME_LIMIT=none
+REBAR_FIT_TIME_LIMIT=none
+```
+
+`none`, `null`, `off` и `unlimited` интерпретируются как отсутствие лимита. Явный timeout можно передать в task config.
+
+Потоки solver:
+
+```text
+REBAR_DEFAULT_SOLVER_THREADS=1
+REBAR_MAX_SOLVER_THREADS=4
+```
+
+Количество Pod и количество solver threads независимы.
+
+## Kubernetes
+
+Namespace:
+
+```text
+rebar-optimizer
+```
+
+Основные manifests:
+
+```text
+deploy/k8s/base/api.yaml
+deploy/k8s/base/worker-deployment.yaml
+deploy/k8s/base/configmap.yaml
+deploy/k8s/overlays/prod/worker-scaledobject.yaml
+deploy/k8s/overlays/prod/ingress.yaml
+```
+
+KEDA 2.20.2:
+
+```bash
+helm upgrade --install keda kedacore/keda \
+  --namespace keda \
+  --create-namespace \
+  --version 2.20.2
+```
+
+Manifests рассчитаны на Kubernetes 1.33–1.35.
+
+KEDA смотрит только на `rebar:jobs:workload` и масштабирует Deployment `rebar-worker` от 0.
+
+Redis для KEDA указывается полным cluster DNS:
+
+```text
+rebar-redis.rebar-optimizer.svc.cluster.local:6379
+```
+
+## Image / branch
+
+Рабочий image:
+
+```text
+ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
+```
+
+`.github/workflows/ci.yml` запускается на каждый push в `am-super-branch` и публикует branch tag + sha tag. `latest` публикуется только для default branch.
+
+Оба Kustomize overlay используют:
 
 ```yaml
-maxReplicaCount: 32
+newTag: am-super-branch
 ```
 
-и для документации/валидации дублируется:
-
-```dotenv
-REBAR_GLOBAL_MAX_JOBS=32
-```
-
-Для большого количества независимых `N` обычно используйте `solver.threads=1` и больше worker pods, а не много потоков внутри одного solver.
-
----
-
-# 6. Kubernetes: первый запуск dev
-
-Используется Kustomize `base + overlays`: общий base не знает об окружении, а dev/prod добавляют свои ресурсы и patches. Это стандартная модель Kustomize.
-
-## 6.1 Установить KEDA один раз
-
-Для KEDA 2.20 в этом комплекте ориентируйтесь на Kubernetes 1.33–1.35. Если кластер другой версии, сначала сверяйте матрицу совместимости вашей версии KEDA.
+После новой сборки branch tag:
 
 ```bash
-helm repo add kedacore https://kedacore.github.io/charts
-helm repo update
-helm install keda kedacore/keda \
-  --version 2.20.2 \
-  --namespace keda \
-  --create-namespace
+kubectl -n rebar-optimizer rollout restart deployment/rebar-api
+kubectl -n rebar-optimizer rollout restart deployment/rebar-worker
 ```
 
-## 6.2 Создать namespace и secret
+`imagePullPolicy: Always` заставляет новый Pod проверить актуальный digest плавающего branch tag.
 
-```bash
-kubectl apply -f deploy/k8s/base/namespace.yaml
-cp deploy/k8s/secrets/rebar-secrets.dev.example.yaml /tmp/rebar-secrets.yaml
+## Production ingress
+
+```text
+https://rebar.contextmachine.cloud
 ```
 
-Измени пароли в `/tmp/rebar-secrets.yaml`, затем:
-
-```bash
-kubectl apply -f /tmp/rebar-secrets.yaml
-```
-
-Secret в git не коммить.
-
-## 6.3 Указать image
-
-Для ручного запуска проще сначала отрендерить overlay и заменить placeholder:
-
-```bash
-IMAGE=ghcr.io/MY_ORG/MY_REPO:latest
-kubectl kustomize deploy/k8s/overlays/dev \
-  | sed "s#ghcr.io/contextmachine/a101_reinforcement_am:latest#$IMAGE#g" \
-  | kubectl apply -f -
-```
+Ingress class: `nginx`; TLS secret: `rebar-api-tls`; cert-manager issuer: `letsencrypt`.
 
 Проверка:
 
 ```bash
-kubectl -n rebar-optimizer get pods,deploy,statefulset,svc
-kubectl -n rebar-optimizer get scaledobject,hpa
-kubectl -n rebar-optimizer describe scaledobject rebar-worker
+curl https://rebar.contextmachine.cloud/health/live
+curl https://rebar.contextmachine.cloud/openapi.json
 ```
 
-В dev overlay встроен Redis StatefulSet с PVC.
-
-Проброс API:
+## Verification
 
 ```bash
-kubectl -n rebar-optimizer port-forward svc/rebar-api 8000:80
+python -m compileall -q A101 rebar_service run3.py
+pytest -q
+python run3.py --help
 ```
 
-После этого API доступен на `http://localhost:8000`.
-
----
-
-# 7. Kubernetes: production
-
-Prod overlay **не создаёт Redis**. Предполагается внешний/managed Redis.
-
-Создай secret по шаблону:
+Render manifests:
 
 ```bash
-kubectl apply -f deploy/k8s/base/namespace.yaml
-cp deploy/k8s/secrets/rebar-secrets.prod.example.yaml /tmp/rebar-secrets.yaml
+kubectl kustomize deploy/k8s/overlays/prod > rendered-prod.yaml
+kubectl apply --dry-run=server -f rendered-prod.yaml
 ```
 
-Заполни:
-
-```text
-REBAR_REDIS_PASSWORD
-REBAR_REDIS_URL
-REBAR_REDIS_ADDRESS
-REBAR_API_KEY
-```
-
-и примени:
+Проверить image:
 
 ```bash
-kubectl apply -f /tmp/rebar-secrets.yaml
+grep 'image:' rendered-prod.yaml
 ```
 
-Для публичного GHCR image:
-
-```bash
-IMAGE=ghcr.io/MY_ORG/MY_REPO:sha-abc123
-HOST=rebar.my-domain.ru
-kubectl kustomize deploy/k8s/overlays/prod \
-  | sed "s#ghcr.io/contextmachine/a101_reinforcement_am:latest#$IMAGE#g; s#rebar.example.com#$HOST#g" \
-  | kubectl apply -f -
-```
-
-То же самое короче через готовый скрипт:
-
-```bash
-./scripts/deploy-k8s.sh prod ghcr.io/MY_ORG/MY_REPO:sha-abc123 rebar.my-domain.ru
-```
-
-Для private GHCR сначала:
-
-```bash
-kubectl -n rebar-optimizer create secret docker-registry ghcr-pull \
-  --docker-server=ghcr.io \
-  --docker-username=GITHUB_USER \
-  --docker-password=GITHUB_TOKEN
-```
-
-и используй:
-
-```bash
-kubectl kustomize deploy/k8s/overlays/prod-private ...
-```
-
-Ingress в prod рассчитан на nginx ingress controller. Если у вас другой controller, меняются `ingressClassName` и annotations в `deploy/k8s/overlays/prod/ingress.yaml`.
-
----
-
-# 8. Как работает autoscaling
-
-`ScaledObject` следит за:
-
-```text
-rebar:jobs:workload
-```
-
-При `listLength: "1"` один незавершённый job соответствует примерно одной требуемой worker replica, но итог ограничен `maxReplicaCount`.
-
-Когда workload становится нулевым, KEDA ждёт:
-
-```yaml
-cooldownPeriod: 300
-```
-
-перед scale-to-zero. Поэтому workers остаются тёплыми примерно пять минут.
-
-Дополнительно HPA scale-down имеет `stabilizationWindowSeconds: 300`. Если Kubernetes всё же посылает worker `SIGTERM`, worker больше не берёт новые jobs, завершает уже выполняющийся job и только затем выходит. `terminationGracePeriodSeconds` в Deployment установлен чуть выше максимального разрешённого solver timeout.
-
----
-
-# 9. GitHub Actions
-
-`ci.yml`:
-
-1. устанавливает зависимости;
-2. запускает compile/test;
-3. после успешного push собирает image;
-4. публикует GHCR tags `branch`, `tag`, `sha`, `latest` для main.
-
-Для GHCR repository GitHub Actions использует `GITHUB_TOKEN`.
-
-`deploy.yml` запускается вручную. Нужен GitHub Secret:
-
-```text
-KUBE_CONFIG_B64
-```
-
-Linux:
-
-```bash
-base64 -w0 ~/.kube/config
-```
-
-Создай GitHub Environments:
-
-```text
-dev
-prod
-prod-private
-```
-
-При `workflow_dispatch` выбери:
-
-```text
-environment = dev | prod | prod-private
-image_tag   = sha-... | v... | latest
-ingress_host
-```
-
-Workflow сам рендерит нужный overlay, подставляет GHCR image/host и применяет manifests. Одновременные deploy одного environment запрещены через `concurrency`.
-
-Kubernetes secret `rebar-secrets` и KEDA должны быть созданы заранее.
-
----
-
-# 10. Что удалить из предыдущей версии
-
-Полный список находится в `MIGRATION.md`.
-
-Главное удалить старые:
-
-```text
-deploy/k8s/06-worker-scaledjob.yaml
-deploy/k8s/kustomization.yaml
-deploy/k8s-private/
-```
-
-и вообще не оставлять одновременно:
-
-```text
-ScaledJob/rebar-worker
-ScaledObject/rebar-worker
-```
-
-Новый Kubernetes tree:
-
-```text
-deploy/k8s/
-├── base/
-│   ├── namespace.yaml
-│   ├── configmap.yaml
-│   ├── api.yaml
-│   ├── worker-deployment.yaml
-│   └── kustomization.yaml
-├── overlays/
-│   ├── dev/
-│   ├── prod/
-│   └── prod-private/
-└── secrets/
-```
-
----
-
-# 11. TTL и тяжёлые данные
-
-Сейчас Redis хранит queue/state/events/solver data и chunked blobs (`input`, `prepared`, context, results). TTL задачи:
-
-```dotenv
-REBAR_TASK_TTL_SECONDS=172800
-```
-
-то есть 48 часов.
-
-Для первого production этого достаточно. Если `prepared`/results станут большими и Redis RAM окажется узким местом, следующий логичный шаг — оставить в Redis queue/state/incumbents, а тяжёлые blobs вынести в S3/MinIO. API-контракт для этого менять не требуется.
-
----
-
-# 12. Полезные команды
-
-Логи API:
-
-```bash
-kubectl -n rebar-optimizer logs -l app=rebar-api -f --max-log-requests=10
-```
-
-Логи workers:
-
-```bash
-kubectl -n rebar-optimizer logs -l app=rebar-worker -f --max-log-requests=32
-```
-
-Текущее масштабирование:
-
-```bash
-kubectl -n rebar-optimizer get deploy rebar-worker
-kubectl -n rebar-optimizer get hpa
-kubectl -n rebar-optimizer describe scaledobject rebar-worker
-```
-
-Длина workload при встроенном dev Redis:
-
-```bash
-kubectl -n rebar-optimizer exec statefulset/rebar-redis -- \
-  sh -c 'redis-cli -a "$REBAR_REDIS_PASSWORD" LLEN rebar:jobs:workload'
-```
-
-Удаление dev окружения:
-
-```bash
-kubectl delete -k deploy/k8s/overlays/dev
-```
-
-PVC Redis удаляется отдельно, если данные больше не нужны.
-
----
-
-# 13. Проверки перед production
-
-```bash
-python -m compileall -q A101 rebar_service
-pytest
-```
-
-Затем обязательно сделать staging smoke test:
-
-1. POST маленькой задачи;
-2. убедиться, что worker Deployment поднимается с 0;
-3. увидеть `prepared`;
-4. запустить несколько `N`;
-5. проверить WebSocket incumbents;
-6. дождаться пустого workload;
-7. убедиться, что примерно через пять минут workers масштабировались в 0;
-8. проверить восстановление job после принудительного удаления worker pod.
-
-## Production architecture
-
-The service has one calculation pipeline. FastAPI is served from `rebar_service.api:app`; workers run `python -m rebar_service.worker`. Every task enters the component-based pipeline and its final solutions are exposed both through the extended `/solutions` API and the existing `/results/{total_N}` compatibility API. `run3.py` is a local diagnostic runner only and is never used as a Kubernetes entrypoint.
-
+Ожидается `ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch`.
