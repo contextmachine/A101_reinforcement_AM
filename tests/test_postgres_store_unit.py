@@ -112,3 +112,29 @@ def test_readding_cancelled_requested_n_reactivates_existing_row():
     sql, _ = matching_updates[-1]
     assert "cancelled_at=NULL" in sql
     assert "status='requested'" in sql
+
+
+class _ManualOverlayStateStore(PostgresStore):
+    def get_meta(self, task_id):
+        return {"task_id": task_id, "state": "running", "manual_mode": True, "initial_variant": "raw", "cancelled": False, "paused": False}
+
+    def pending_jobs(self, task_id):
+        return 0
+
+    def load_field(self, task_id, *, variant="raw", overlay_id=0):
+        return None
+
+    def has_prepared_analysis(self, task_id):
+        return True
+
+    def patch_meta(self, task_id, **changes):
+        return {**self.get_meta(task_id), **changes}
+
+    def publish_event(self, task_id, event_type, payload, *, overlay_id=0):
+        return "1"
+
+
+def test_refresh_manual_state_uses_any_prepared_overlay_analysis():
+    store = _ManualOverlayStateStore(Settings())
+    refreshed = store.refresh_pipeline_state("task")
+    assert refreshed["state"] == "ready"

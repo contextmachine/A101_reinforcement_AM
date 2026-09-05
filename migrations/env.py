@@ -5,7 +5,6 @@ from sqlalchemy import engine_from_config, pool, text
 
 from rebar_service.config import get_settings
 
-
 settings = get_settings()
 DB_SCHEMA = settings.postgres_schema
 
@@ -25,11 +24,9 @@ def run_migrations_offline() -> None:
         version_table_schema=DB_SCHEMA,
         include_schemas=True,
     )
-
-    context.execute(f'CREATE SCHEMA IF NOT EXISTS "{DB_SCHEMA}"')
-    context.execute(f'SET search_path TO "{DB_SCHEMA}", public')
-
     with context.begin_transaction():
+        context.execute(f'CREATE SCHEMA IF NOT EXISTS "{DB_SCHEMA}"')
+        context.execute(f'SET search_path TO "{DB_SCHEMA}", public')
         context.run_migrations()
 
 
@@ -39,28 +36,16 @@ def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
-
     with connectable.connect() as connection:
-        # Создаём отдельную schema для rebar optimizer.
-        connection.execute(
-            text(f'CREATE SCHEMA IF NOT EXISTS "{DB_SCHEMA}"')
-        )
-
-        # Все неуточнённые таблицы миграции создаются внутри rebar.
-        connection.execute(
-            text(f'SET search_path TO "{DB_SCHEMA}", public')
-        )
-
-        # CREATE SCHEMA должен быть зафиксирован до запуска Alembic.
+        connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{DB_SCHEMA}"'))
+        connection.execute(text(f'SET search_path TO "{DB_SCHEMA}", public'))
         connection.commit()
-
         context.configure(
             connection=connection,
             target_metadata=None,
             version_table_schema=DB_SCHEMA,
             include_schemas=True,
         )
-
         with context.begin_transaction():
             context.run_migrations()
 

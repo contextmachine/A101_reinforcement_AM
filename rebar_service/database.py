@@ -25,9 +25,7 @@ class Database:
                 pool_size=max(1, int(self.settings.db_pool_size)),
                 max_overflow=max(0, int(self.settings.db_max_overflow)),
                 pool_recycle=max(0, int(self.settings.db_pool_recycle_seconds)),
-                connect_args={
-                    "options": f"-c search_path={self.settings.postgres_schema},public"
-                },
+                connect_args={"options": f"-c search_path={self.settings.postgres_schema},public"},
             )
         return self._engine
 

@@ -61,3 +61,27 @@ def test_tasks_table_has_no_unstructured_extra_metadata_bucket():
     migration = (root / "migrations/versions/0001_postgres_storage.py").read_text(encoding="utf-8")
     tasks_section = migration.split('"tasks",', 1)[1].split('op.create_table(', 1)[0]
     assert 'sa.Column("extra"' not in tasks_section
+
+
+def test_overlay_migration_scopes_all_derived_analysis_tables():
+    root = Path(__file__).resolve().parents[1]
+    migration = (root / "migrations/versions/0002_overlay_analyses.py").read_text(encoding="utf-8")
+    assert 'op.create_table(\n        "task_overlay_events"' in migration
+    assert 'op.create_table(\n        "task_analyses"' in migration
+    for table in ("task_n_requests", "components", "component_results", "runtime_artifacts", "solutions", "task_events"):
+        assert f'"{table}"' in migration
+    assert 'op.add_column(table, sa.Column("overlay_id"' in migration
+
+
+def test_application_postgres_schema_is_rebar():
+    settings = Settings()
+    assert settings.postgres_schema == "rebar"
+
+
+def test_overlay_migration_normalizes_existing_optimal_statuses():
+    root = Path(__file__).resolve().parents[1]
+    migration = (root / "migrations/versions/0002_overlay_analyses.py").read_text(encoding="utf-8")
+    assert "UPDATE solutions" in migration
+    assert "UPDATE component_results" in migration
+    assert "jsonb_set" in migration
+    assert "WHEN is_feasible AND is_optimal THEN 'optimal'" in migration

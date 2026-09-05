@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import time
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -17,6 +18,7 @@ from shapely.ops import unary_union
 
 from .config import Settings
 from .store import Store
+from .overlays import normalize_overlay_id
 
 
 WHOLE_COMPONENT_ID = -1
@@ -47,6 +49,69 @@ def payload_variant(payload: Mapping[str, Any]) -> str:
     if value not in {"raw", "smooth"}:
         raise ValueError(f"Unknown analysis variant: {value}")
     return value
+
+class AnalysisNotPreparedError(RuntimeError):
+    """Raised when a component-level operation needs an analysis prepared first."""
+
+
+def payload_overlay_id(payload: Mapping[str, Any]) -> int:
+    return normalize_overlay_id(payload.get("overlay_id", 0))
+
+
+def overlay_polygon_sets(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Split resolved source polygons into demand, physical and removed sets."""
+    active: list[dict[str, Any]] = []
+    physical: list[dict[str, Any]] = []
+    removed: list[dict[str, Any]] = []
+    background: list[dict[str, Any]] = []
+    for raw in rows:
+        row = dict(raw)
+        state = str(row.get("overlay_state", "active"))
+        if state == "removed":
+            removed.append(row)
+            continue
+        physical.append(row)
+        if state == "background_only":
+            background.append(row)
+        else:
+            active.append(row)
+    return {
+        "active": active,
+        "physical": physical,
+        "removed": removed,
+        "background_only": background,
+        "active_indices": [int(row["source_index"]) for row in active],
+        "background_only_indices": [int(row["source_index"]) for row in background],
+        "removed_indices": [int(row["source_index"]) for row in removed],
+    }
+
+
+def map_components_to_source_indices(
+    components: Sequence[dict[str, Any]], source_polygons: Sequence[Mapping[str, Any]], *, area_eps: float = 1e-6
+) -> None:
+    """Replace derived rectangle indices with stable source-polygon indices for API/overlay use."""
+    sources = [
+        (int(row["source_index"]), row.get("geometry"))
+        for row in source_polygons
+        if row.get("geometry") is not None and not row["geometry"].is_empty
+    ]
+    for component in components:
+        demand = component.get("demand_geometry")
+        if demand is None:
+            demand = component.get("geometry")
+        matched: list[int] = []
+        if demand is not None and not demand.is_empty:
+            for source_index, geometry in sources:
+                try:
+                    if demand.intersection(geometry).area > area_eps:
+                        matched.append(source_index)
+                except Exception:
+                    continue
+        if matched:
+            stable = sorted(set(matched))
+            component["polygon_indices"] = stable
+            component["source_polygon_indices"] = stable
+
 
 
 class JobKind(str, Enum):
@@ -89,7 +154,7 @@ class PipelineJob:
     def default_dedupe_key(self) -> str:
         coordinate = {
             key: self.payload.get(key)
-            for key in ("component_id", "n", "total_n", "solution_id", "source", "frontier_version", "offset", "variant")
+            for key in ("component_id", "n", "total_n", "solution_id", "source", "frontier_version", "offset", "variant", "overlay_id")
             if key in self.payload
         }
         if not coordinate:
@@ -297,6 +362,7 @@ class PipelineWorkflow:
     def __init__(self, store: Store, settings: Settings) -> None:
         self.store = store
         self.settings = settings
+        self._overlay_context: ContextVar[int] = ContextVar(f"pipeline_overlay_{id(self)}", default=0)
 
     def _publish(self, task_id: str, event: Mapping[str, Any]) -> str:
         row = dict(event)
@@ -628,6 +694,9 @@ class PipelineWorkflow:
         })
         if bool(job.payload.get("auto_solve", True)):
             self._schedule_plan(task_id, cid, plan, force_single, variant=variant)
+        self._maybe_complete_analysis(
+            task_id, variant, bool(job.payload.get("analysis_auto_solve", job.payload.get("auto_solve", True)))
+        )
 
     def _single_component_frontier(
         self, task_id: str, component_id: Any, source: str = "components", *, variant: str = "raw"
@@ -853,29 +922,11 @@ class PipelineWorkflow:
         })
         choices = candidate.get("component_choices", {}) or {}
         optimal = bool(choices) and all(bool(row.get("is_optimal")) for row in choices.values())
-        is_optimal = bool(optimal and feasible)
-
-        status = (
-            "optimal"
-            if is_optimal
-            else "feasible"
-            if feasible
-            else str(layout.get("status", "infeasible")).lower()
-        )
-
         return {
-            **dict(candidate),
-            "solution_id": solution_id,
-            "source": source,
-            "variant": variant,
-            "smooth": variant_is_smooth(variant),
-            "total_N": total_n,
-            "component_ns": component_ns,
-            "actual_mass_kg": float(mass),
-            "is_feasible": feasible,
-            "is_optimal": is_optimal,
-            "status": status,
-            "bar_layout": layout,
+            **dict(candidate), "solution_id": solution_id, "source": source, "variant": variant,
+            "smooth": variant_is_smooth(variant), "total_N": total_n, "component_ns": component_ns,
+            "actual_mass_kg": float(mass), "is_feasible": feasible, "is_optimal": optimal and feasible,
+            "status": "feasible" if feasible else str(layout.get("status", "infeasible")), "bar_layout": layout,
             "metadata": {
                 "threads": self.settings.effective_threads(self._solver(task_id).get("threads")),
                 "created_at": time.time(), "variant": variant, "smooth": variant_is_smooth(variant),
@@ -900,13 +951,7 @@ class PipelineWorkflow:
         })
         best = self.store.best_solution(task_id, solution["total_N"], variant=variant)
         if best and best.get("solution_id") == solution["solution_id"]:
-            status = (
-                "optimal"
-                if solution.get("is_optimal")
-                else "feasible"
-                if solution.get("is_feasible")
-                else "infeasible"
-            )
+            status = "feasible" if solution["is_feasible"] else "infeasible"
             result_url = (
                 f"/v1/tasks/{task_id}/results/{solution['total_N']}"
                 if variant == "raw"
@@ -950,8 +995,12 @@ class PipelineWorkflow:
         if not rows:
             raise ValueError("В whole field нет дополнительного армирования")
         demand = unary_union([r["geometry"] for r in rows])
+        stable_indices = [
+            int(value) for value in (field.get("decomposition", {}) or {}).get("active_indices", [])
+        ]
         return {
-            "id": -1, "axis": cfg["axis"], "polygon_indices": [r["source_index"] for r in rows],
+            "id": -1, "axis": cfg["axis"],
+            "polygon_indices": stable_indices or [r["source_index"] for r in rows],
             "polygons": rows, "geometry": demand, "demand_geometry": demand,
             "bounds": tuple(map(float, demand.bounds)), "demand_bounds": tuple(map(float, demand.bounds)),
             "classes": sorted({r["class"] for r in rows}), "loads": sorted({r["load"] for r in rows}),
@@ -1007,6 +1056,9 @@ class PipelineWorkflow:
             raise ValueError(f"n вне допустимого диапазона 1..{prepared['max_useful_n']}: {invalid}")
         if bool(job.payload.get("auto_solve", True)):
             self._schedule_plan(task_id, "whole", plan, force_single, whole=True, variant=variant)
+        self._maybe_complete_analysis(
+            task_id, variant, bool(job.payload.get("analysis_auto_solve", job.payload.get("auto_solve", True)))
+        )
 
     def handle_solve_whole(self, job: PipelineJob) -> None:
         from A101.reinforcement_components import solve_component_frontier
@@ -1148,3 +1200,651 @@ class PipelineWorkflow:
                 "variant": variant, "smooth": smooth,
             })
         return requested
+
+    # ---------- overlay-aware workflow overrides ----------
+    def _current_overlay_id(self) -> int:
+        context = getattr(self, "_overlay_context", None)
+        return 0 if context is None else normalize_overlay_id(context.get())
+
+    def _call_with_overlay(self, method, *args, variant: str = "raw", overlay_id: int | None = None):
+        selected_overlay = self._current_overlay_id() if overlay_id is None else normalize_overlay_id(overlay_id)
+        kwargs: dict[str, Any] = {}
+        if variant != "raw":
+            kwargs["variant"] = variant
+        if selected_overlay:
+            kwargs["overlay_id"] = selected_overlay
+        try:
+            return method(*args, **kwargs)
+        except TypeError:
+            # Historical test doubles predate overlay support. Keep overlay=0/raw compatible.
+            kwargs.pop("overlay_id", None)
+            try:
+                return method(*args, **kwargs)
+            except TypeError:
+                if variant == "raw":
+                    return method(*args)
+                raise
+
+    def _variant_call(self, method, *args, variant: str = "raw", overlay_id: int | None = None):
+        return self._call_with_overlay(method, *args, variant=variant, overlay_id=overlay_id)
+
+    def _requested_ns(self, task_id: str, variant: str, overlay_id: int | None = None) -> list[int]:
+        selected_overlay = self._current_overlay_id() if overlay_id is None else normalize_overlay_id(overlay_id)
+        method = getattr(self.store, "requested_ns", None)
+        if callable(method):
+            try:
+                values = method(task_id, variant=variant, overlay_id=selected_overlay)
+            except TypeError:
+                try:
+                    values = method(task_id, variant=variant)
+                except TypeError:
+                    values = method(task_id)
+            if values:
+                return [int(n) for n in values]
+        meta = self.store.get_meta(task_id) or {}
+        return [int(n) for n in meta.get("requested_n", [1])]
+
+    def _is_n_cancelled(self, task_id: str, n: int, variant: str, overlay_id: int | None = None) -> bool:
+        selected_overlay = self._current_overlay_id() if overlay_id is None else normalize_overlay_id(overlay_id)
+        method = self.store.is_n_cancelled
+        try:
+            return bool(method(task_id, int(n), variant=variant, overlay_id=selected_overlay))
+        except TypeError:
+            try:
+                return bool(method(task_id, int(n), variant=variant))
+            except TypeError:
+                return bool(method(task_id, int(n)))
+
+    def _publish(self, task_id: str, event: Mapping[str, Any]) -> str:
+        row = dict(event)
+        event_type = str(row.pop("type"))
+        selected_overlay = normalize_overlay_id(row.pop("overlay_id", self._current_overlay_id()))
+        try:
+            return self.store.publish_event(task_id, event_type, row, overlay_id=selected_overlay)
+        except TypeError:
+            return self.store.publish_event(task_id, event_type, row)
+
+    def enqueue(
+        self,
+        kind: JobKind | str,
+        task_id: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        generation: int | None = None,
+        dedupe_key: str | None = None,
+    ) -> bool:
+        if self.store.pending_jobs(task_id) >= int(self.settings.max_jobs_per_task):
+            raise RuntimeError(f"REBAR_MAX_JOBS_PER_TASK exceeded for task {task_id}")
+        generation = self.store.generation(task_id) if generation is None else int(generation)
+        body = dict(payload or {})
+        selected_overlay = self._current_overlay_id()
+        if selected_overlay and "overlay_id" not in body:
+            body["overlay_id"] = selected_overlay
+        job = PipelineJob(
+            kind.value if isinstance(kind, JobKind) else str(kind), task_id, body,
+            generation=generation, dedupe_key=dedupe_key,
+        )
+        return self.store.enqueue_pipeline_job(job.to_dict())
+
+    def prepare_task(
+        self,
+        task_id: str,
+        *,
+        auto_solve: bool | None = None,
+        smooth: bool = False,
+        overlay_id: int | None = 0,
+    ) -> bool:
+        meta = self.store.get_meta(task_id)
+        if meta is None:
+            raise KeyError(task_id)
+        if auto_solve is None:
+            auto_solve = not bool(meta.get("manual_mode", False))
+        variant = analysis_variant(smooth)
+        selected_overlay = normalize_overlay_id(overlay_id)
+
+        ensure = getattr(self.store, "ensure_analysis", None)
+        mark = getattr(self.store, "mark_analysis_preparing", None)
+        if callable(ensure) and callable(mark):
+            ensure(task_id, variant=variant, overlay_id=selected_overlay)
+            if not bool(mark(task_id, variant=variant, overlay_id=selected_overlay)):
+                return False
+
+        self.store.patch_meta(task_id, state="queued_preparation", generation=self.store.generation(task_id))
+        self._publish(task_id, {
+            "type": "pipeline_queued",
+            "requested_n": self._requested_ns(task_id, variant, selected_overlay),
+            "scan_mode": meta.get("scan_mode", "requested"), "whole": bool(meta.get("whole", False)),
+            "auto_solve": bool(auto_solve), "variant": variant, "smooth": bool(smooth),
+            "overlay_id": selected_overlay,
+        })
+        payload = {"auto_solve": bool(auto_solve), "variant": variant, "smooth": bool(smooth)}
+        if selected_overlay:
+            payload["overlay_id"] = selected_overlay
+        return self.enqueue(JobKind.prepare_field, task_id, payload)
+
+    def schedule_requested_for_all(
+        self, task_id: str, values: Sequence[int], *, smooth: bool = False, overlay_id: int | None = 0
+    ) -> dict[str, list[int]]:
+        variant = analysis_variant(smooth)
+        selected_overlay = normalize_overlay_id(overlay_id)
+        requested = list(dict.fromkeys(int(n) for n in values))
+        invalid = [n for n in requested if n < 1 or n > int(self.settings.max_n_value)]
+        if invalid:
+            raise ValueError(f"n вне допустимого диапазона 1..{self.settings.max_n_value}: {invalid}")
+
+        add_requested = getattr(self.store, "add_requested_ns", None)
+        if callable(add_requested):
+            try:
+                add_requested(task_id, requested, variant=variant, overlay_id=selected_overlay)
+            except TypeError:
+                try:
+                    add_requested(task_id, requested, variant=variant)
+                except TypeError:
+                    add_requested(task_id, requested)
+
+        state_method = getattr(self.store, "analysis_state", None)
+        if callable(state_method):
+            ensure = getattr(self.store, "ensure_analysis", None)
+            if callable(ensure):
+                ensure(task_id, variant=variant, overlay_id=selected_overlay)
+            state = state_method(task_id, variant=variant, overlay_id=selected_overlay) or {}
+            if str(state.get("preparation_state", "stored")) != "prepared":
+                self.prepare_task(task_id, auto_solve=True, smooth=smooth, overlay_id=selected_overlay)
+                return {"preparing": requested}
+
+        context = getattr(self, "_overlay_context", None)
+        token = context.set(selected_overlay) if context is not None else None
+        try:
+            queued: dict[str, list[int]] = {}
+            for cid in self._variant_call(self.store.component_ids, task_id, variant=variant):
+                if cid == "whole":
+                    continue
+                record = self._variant_call(self.store.load_component, task_id, cid, variant=variant) or {}
+                max_n = record.get("max_useful_n")
+                if not max_n:
+                    continue
+                hard = str((self.store.get_meta(task_id) or {}).get("scan_mode", "requested")) == "hard"
+                plan, fallback = choose_component_ns(requested, int(max_n), hard)
+                queued[str(cid)] = plan
+                for n in plan:
+                    self.enqueue(JobKind.solve_component, task_id, {
+                        "component_id": int(cid), "n": int(n), "force_single_box": bool(fallback and int(n) == 1),
+                        "source": "components", "variant": variant, "smooth": smooth,
+                    })
+            whole = self._variant_call(self.store.load_component, task_id, "whole", variant=variant)
+            if whole and whole.get("max_useful_n"):
+                hard = str((self.store.get_meta(task_id) or {}).get("scan_mode", "requested")) == "hard"
+                plan, fallback = choose_component_ns(requested, int(whole["max_useful_n"]), hard)
+                queued["whole"] = plan
+                for n in plan:
+                    self.enqueue(JobKind.solve_whole, task_id, {
+                        "component_id": "whole", "n": int(n), "force_single_box": bool(fallback and int(n) == 1),
+                        "source": "whole", "variant": variant, "smooth": smooth,
+                    })
+            return queued
+        finally:
+            if context is not None and token is not None:
+                context.reset(token)
+
+    def schedule_component_n(
+        self, task_id: str, component_id: int, values: Sequence[int], *, smooth: bool = False,
+        overlay_id: int | None = 0,
+    ) -> list[int]:
+        variant = analysis_variant(smooth)
+        selected_overlay = normalize_overlay_id(overlay_id)
+        state_method = getattr(self.store, "analysis_state", None)
+        if callable(state_method):
+            state = state_method(task_id, variant=variant, overlay_id=selected_overlay)
+            if not state or str(state.get("preparation_state")) != "prepared":
+                raise AnalysisNotPreparedError(
+                    "Analysis is not prepared; schedule N through /v1/tasks/{task_id}/n first"
+                )
+
+        context = getattr(self, "_overlay_context", None)
+        token = context.set(selected_overlay) if context is not None else None
+        try:
+            storage_id = component_storage_id(component_id)
+            requested = list(dict.fromkeys(int(n) for n in values))
+            invalid_basic = [n for n in requested if n < 1 or n > int(self.settings.max_n_value)]
+            if invalid_basic:
+                raise ValueError(f"n вне допустимого диапазона 1..{self.settings.max_n_value}: {invalid_basic}")
+            record = self._variant_call(self.store.load_component, task_id, storage_id, variant=variant)
+            if storage_id == WHOLE_COMPONENT_KEY and (record is None or not record.get("max_useful_n")):
+                if not self._variant_call(self.store.load_field, task_id, variant=variant):
+                    raise AnalysisNotPreparedError(
+                        "Analysis is not prepared; schedule N through /v1/tasks/{task_id}/n first"
+                    )
+                self.enqueue(
+                    JobKind.prepare_whole, task_id,
+                    {"auto_solve": True, "requested_n": requested, "variant": variant, "smooth": smooth},
+                    dedupe_key=(
+                        f"prepare-whole-explicit:{task_id}:{variant}:{selected_overlay}:"
+                        f"{self.store.generation(task_id)}:{stable_digest(requested)}"
+                    ),
+                )
+                return requested
+            if record is None or not record.get("max_useful_n"):
+                raise KeyError(f"component variant={variant} overlay={selected_overlay} не подготовлена")
+            max_n = int(record["max_useful_n"])
+            invalid = [n for n in requested if n < 1 or n > max_n]
+            if invalid:
+                raise ValueError(f"n вне допустимого диапазона 1..{max_n}: {invalid}")
+            whole = storage_id == WHOLE_COMPONENT_KEY
+            kind = JobKind.solve_whole if whole else JobKind.solve_component
+            for n in requested:
+                self.enqueue(kind, task_id, {
+                    "component_id": WHOLE_COMPONENT_KEY if whole else int(storage_id), "n": n,
+                    "force_single_box": False, "source": "whole" if whole else "components",
+                    "variant": variant, "smooth": smooth,
+                })
+            return requested
+        finally:
+            if context is not None and token is not None:
+                context.reset(token)
+
+    def dispatch(self, job: PipelineJob) -> None:
+        if int(job.generation) != self.store.generation(job.task_id):
+            return
+        handler = getattr(self, "handle_" + str(job.kind), None)
+        if handler is None:
+            raise ValueError(f"Неизвестный job kind: {job.kind}")
+        token = self._overlay_context.set(payload_overlay_id(job.payload))
+        try:
+            handler(job)
+        finally:
+            self._overlay_context.reset(token)
+
+    def _field(self, task_id: str, variant: str = "raw") -> dict[str, Any]:
+        field = self._variant_call(self.store.load_field, task_id, variant=variant)
+        if not field:
+            raise KeyError(
+                f"field variant={variant} overlay={self._current_overlay_id()} не подготовлен для task {task_id}"
+            )
+        return field
+
+    def handle_prepare_field(self, job: PipelineJob) -> None:
+        from A101.axis_orientation import class_holds, normalize_axis
+        from A101.calculate_mass import resolve_rebar_config
+        from A101.grid_work import clean_poly
+        from A101.poly_bbox import rect_polygons
+        from A101.reinforcement_components import split_reinforcement_components
+
+        task_id = job.task_id
+        variant = payload_variant(job.payload)
+        overlay_id = payload_overlay_id(job.payload)
+        smooth = variant_is_smooth(variant)
+        auto_solve = bool(job.payload.get("auto_solve", True))
+        self.store.patch_meta(task_id, state="preparing_components")
+        self._publish(task_id, {
+            "type": "component_prepare_started", "variant": variant, "smooth": smooth,
+            "overlay_id": overlay_id,
+        })
+        input_obj = self.store.get_object(task_id, "input")
+        params = self._params(task_id)
+        persisted_polygons = self._persisted_variant_polygons(task_id, variant, input_obj)
+        all_polygons = polygons_from_input({"kind": "polygons", "units": "mm", "polygons": persisted_polygons})
+
+        # Rebar configuration deliberately depends on the immutable source variant, not on overlay edits.
+        cfg = resolve_rebar_config(
+            all_polygons,
+            back_grid=params.get("back_grid"), stock=params.get("stock"), max_layers=params.get("max_layers"),
+        )
+        axis = normalize_axis(str(params.get("axis", "y")))
+        cfg["axis"] = axis
+        anchor_factor = float(params.get("anchor_factor", 32.0))
+        base_holds, holds, leaves = class_holds(cfg["diameters"], cfg.get("recipes"), anchor_factor)
+        cfg.update(base_holds=base_holds, holds=holds, recipe_leaves=leaves)
+
+        meta_before = self.store.get_meta(task_id) or {}
+        effective = dict(meta_before.get("effective_rebar_config", {}) or {})
+        effective[variant] = {
+            "back_grid": tuple(cfg["back_grid"]), "stock": [tuple(row) for row in cfg["stock"]],
+            "max_layers": int(cfg["max_layers"]), "source": cfg.get("rebar_config_source"),
+        }
+        self.store.patch_meta(task_id, effective_rebar_config=effective)
+
+        resolve = getattr(self.store, "resolved_source_polygons", None)
+        if callable(resolve):
+            resolved = list(resolve(task_id, variant=variant, overlay_id=overlay_id))
+        else:
+            resolved = [
+                {**dict(row), "source_index": i, "overlay_state": "active", "active": True, "real": False}
+                for i, row in enumerate(persisted_polygons)
+            ]
+        sets = overlay_polygon_sets(resolved)
+        demand_polygons = polygons_from_input({"kind": "polygons", "units": "mm", "polygons": sets["active"]}) if sets["active"] else []
+        for target, source in zip(demand_polygons, sets["active"]):
+            target["source_index"] = int(source["source_index"])
+        physical_polygons = polygons_from_input({"kind": "polygons", "units": "mm", "polygons": sets["physical"]}) if sets["physical"] else []
+        for target, source in zip(physical_polygons, sets["physical"]):
+            target.update(
+                source_index=int(source["source_index"]), overlay_state=str(source["overlay_state"]),
+                active=bool(source.get("active", source["overlay_state"] == "active")), real=bool(source.get("real", False)),
+            )
+
+        ortho = clean_poly(rect_polygons(demand_polygons)) if demand_polygons else []
+        split = split_reinforcement_components(
+            ortho,
+            load2cls=cfg["load2cls"], recipes=cfg.get("recipes"), diameters=cfg["diameters"],
+            anchor_factor=anchor_factor, axis=axis,
+        ) if ortho else {"components": [], "active_indices": [], "background_only_indices": [], "degenerate_indices": []}
+        split = dict(split)
+        map_components_to_source_indices(list(split.get("components", [])), demand_polygons)
+        split["active_indices"] = list(sets["active_indices"])
+        split["background_only_indices"] = list(sets["background_only_indices"])
+        split["removed_indices"] = list(sets["removed_indices"])
+        split.setdefault("degenerate_indices", [])
+
+        geometries = [p["geometry"] for p in physical_polygons if p.get("geometry") is not None and not p["geometry"].is_empty]
+        field_geometry = unary_union(geometries) if geometries else Polygon()
+        field = {
+            "filename": str(input_obj.get("filename", "input.dxf")) if isinstance(input_obj, Mapping) else "input.dxf",
+            "start_polygons": physical_polygons, "ortho_polygons": ortho, "cfg": cfg,
+            "decomposition": split, "field_geometry": field_geometry,
+            "variant": variant, "smooth": smooth, "overlay_id": overlay_id,
+        }
+        self._variant_call(self.store.save_field, task_id, field, variant=variant)
+
+        components = list(split.get("components", []))
+        for component in components:
+            cid = int(component["id"])
+            self._variant_call(
+                self.store.save_component, task_id, cid,
+                {"component": component, "info": component_public_info(component), "state": "queued", "variant": variant,
+                 "overlay_id": overlay_id},
+                variant=variant,
+            )
+            payload = {"component_id": cid, "auto_solve": False, "analysis_auto_solve": auto_solve, "variant": variant, "smooth": smooth}
+            self.enqueue(JobKind.prepare_component, task_id, payload)
+
+        meta = self.store.get_meta(task_id) or {}
+        prepare_whole = bool(meta.get("whole", False))
+        if prepare_whole:
+            self.enqueue(JobKind.prepare_whole, task_id, {"auto_solve": False, "analysis_auto_solve": auto_solve, "variant": variant, "smooth": smooth})
+
+        self.store.patch_meta(task_id, state="components_ready")
+        self._publish(task_id, {
+            "type": "components_ready", "components": [component_public_info(c) for c in components],
+            "active_indices": split.get("active_indices", []),
+            "background_only_indices": split.get("background_only_indices", []),
+            "removed_indices": split.get("removed_indices", []),
+            "degenerate_indices": split.get("degenerate_indices", []),
+            "variant": variant, "smooth": smooth, "overlay_id": overlay_id,
+        })
+
+        # Empty analyses have no component prepare jobs that could close preparation.
+        if not components and not prepare_whole:
+            mark = getattr(self.store, "mark_analysis_prepared", None)
+            if callable(mark):
+                mark(task_id, variant=variant, overlay_id=overlay_id)
+            if auto_solve:
+                self.schedule_requested_for_all(
+                    task_id, self._requested_ns(task_id, variant, overlay_id), smooth=smooth, overlay_id=overlay_id
+                )
+
+    def _schedule_plan(
+        self, task_id: str, component_id: Any, plan: Sequence[int], force_single: bool,
+        start: int = 0, whole: bool = False, *, variant: str = "raw",
+    ) -> None:
+        batch = max(1, int(self.settings.scheduler_batch_size))
+        end = min(len(plan), int(start) + batch)
+        kind = JobKind.solve_whole if whole else JobKind.solve_component
+        smooth = variant_is_smooth(variant)
+        overlay_id = self._current_overlay_id()
+        for n in plan[int(start):end]:
+            if self._is_n_cancelled(task_id, int(n), variant, overlay_id):
+                continue
+            self.enqueue(kind, task_id, {
+                "component_id": component_id, "n": int(n),
+                "force_single_box": bool(force_single and int(n) == 1),
+                "source": "whole" if whole else "components", "variant": variant, "smooth": smooth,
+            })
+        if end < len(plan):
+            self.enqueue(
+                JobKind.prepare_whole if whole else JobKind.prepare_component,
+                task_id,
+                {"component_id": component_id, "schedule_only": True, "start": end, "variant": variant, "smooth": smooth},
+                dedupe_key=(
+                    f"schedule:{task_id}:{variant}:{overlay_id}:{component_id}:{end}:{self.store.generation(task_id)}"
+                ),
+            )
+
+    def _frontier_ready(
+        self, task_id: str, cid: Any, n: int, result: Mapping[str, Any], *, variant: str = "raw"
+    ) -> None:
+        overlay_id = self._current_overlay_id()
+        is_feasible = bool(result.get("is_feasible"))
+        is_optimal = bool(result.get("is_optimal")) and is_feasible
+        status = "optimal" if is_optimal else "feasible" if is_feasible else str(result.get("solve_state", "failed"))
+        self._publish(task_id, {
+            "type": "component_fit_finished", "component_id": cid, "n": int(n), "status": status,
+            "variant": variant, "smooth": variant_is_smooth(variant), "overlay_id": overlay_id,
+        })
+        version = self._variant_call(self.store.frontier_version, task_id, variant=variant)
+        self.enqueue(
+            JobKind.combine_frontiers, task_id,
+            {"frontier_version": version, "offset": 0, "variant": variant, "smooth": variant_is_smooth(variant)},
+            dedupe_key=f"combine:{task_id}:{variant}:{overlay_id}:{self.store.generation(task_id)}:{version}",
+        )
+
+    def handle_combine_frontiers(self, job: PipelineJob) -> None:
+        from A101.reinforcement_components import combine_component_frontiers
+
+        task_id = job.task_id
+        variant = payload_variant(job.payload)
+        overlay_id = payload_overlay_id(job.payload)
+        current_version = self._variant_call(self.store.frontier_version, task_id, variant=variant)
+        requested_version = int(job.payload.get("frontier_version", current_version))
+        if requested_version < current_version and int(job.payload.get("offset", 0)) == 0:
+            return
+        component_ids = [
+            cid for cid in self._variant_call(self.store.component_ids, task_id, variant=variant) if cid != "whole"
+        ]
+        frontiers = self._variant_call(self.store.all_frontiers, task_id, variant=variant)
+        if not component_ids or any(
+            (int(cid) if str(cid).lstrip("-").isdigit() else cid) not in frontiers for cid in component_ids
+        ):
+            return
+        if any(
+            not any(row.get("is_feasible") for row in frontiers[int(cid) if str(cid).lstrip("-").isdigit() else cid].values())
+            for cid in component_ids
+        ):
+            return
+        meta = self.store.get_meta(task_id) or {}
+        top_k = int(meta.get("component_result_top_k", self.settings.frontier_top_k))
+        combined = combine_component_frontiers(frontiers, top_k=top_k)
+        flat = [
+            (int(total_n), rank, candidate)
+            for total_n, rows in sorted(combined.items())
+            for rank, candidate in enumerate(rows)
+        ]
+        start = int(job.payload.get("offset", 0))
+        end = min(len(flat), start + max(1, int(self.settings.combine_batch_size)))
+        queued = 0
+        for total_n, _rank, raw_candidate in flat[start:end]:
+            candidate_id = stable_digest({
+                "task_id": task_id, "source": "components", "variant": variant, "overlay_id": overlay_id,
+                "total_n": total_n, "component_ns": raw_candidate.get("component_ns", {}),
+            })
+            candidate = {
+                **dict(raw_candidate), "candidate_id": candidate_id, "source": "components", "total_N": total_n,
+                "variant": variant, "smooth": variant_is_smooth(variant), "overlay_id": overlay_id,
+            }
+            self.store.save_candidate(task_id, candidate_id, candidate)
+            queued += int(self.enqueue(JobKind.layout_solution, task_id, {
+                "candidate_id": candidate_id, "total_n": total_n, "source": "components",
+                "variant": variant, "smooth": variant_is_smooth(variant),
+            }))
+        if end < len(flat):
+            self.enqueue(
+                JobKind.combine_frontiers, task_id,
+                {"frontier_version": current_version, "offset": end, "variant": variant, "smooth": variant_is_smooth(variant)},
+                dedupe_key=(
+                    f"combine:{task_id}:{variant}:{overlay_id}:{self.store.generation(task_id)}:{current_version}:{end}"
+                ),
+            )
+        self._publish(task_id, {
+            "type": "frontier_updated", "frontier_version": current_version,
+            "total_n": sorted(map(int, combined)), "queued_solutions": queued,
+            "variant": variant, "smooth": variant_is_smooth(variant), "overlay_id": overlay_id,
+        })
+
+    def _queue_whole_layout(self, task_id: str, result: Mapping[str, Any], *, variant: str = "raw") -> None:
+        n = int(result.get("n", 1))
+        overlay_id = self._current_overlay_id()
+        candidate_id = stable_digest({
+            "task_id": task_id, "source": "whole", "variant": variant, "overlay_id": overlay_id, "n": n,
+        })
+        candidate = {
+            **dict(result), "candidate_id": candidate_id, "source": "whole", "total_N": n,
+            "component_ns": {"whole": n}, "component_choices": {"whole": dict(result)},
+            "variant": variant, "smooth": variant_is_smooth(variant), "overlay_id": overlay_id,
+        }
+        self.store.save_candidate(task_id, candidate_id, candidate)
+        self.enqueue(JobKind.layout_solution, task_id, {
+            "candidate_id": candidate_id, "total_n": n, "source": "whole", "variant": variant,
+            "smooth": variant_is_smooth(variant),
+        })
+
+    def _layout_candidate(self, task_id: str, candidate: Mapping[str, Any]) -> dict[str, Any]:
+        from A101.rebar_field_layout import layout_rebars
+        from A101.reinforcement_components import bar_mass_kg
+
+        variant = str(candidate.get("variant", "raw"))
+        overlay_id = normalize_overlay_id(candidate.get("overlay_id", self._current_overlay_id()))
+        field = self._field(task_id, variant)
+        cfg = field["cfg"]
+        params = self._params(task_id)
+        layout = dict(layout_rebars(
+            polygons=[p["geometry"] for p in field["start_polygons"]],
+            boxes=candidate.get("anchored_boxes", []), background=tuple(cfg["back_grid"]), axis=cfg["axis"],
+            min_step=float(self.settings.min_internal_step),
+        ) or {})
+        feasible = bool(layout.get("is_feasible"))
+        mass = (
+            bar_mass_kg(layout.get("bars", []), float(params.get("steel_density_kg_m3", 7850.0)))
+            if feasible else float("inf")
+        )
+        component_ns = {str(k): int(v) for k, v in dict(candidate.get("component_ns", {})).items()}
+        total_n = int(candidate.get("total_N", candidate.get("total_n", sum(component_ns.values()))))
+        source = str(candidate.get("source", "components"))
+        solution_id = stable_digest({
+            "task_id": task_id, "source": source, "variant": variant, "overlay_id": overlay_id,
+            "total_n": total_n, "component_ns": component_ns, "candidate": candidate.get("candidate_id"),
+        })
+        choices = candidate.get("component_choices", {}) or {}
+        optimal = bool(choices) and all(bool(row.get("is_optimal")) for row in choices.values())
+        is_optimal = bool(optimal and feasible)
+        status = "optimal" if is_optimal else "feasible" if feasible else str(layout.get("status", "infeasible")).lower()
+        return {
+            **dict(candidate), "solution_id": solution_id, "source": source, "variant": variant,
+            "smooth": variant_is_smooth(variant), "overlay_id": overlay_id, "total_N": total_n,
+            "component_ns": component_ns, "actual_mass_kg": float(mass), "is_feasible": feasible,
+            "is_optimal": is_optimal, "status": status, "bar_layout": layout,
+            "metadata": {
+                "threads": self.settings.effective_threads(self._solver(task_id).get("threads")),
+                "created_at": time.time(), "variant": variant, "smooth": variant_is_smooth(variant),
+                "overlay_id": overlay_id, "rebar_config_source": cfg.get("rebar_config_source"),
+            },
+        }
+
+    def handle_layout_solution(self, job: PipelineJob) -> None:
+        task_id = job.task_id
+        overlay_id = payload_overlay_id(job.payload)
+        try:
+            candidate = self.store.load_candidate(task_id, str(job.payload["candidate_id"]), overlay_id=overlay_id)
+        except TypeError:
+            candidate = self.store.load_candidate(task_id, str(job.payload["candidate_id"]))
+        if candidate is None:
+            raise KeyError("candidate missing")
+        solution = self._layout_candidate(task_id, candidate)
+        variant = str(solution.get("variant", "raw"))
+        self.store.save_solution(task_id, solution)
+        solution_url = f"/v1/tasks/{task_id}/solutions/{solution['solution_id']}?overlay={overlay_id}"
+        self._publish(task_id, {
+            "type": "solution_available", "solution_id": solution["solution_id"], "source": solution["source"],
+            "total_N": solution["total_N"], "is_feasible": solution["is_feasible"],
+            "is_optimal": solution.get("is_optimal", False), "status": solution.get("status"),
+            "actual_mass_kg": solution["actual_mass_kg"], "result_url": solution_url,
+            "variant": variant, "smooth": variant_is_smooth(variant), "overlay_id": overlay_id,
+        })
+        try:
+            best = self.store.best_solution(task_id, solution["total_N"], variant=variant, overlay_id=overlay_id)
+        except TypeError:
+            best = self.store.best_solution(task_id, solution["total_N"], variant=variant)
+        if best and best.get("solution_id") == solution["solution_id"]:
+            status = (
+                "optimal" if solution.get("is_optimal") else
+                "feasible" if solution.get("is_feasible") else "infeasible"
+            )
+            query = f"smooth={'true' if variant_is_smooth(variant) else 'false'}&overlay={overlay_id}"
+            result_url = f"/v1/tasks/{task_id}/results/{solution['total_N']}?{query}"
+            try:
+                self.store.set_n_status(
+                    task_id, solution["total_N"], status, variant=variant, overlay_id=overlay_id,
+                    solution_id=solution["solution_id"], source=solution["source"], result_url=result_url,
+                )
+            except TypeError:
+                self.store.set_n_status(
+                    task_id, solution["total_N"], status, variant=variant,
+                    solution_id=solution["solution_id"], source=solution["source"], result_url=result_url,
+                )
+            self._publish(task_id, {
+                "type": "n_finished", "n": solution["total_N"], "status": status,
+                "result_url": result_url, "solution_id": solution["solution_id"], "source": solution["source"],
+                "variant": variant, "smooth": variant_is_smooth(variant), "overlay_id": overlay_id,
+            })
+        if (self.store.get_meta(task_id) or {}).get("validate_results") and solution.get("is_feasible"):
+            self.enqueue(JobKind.validate_solution, task_id, {
+                "solution_id": solution["solution_id"], "variant": variant, "smooth": variant_is_smooth(variant),
+            })
+
+    def _maybe_complete_analysis(self, task_id: str, variant: str, auto_solve: bool) -> bool:
+        state_method = getattr(self.store, "analysis_state", None)
+        mark_method = getattr(self.store, "mark_analysis_prepared", None)
+        if not callable(state_method) or not callable(mark_method):
+            return False
+        overlay_id = self._current_overlay_id()
+        state = state_method(task_id, variant=variant, overlay_id=overlay_id)
+        if state and str(state.get("preparation_state")) == "prepared":
+            return True
+        self._field(task_id, variant)
+        component_ids = self._variant_call(self.store.component_ids, task_id, variant=variant)
+        expected = [int(cid) for cid in component_ids if str(cid) != "whole"]
+        for cid in expected:
+            record = self._variant_call(self.store.load_component, task_id, cid, variant=variant)
+            if not record or not record.get("max_useful_n"):
+                return False
+        meta = self.store.get_meta(task_id) or {}
+        if bool(meta.get("whole", False)):
+            whole = self._variant_call(self.store.load_component, task_id, "whole", variant=variant)
+            if not whole or not whole.get("max_useful_n"):
+                return False
+        mark_method(task_id, variant=variant, overlay_id=overlay_id)
+        self._publish(task_id, {
+            "type": "analysis_prepared", "variant": variant, "smooth": variant_is_smooth(variant),
+            "overlay_id": overlay_id,
+        })
+        if auto_solve:
+            values = self._requested_ns(task_id, variant, overlay_id)
+            if values:
+                self.schedule_requested_for_all(
+                    task_id, values, smooth=variant_is_smooth(variant), overlay_id=overlay_id
+                )
+        return True
+
+    def whole_component_info(
+        self, task_id: str, *, variant: str = "raw", overlay_id: int | None = 0
+    ) -> dict[str, Any]:
+        selected_overlay = normalize_overlay_id(overlay_id)
+        token = self._overlay_context.set(selected_overlay)
+        try:
+            record = self._variant_call(self.store.load_component, task_id, WHOLE_COMPONENT_KEY, variant=variant)
+            if record is not None:
+                return {**dict(record.get("info", record)), "overlay_id": selected_overlay}
+            component = self._whole_component(task_id) if variant == "raw" else self._whole_component(task_id, variant)
+            info = component_public_info(component, max_useful_n=None, state="available")
+            info.update(variant=variant, smooth=variant_is_smooth(variant), overlay_id=selected_overlay)
+            return info
+        finally:
+            self._overlay_context.reset(token)

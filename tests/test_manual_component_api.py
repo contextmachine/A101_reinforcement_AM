@@ -317,7 +317,7 @@ class FieldPrepareStore(QueueStore):
         self.records[component_id] = dict(value)
 
 
-def test_manual_field_preparation_queues_component_and_whole_preparation_without_auto_solve(monkeypatch):
+def test_field_preparation_only_queues_requested_components_when_whole_is_disabled(monkeypatch):
     from shapely.geometry import Polygon
     import A101.axis_orientation as axis_orientation
     import A101.calculate_mass as calculate_mass
@@ -371,9 +371,11 @@ def test_manual_field_preparation_queues_component_and_whole_preparation_without
     workflow.handle_prepare_field(PipelineJob("prepare_field", "task", {"auto_solve": False}))
 
     kinds = [job["kind"] for job in store.jobs]
-    assert kinds == [JobKind.prepare_component.value, JobKind.prepare_whole.value]
-    assert store.jobs[0]["payload"] == {"component_id": 0, "auto_solve": False}
-    assert store.jobs[1]["payload"] == {"auto_solve": False}
+    assert kinds == [JobKind.prepare_component.value]
+    assert store.jobs[0]["payload"] == {
+        "component_id": 0, "auto_solve": False, "analysis_auto_solve": False,
+        "variant": "raw", "smooth": False,
+    }
 
 class LazyWholeStore(QueueStore):
     def __init__(self):
@@ -396,6 +398,8 @@ def test_component_minus_one_lazily_prepares_whole_when_task_field_already_exist
     assert store.jobs[0]["payload"] == {
         "auto_solve": True,
         "requested_n": [3, 5],
+        "variant": "raw",
+        "smooth": False,
     }
 
 
@@ -473,13 +477,13 @@ def test_lazy_whole_invalid_n_still_leaves_whole_prepared_for_inspection():
     assert store.saved["whole"]["max_useful_n"] == 6
 
 
-def test_api_uses_one_upload_route_and_one_component_prepare_route():
+def test_api_uses_one_upload_route_and_no_public_component_prepare_route():
     root = Path(__file__).resolve().parents[1]
     source = (root / "rebar_service/api.py").read_text(encoding="utf-8")
 
     assert '@app.post("/v1/tasks/upload-only"' not in source
     assert '@app.post("/v1/tasks/{task_id}/component-pipeline/prepare"' not in source
-    assert source.count('@app.post("/v1/tasks/{task_id}/components/prepare"') == 1
+    assert source.count('@app.post("/v1/tasks/{task_id}/components/prepare"') == 0
     assert 'start: bool = Query(True)' in source
 
 

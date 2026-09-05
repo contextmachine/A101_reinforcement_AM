@@ -116,6 +116,7 @@ class CancelMutation(BaseModel):
 
 
 class WsCommand(BaseModel):
+    overlay: int = Field(default=0, ge=0)
     action: Literal["add", "cancel", "pause_range", "resume_range", "cancel_task", "snapshot"]
     n: int | list[int] | None = None
     smooth: bool = False
@@ -144,6 +145,21 @@ class ComponentNRequest(BaseModel):
         values = list(dict.fromkeys(int(v) for v in value))
         if not values or any(v < 1 for v in values):
             raise ValueError("n должен содержать положительные целые значения")
+        return values
+
+
+class OverlayEventMutation(BaseModel):
+    type: Literal["clean", "unclean"]
+    idxs: list[int] = Field(default_factory=list)
+    id: int = Field(gt=0)
+    real: bool = False
+
+    @field_validator("idxs")
+    @classmethod
+    def validate_idxs(cls, value: list[int]) -> list[int]:
+        values = list(dict.fromkeys(int(v) for v in value))
+        if any(v < 0 for v in values):
+            raise ValueError("idxs должен содержать неотрицательные индексы source polygons")
         return values
 
 

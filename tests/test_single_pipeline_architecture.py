@@ -28,8 +28,9 @@ EXPECTED_COMPONENT_ROUTES = {
     ("GET", "/v1/tasks/{task_id}/components/{component_id}/results/{n}"),
     ("GET", "/v1/tasks/{task_id}/solutions"),
     ("GET", "/v1/tasks/{task_id}/solutions/{solution_id}"),
-    ("POST", "/v1/tasks/{task_id}/components/prepare"),
     ("GET", "/v1/tasks/{task_id}/component-events"),
+    ("GET", "/v1/tasks/{task_id}/overlays"),
+    ("POST", "/v1/tasks/{task_id}/overlays"),
 }
 
 

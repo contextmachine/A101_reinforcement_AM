@@ -22,12 +22,14 @@ from .models import (
     CancelMutation,
     ComponentNRequest,
     NMutation,
+    OverlayEventMutation,
     TaskCreate,
     TaskCreated,
     TaskParameters,
     WsCommand,
 )
 from .pipeline import (
+    AnalysisNotPreparedError,
     PipelineWorkflow,
     analysis_variant,
     component_storage_id,
@@ -338,8 +340,8 @@ async def create_task_upload(
 ):
     """Create a task from DXF, source-polygons JSON, or three XLSX tables.
 
-    ``start=false`` persists the task only; later calls to ``/components/prepare``
-    and ``/components/{component_id}/n`` control preparation and solving.
+    ``start=false`` persists the task only. The first task-level ``/n`` request
+    lazily prepares the selected raw/smooth + overlay analysis once and then starts solving.
     """
     try:
         parameters = _parameters_from_upload_config(config, start=bool(start))
@@ -397,26 +399,53 @@ async def get_task(task_id: str):
 
 
 @app.get("/v1/tasks/{task_id}/source-polygons")
-async def get_source_polygons(task_id: str, smooth: bool = Query(False)):
+async def get_source_polygons(task_id: str, smooth: bool = Query(False), overlay: int = Query(0, ge=0)):
     if await run_in_threadpool(store.get_meta, task_id) is None:
         raise HTTPException(status_code=404, detail="Task not found")
     variant = analysis_variant(smooth)
     try:
-        polygons = await run_in_threadpool(lambda: store.load_variant_polygons(task_id, variant=variant))
+        polygons = await run_in_threadpool(
+            lambda: store.resolved_source_polygons(task_id, variant=variant, overlay_id=overlay)
+        )
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Source polygon variant not found") from exc
-    return JSONResponse(polygons)
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse(to_jsonable(polygons))
+
+
+@app.get("/v1/tasks/{task_id}/overlays")
+async def list_overlays(task_id: str):
+    if await run_in_threadpool(store.get_meta, task_id) is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    rows = await run_in_threadpool(store.overlay_events, task_id)
+    return JSONResponse(to_jsonable({"task_id": task_id, "overlays": rows}))
+
+
+@app.post("/v1/tasks/{task_id}/overlays")
+async def append_overlays(task_id: str, mutations: list[OverlayEventMutation]):
+    if await run_in_threadpool(store.get_meta, task_id) is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    try:
+        rows = await run_in_threadpool(
+            lambda: store.append_overlay_events(task_id, [row.model_dump(mode="python") for row in mutations])
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse(to_jsonable({"task_id": task_id, "overlays": rows}))
 
 
 # ---------- component / solution API ----------
 @app.get("/v1/tasks/{task_id}/components")
-async def list_components(task_id: str, smooth: bool = Query(False)):
+async def list_components(task_id: str, smooth: bool = Query(False), overlay: int = Query(0, ge=0)):
     meta = await run_in_threadpool(store.get_meta, task_id)
     if meta is None:
         raise HTTPException(status_code=404, detail="Task not found")
     variant = analysis_variant(smooth)
-    components = await run_in_threadpool(lambda: store.components(task_id, variant=variant))
-    field = await run_in_threadpool(lambda: store.load_field(task_id, variant=variant))
+    components = await run_in_threadpool(lambda: store.components(task_id, variant=variant, overlay_id=overlay))
+    field = await run_in_threadpool(lambda: store.load_field(task_id, variant=variant, overlay_id=overlay))
     split = field.get("decomposition", {}) if field else {}
     return JSONResponse(
         to_jsonable(
@@ -425,6 +454,7 @@ async def list_components(task_id: str, smooth: bool = Query(False)):
                 "state": meta.get("state", "unknown"),
                 "variant": variant,
                 "smooth": bool(smooth),
+                "overlay_id": int(overlay),
                 "active_indices": split.get("active_indices", []),
                 "background_only_indices": split.get("background_only_indices", []),
                 "degenerate_indices": split.get("degenerate_indices", []),
@@ -434,66 +464,62 @@ async def list_components(task_id: str, smooth: bool = Query(False)):
     )
 
 
-@app.post("/v1/tasks/{task_id}/components/prepare", status_code=202)
-async def prepare_existing_task(task_id: str, smooth: bool = Query(False)):
-    if await run_in_threadpool(store.get_meta, task_id) is None:
-        raise HTTPException(status_code=404, detail="Task not found")
-    queued = await run_in_threadpool(lambda: workflow.prepare_task(task_id, smooth=bool(smooth)))
-    return {"task_id": task_id, "queued": bool(queued), "variant": analysis_variant(smooth), "smooth": bool(smooth)}
-
-
 @app.get("/v1/tasks/{task_id}/components/{component_id}")
-async def get_component(task_id: str, component_id: int, smooth: bool = Query(False)):
+async def get_component(task_id: str, component_id: int, smooth: bool = Query(False), overlay: int = Query(0, ge=0)):
     variant = analysis_variant(smooth)
     storage_id = component_storage_id(component_id)
-    row = await run_in_threadpool(lambda: store.load_component(task_id, storage_id, variant=variant))
+    row = await run_in_threadpool(lambda: store.load_component(task_id, storage_id, variant=variant, overlay_id=overlay))
     if row is None and storage_id == "whole":
         try:
-            info = await run_in_threadpool(lambda: workflow.whole_component_info(task_id, variant=variant))
+            info = await run_in_threadpool(lambda: workflow.whole_component_info(task_id, variant=variant, overlay_id=overlay))
         except (KeyError, ValueError):
             info = None
         if info is not None:
-            return JSONResponse(to_jsonable({"task_id": task_id, "variant": variant, "smooth": bool(smooth), **info}))
+            return JSONResponse(to_jsonable({"task_id": task_id, "variant": variant, "smooth": bool(smooth), "overlay_id": int(overlay), **info}))
     if row is None:
         raise HTTPException(status_code=404, detail="Component not found")
-    return JSONResponse(to_jsonable({"task_id": task_id, "variant": variant, "smooth": bool(smooth), **row.get("info", row)}))
+    return JSONResponse(to_jsonable({"task_id": task_id, "variant": variant, "smooth": bool(smooth), "overlay_id": int(overlay), **row.get("info", row)}))
 
 
 @app.post("/v1/tasks/{task_id}/components/{component_id}/n", status_code=202)
-async def schedule_component_n(task_id: str, component_id: int, body: ComponentNRequest, smooth: bool = Query(False)):
+async def schedule_component_n(task_id: str, component_id: int, body: ComponentNRequest, smooth: bool = Query(False), overlay: int = Query(0, ge=0)):
     try:
         queued = await run_in_threadpool(
-            lambda: workflow.schedule_component_n(task_id, component_id, body.n, smooth=bool(smooth))
+            lambda: workflow.schedule_component_n(task_id, component_id, body.n, smooth=bool(smooth), overlay_id=overlay)
         )
+    except AnalysisNotPreparedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {
         "task_id": task_id, "component_id": component_id, "queued_n": queued, "status": "queued",
-        "variant": analysis_variant(smooth), "smooth": bool(smooth),
+        "variant": analysis_variant(smooth), "smooth": bool(smooth), "overlay_id": int(overlay),
     }
 
 
 @app.get("/v1/tasks/{task_id}/components/{component_id}/results")
-async def list_component_results(task_id: str, component_id: int, smooth: bool = Query(False)):
+async def list_component_results(task_id: str, component_id: int, smooth: bool = Query(False), overlay: int = Query(0, ge=0)):
     if await run_in_threadpool(store.get_meta, task_id) is None:
         raise HTTPException(status_code=404, detail="Task not found")
     variant = analysis_variant(smooth)
     frontier = await run_in_threadpool(
-        lambda: store.load_frontier(task_id, component_storage_id(component_id), variant=variant)
+        lambda: store.load_frontier(task_id, component_storage_id(component_id), variant=variant, overlay_id=overlay)
     )
     return {
         "task_id": task_id,
         "component_id": component_id,
         "variant": variant,
         "smooth": bool(smooth),
+        "overlay_id": int(overlay),
         "results": [
             {
                 "n": int(n),
                 "is_feasible": bool(row.get("is_feasible")),
                 "is_optimal": bool(row.get("is_optimal", False)),
                 "proxy_mass": row.get("proxy_mass"),
+                "status": row.get("status"),
                 "solve_state": row.get("solve_state"),
             }
             for n, row in frontier.items()
@@ -502,11 +528,11 @@ async def list_component_results(task_id: str, component_id: int, smooth: bool =
 
 
 @app.get("/v1/tasks/{task_id}/components/{component_id}/results/{n}")
-async def get_component_result(task_id: str, component_id: int, n: int, smooth: bool = Query(False)):
+async def get_component_result(task_id: str, component_id: int, n: int, smooth: bool = Query(False), overlay: int = Query(0, ge=0)):
     variant = analysis_variant(smooth)
     row = (
         await run_in_threadpool(
-            lambda: store.load_frontier(task_id, component_storage_id(component_id), variant=variant)
+            lambda: store.load_frontier(task_id, component_storage_id(component_id), variant=variant, overlay_id=overlay)
         )
     ).get(int(n))
     if row is None:
@@ -521,11 +547,12 @@ async def list_solutions(
     source: str | None = Query(None),
     status: str | None = Query(None),
     smooth: bool | None = Query(None),
+    overlay: int = Query(0, ge=0),
 ):
     if await run_in_threadpool(store.get_meta, task_id) is None:
         raise HTTPException(status_code=404, detail="Task not found")
     variant = None if smooth is None else analysis_variant(smooth)
-    rows = await run_in_threadpool(lambda: store.solutions(task_id, total_n, source, variant))
+    rows = await run_in_threadpool(lambda: store.solutions(task_id, total_n=total_n, source=source, variant=variant, overlay_id=overlay))
     if status is not None:
         rows = [row for row in rows if str(row.get("status")) == status]
     return {
@@ -541,9 +568,10 @@ async def list_solutions(
                 "proxy_mass": row.get("proxy_mass"),
                 "actual_mass_kg": row.get("actual_mass_kg"),
                 "is_feasible": bool(row.get("is_feasible")),
-                "is_optimal": bool(row.get("is_optimal")),
+                "is_optimal": bool(row.get("is_optimal", False)),
                 "status": row.get("status"),
-                "result_url": f"/v1/tasks/{task_id}/solutions/{row['solution_id']}",
+                "overlay_id": int(row.get("overlay_id", overlay)),
+                "result_url": f"/v1/tasks/{task_id}/solutions/{row['solution_id']}?overlay={int(row.get('overlay_id', overlay))}",
             }
             for row in rows
         ],
@@ -551,37 +579,46 @@ async def list_solutions(
 
 
 @app.get("/v1/tasks/{task_id}/solutions/{solution_id}")
-async def get_solution(task_id: str, solution_id: str):
-    row = await run_in_threadpool(store.load_solution, task_id, solution_id)
+async def get_solution(task_id: str, solution_id: str, overlay: int = Query(0, ge=0)):
+    row = await run_in_threadpool(lambda: store.load_solution(task_id, solution_id, overlay_id=overlay))
     if row is None:
         raise HTTPException(status_code=404, detail="Solution not found")
     return JSONResponse(public_value(row))
 
 
 @app.get("/v1/tasks/{task_id}/component-events")
-async def component_events(task_id: str, start: int = 0):
+async def component_events(task_id: str, start: int = 0, overlay: int = Query(0, ge=0)):
     if await run_in_threadpool(store.get_meta, task_id) is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    return {"task_id": task_id, "events": await run_in_threadpool(store.all_events, task_id, start)}
+    return {"task_id": task_id, "overlay_id": int(overlay), "events": await run_in_threadpool(lambda: store.all_events(task_id, start, overlay_id=overlay))}
 
 
 # ---------- historical frontend-compatible result API ----------
 @app.get("/v1/tasks/{task_id}/results")
-async def list_results(task_id: str):
-    if await run_in_threadpool(store.get_meta, task_id) is None:
+async def list_results(task_id: str, smooth: bool | None = Query(None), overlay: int = Query(0, ge=0)):
+    meta = await run_in_threadpool(store.get_meta, task_id)
+    if meta is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    return JSONResponse(to_jsonable(await run_in_threadpool(store.get_result_metas, task_id)))
+    variant = str(meta.get("initial_variant", "raw")) if smooth is None else analysis_variant(smooth)
+    rows = await run_in_threadpool(
+        lambda: store.get_result_metas(task_id, variant=variant, overlay_id=overlay)
+    )
+    return JSONResponse(to_jsonable(rows))
 
 
 @app.get("/v1/tasks/{task_id}/results/{n}")
-async def get_result(task_id: str, n: int):
-    solution = await run_in_threadpool(lambda: store.best_solution(task_id, n, variant="raw"))
-    if solution is None:
-        solution = await run_in_threadpool(store.best_solution, task_id, n)
+async def get_result(task_id: str, n: int, smooth: bool | None = Query(None), overlay: int = Query(0, ge=0)):
+    meta = await run_in_threadpool(store.get_meta, task_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    variant = str(meta.get("initial_variant", "raw")) if smooth is None else analysis_variant(smooth)
+    solution = await run_in_threadpool(
+        lambda: store.best_solution(task_id, n, variant=variant, overlay_id=overlay)
+    )
     result = (
         to_compat_result(solution)
         if solution is not None
-        else await run_in_threadpool(store.get_result, task_id, n)
+        else await run_in_threadpool(lambda: store.get_result(task_id, n, variant=variant, overlay_id=overlay))
     )
     if result is None:
         raise HTTPException(status_code=404, detail="Result not found")
@@ -589,16 +626,18 @@ async def get_result(task_id: str, n: int):
 
 
 @app.get("/v1/tasks/{task_id}/results/{n}/dxf")
-async def get_result_dxf(task_id: str, n: int):
-    if await run_in_threadpool(store.get_meta, task_id) is None:
+async def get_result_dxf(task_id: str, n: int, smooth: bool | None = Query(None), overlay: int = Query(0, ge=0)):
+    meta = await run_in_threadpool(store.get_meta, task_id)
+    if meta is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    solution = await run_in_threadpool(lambda: store.best_solution(task_id, n, variant="raw"))
-    if solution is None:
-        solution = await run_in_threadpool(store.best_solution, task_id, n)
+    variant = str(meta.get("initial_variant", "raw")) if smooth is None else analysis_variant(smooth)
+    solution = await run_in_threadpool(
+        lambda: store.best_solution(task_id, n, variant=variant, overlay_id=overlay)
+    )
     result = (
         to_compat_result(solution)
         if solution is not None
-        else await run_in_threadpool(store.get_result, task_id, n)
+        else await run_in_threadpool(lambda: store.get_result(task_id, n, variant=variant, overlay_id=overlay))
     )
     if result is None:
         raise HTTPException(status_code=404, detail="Result not found")
@@ -610,43 +649,48 @@ async def get_result_dxf(task_id: str, n: int):
     except DxfExportError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return Response(
-        content=exported.content,
-        media_type="application/dxf",
+        content=exported.content, media_type="application/dxf",
         headers={"Content-Disposition": "attachment; filename*=UTF-8''" + quote(exported.filename)},
     )
 
 
 @app.get("/v1/tasks/{task_id}/events")
-async def get_events(task_id: str, after: str = "0-0", count: int = 200):
+async def get_events(task_id: str, after: str = "0-0", count: int = 200, overlay: int = Query(0, ge=0)):
     if await run_in_threadpool(store.get_meta, task_id) is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    return await run_in_threadpool(store.read_events, task_id, after, min(max(count, 1), 1000))
+    return await run_in_threadpool(lambda: store.read_events(task_id, after, min(max(count, 1), 1000), overlay_id=overlay))
 
 
 @app.post("/v1/tasks/{task_id}/n")
-async def add_n(task_id: str, mutation: NMutation, smooth: bool = Query(False)):
+async def add_n(task_id: str, mutation: NMutation, smooth: bool = Query(False), overlay: int = Query(0, ge=0)):
     ns = mutation.n if isinstance(mutation.n, list) else [mutation.n]
+    variant = analysis_variant(smooth)
     try:
-        plan = await run_in_threadpool(lambda: store.add_requested_ns(task_id, ns, variant=analysis_variant(smooth)))
-        queued = await run_in_threadpool(lambda: workflow.schedule_requested_for_all(task_id, ns, smooth=bool(smooth)))
+        queued = await run_in_threadpool(
+            lambda: workflow.schedule_requested_for_all(task_id, ns, smooth=bool(smooth), overlay_id=overlay)
+        )
+        plan = await run_in_threadpool(lambda: store.get_plan(task_id, variant=variant, overlay_id=overlay))
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Task not found") from exc
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     await run_in_threadpool(
-        store.publish_event, task_id, "n_added",
-        {"n": ns, "components": queued, "variant": analysis_variant(smooth), "smooth": bool(smooth)},
+        lambda: store.publish_event(
+            task_id, "n_added",
+            {"n": ns, "components": queued, "variant": variant, "smooth": bool(smooth), "overlay_id": int(overlay)},
+            overlay_id=overlay,
+        )
     )
     return plan
 
 
 @app.post("/v1/tasks/{task_id}/cancel")
-async def cancel(task_id: str, mutation: CancelMutation):
+async def cancel(task_id: str, mutation: CancelMutation, smooth: bool = Query(False), overlay: int = Query(0, ge=0)):
     meta = await run_in_threadpool(store.get_meta, task_id)
     if meta is None:
         raise HTTPException(status_code=404, detail="Task not found")
     if mutation.n:
-        await run_in_threadpool(store.cancel_ns, task_id, mutation.n)
+        await run_in_threadpool(lambda: store.cancel_ns(task_id, mutation.n, variant=analysis_variant(smooth), overlay_id=overlay))
     else:
         await run_in_threadpool(store.cancel_task, task_id)
     return await run_in_threadpool(store.snapshot, task_id)
@@ -678,19 +722,26 @@ async def _ws_command(task_id: str, raw: dict) -> dict:
         ns = command.n if isinstance(command.n, list) else [command.n]
         if ns == [None]:
             raise ValueError("Для add требуется n")
-        await run_in_threadpool(lambda: store.add_requested_ns(task_id, ns, variant=analysis_variant(command.smooth)))
         queued = await run_in_threadpool(
-            lambda: workflow.schedule_requested_for_all(task_id, ns, smooth=bool(command.smooth))
+            lambda: workflow.schedule_requested_for_all(
+                task_id, ns, smooth=bool(command.smooth), overlay_id=command.overlay
+            )
         )
         await run_in_threadpool(
-            store.publish_event, task_id, "n_added",
-            {"n": ns, "components": queued, "variant": analysis_variant(command.smooth), "smooth": bool(command.smooth)},
+            lambda: store.publish_event(
+                task_id, "n_added",
+                {"n": ns, "components": queued, "variant": analysis_variant(command.smooth),
+                 "smooth": bool(command.smooth), "overlay_id": int(command.overlay)},
+                overlay_id=command.overlay,
+            )
         )
     elif command.action == "cancel":
         ns = command.n if isinstance(command.n, list) else [command.n]
         if ns == [None]:
             raise ValueError("Для cancel требуется n")
-        await run_in_threadpool(lambda: store.cancel_ns(task_id, ns, variant=analysis_variant(command.smooth)))
+        await run_in_threadpool(lambda: store.cancel_ns(
+            task_id, ns, variant=analysis_variant(command.smooth), overlay_id=command.overlay
+        ))
     elif command.action in {"pause_range", "resume_range"}:
         await run_in_threadpool(store.set_paused, task_id, command.action == "pause_range")
     elif command.action == "cancel_task":
@@ -699,7 +750,7 @@ async def _ws_command(task_id: str, raw: dict) -> dict:
 
 
 @app.websocket("/v1/tasks/{task_id}/ws")
-async def task_websocket(websocket: WebSocket, task_id: str, after: str = "0-0"):
+async def task_websocket(websocket: WebSocket, task_id: str, after: str = "0-0", overlay: int = 0):
     snapshot = await run_in_threadpool(store.snapshot, task_id)
     if snapshot is None:
         await websocket.close(code=4404)
@@ -710,7 +761,7 @@ async def task_websocket(websocket: WebSocket, task_id: str, after: str = "0-0")
     async def sender():
         nonlocal after
         while True:
-            rows = await run_in_threadpool(lambda: store.read_events(task_id, after, 100))
+            rows = await run_in_threadpool(lambda: store.read_events(task_id, after, 100, overlay_id=overlay))
             if not rows:
                 await asyncio.sleep(settings.event_poll_interval_seconds)
                 continue

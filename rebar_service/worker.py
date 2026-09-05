@@ -95,7 +95,11 @@ def run_worker() -> None:
                 workflow.dispatch(PipelineJob.from_value(job_data))
         except Exception as exc:
             traceback.print_exc()
+            overlay_id = int((job_data.get("payload") or {}).get("overlay_id", 0))
+            variant = str((job_data.get("payload") or {}).get("variant", "raw"))
             try:
+                if str(job_data.get("kind")) in {"prepare_field", "prepare_component", "prepare_whole"}:
+                    store.mark_analysis_failed(task_id, variant=variant, overlay_id=overlay_id)
                 store.publish_event(
                     task_id,
                     "job_failed",
@@ -103,7 +107,10 @@ def run_worker() -> None:
                         "job_id": job_id,
                         "kind": job_data.get("kind"),
                         "error": f"{type(exc).__name__}: {exc}",
+                        "variant": variant,
+                        "overlay_id": overlay_id,
                     },
+                    overlay_id=overlay_id,
                 )
             finally:
                 store.ack_job(raw, job_data, "failed")

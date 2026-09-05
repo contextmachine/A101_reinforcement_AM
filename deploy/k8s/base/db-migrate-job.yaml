@@ -26,9 +26,14 @@ spec:
       - name: migrate
         image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
         imagePullPolicy: Always
+        workingDir: /app
         command:
+        - python
+        - -m
         - alembic
         args:
+        - -c
+        - /app/alembic.ini
         - upgrade
         - head
         env:
