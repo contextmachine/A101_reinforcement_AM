@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     postgres_host: str = "a101-postgres"
     postgres_port: int = 5432
     postgres_db: str = "a101"
+    postgres_schema: str = "rebar"
     postgres_user: str = "a101"
     postgres_password: str = ""
     postgres_sslmode: str = "disable"

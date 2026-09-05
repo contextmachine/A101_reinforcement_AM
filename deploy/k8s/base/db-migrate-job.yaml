@@ -38,6 +38,8 @@ spec:
           value: "5432"
         - name: REBAR_POSTGRES_DB
           value: a101
+        - name: REBAR_POSTGRES_SCHEMA
+          value: rebar
         - name: REBAR_POSTGRES_SSLMODE
           value: disable
         - name: REBAR_POSTGRES_USER
