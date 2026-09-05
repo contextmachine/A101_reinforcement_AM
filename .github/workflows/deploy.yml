@@ -12,7 +12,7 @@ on:
       image_tag:
         description: GHCR tag, for example sha-abc123 or v1.0.0
         required: true
-        default: latest
+        default: am-super-branch
       ingress_host:
         description: Production ingress host; ignored by dev
         required: false
@@ -53,7 +53,7 @@ jobs:
         run: |
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:$IMAGE_TAG"
           kubectl kustomize "$OVERLAY" \
-            | sed "s#ghcr.io/contextmachine/a101_reinforcement_am:latest#$IMAGE#g; s#rebar.example.com#$INGRESS_HOST#g" \
+            | sed "s#ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch#$IMAGE#g; s#rebar.example.com#$INGRESS_HOST#g" \
             > /tmp/rebar-rendered.yaml
           grep -q "$IMAGE" /tmp/rebar-rendered.yaml
       - name: Apply
