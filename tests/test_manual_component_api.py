@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from rebar_service.config import Settings
 from rebar_service.pipeline import JobKind, PipelineJob, PipelineWorkflow, to_compat_result
 from rebar_service.store import RedisStore
@@ -179,11 +181,12 @@ def test_manual_task_without_pending_jobs_stays_ready_instead_of_becoming_error(
     assert store.patched == {"state": "ready"}
 
 
-def test_api_declares_manual_upload_and_stateless_source_polygon_routes():
+def test_api_declares_unified_upload_and_stateless_source_polygon_routes():
     root = Path(__file__).resolve().parents[1]
     source = (root / "rebar_service/api.py").read_text(encoding="utf-8")
 
-    assert '@app.post("/v1/tasks/upload-only"' in source
+    assert '@app.post("/v1/tasks/upload-only"' not in source
+    assert '@app.post("/v1/tasks/upload"' in source
     assert '@app.post("/v1/source-polygons/upload"' in source
     assert "workflow.whole_component_info" in source
 
@@ -458,3 +461,68 @@ def test_lazy_whole_invalid_n_still_leaves_whole_prepared_for_inspection():
 
     assert store.saved["whole"]["state"] == "prepared"
     assert store.saved["whole"]["max_useful_n"] == 6
+
+
+def test_api_uses_one_upload_route_and_one_component_prepare_route():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "rebar_service/api.py").read_text(encoding="utf-8")
+
+    assert '@app.post("/v1/tasks/upload-only"' not in source
+    assert '@app.post("/v1/tasks/{task_id}/component-pipeline/prepare"' not in source
+    assert source.count('@app.post("/v1/tasks/{task_id}/components/prepare"') == 1
+    assert 'start: bool = Query(True)' in source
+
+
+
+def _import_api_without_redis():
+    import importlib
+    import sys
+    from types import SimpleNamespace
+
+    import rebar_service.store as store_module
+
+    class FakeRedisClient:
+        @classmethod
+        def from_url(cls, *args, **kwargs):
+            return object()
+
+    store_module.redis = SimpleNamespace(Redis=FakeRedisClient)
+    sys.modules.pop("rebar_service.api", None)
+    return importlib.import_module("rebar_service.api")
+
+def test_upload_config_parser_requires_config_only_when_starting():
+    api_module = _import_api_without_redis()
+
+    parser = getattr(api_module, "_parameters_from_upload_config", None)
+    assert callable(parser), "_parameters_from_upload_config() must exist"
+
+    manual = parser(None, start=False)
+    assert manual.n == [1]
+
+    partial_manual = parser('{"axis":"x"}', start=False)
+    assert partial_manual.n == [1]
+    assert partial_manual.axis == "x"
+
+    with pytest.raises(ValueError, match="config.*required"):
+        parser(None, start=True)
+
+    automatic = parser('{"n":[2,3],"axis":"x"}', start=True)
+    assert automatic.n == [2, 3]
+    assert automatic.axis == "x"
+
+
+def test_upload_source_mode_validation_is_exactly_one_mode():
+    api_module = _import_api_without_redis()
+
+    selector = getattr(api_module, "_upload_source_mode", None)
+    assert callable(selector), "_upload_source_mode() must exist"
+
+    assert selector(file_present=True, nodes_present=False, elements_present=False, loads_present=False) == "file"
+    assert selector(file_present=False, nodes_present=True, elements_present=True, loads_present=True) == "xlsx"
+
+    with pytest.raises(ValueError, match="source"):
+        selector(file_present=False, nodes_present=False, elements_present=False, loads_present=False)
+    with pytest.raises(ValueError, match="source"):
+        selector(file_present=True, nodes_present=True, elements_present=True, loads_present=True)
+    with pytest.raises(ValueError, match="all three XLSX"):
+        selector(file_present=False, nodes_present=True, elements_present=False, loads_present=True)

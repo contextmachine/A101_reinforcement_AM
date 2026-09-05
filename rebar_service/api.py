@@ -35,7 +35,11 @@ from .pipeline import (
     to_compat_result,
 )
 from .planner import normalize_n_request, validate_n_request_limits, validate_solver_limits
-from .source_polygons import SourcePolygonsError, source_polygons_from_input
+from .source_polygons import (
+    SourcePolygonsError,
+    source_polygons_from_input,
+    source_polygons_from_xlsx,
+)
 from .store import RedisStore
 
 
@@ -145,11 +149,15 @@ def _build_task(
     )
 
 
-async def _read_upload_input(file: UploadFile, *, dxf_only: bool = False) -> dict:
+async def _read_upload_bytes(file: UploadFile, *, label: str = "Input file") -> bytes:
     content = await file.read(settings.max_upload_bytes + 1)
     if len(content) > settings.max_upload_bytes:
-        raise HTTPException(status_code=413, detail="Input file is too large")
+        raise HTTPException(status_code=413, detail=f"{label} is too large")
+    return content
 
+
+async def _read_upload_input(file: UploadFile, *, dxf_only: bool = False) -> dict:
+    content = await _read_upload_bytes(file)
     filename = file.filename or "input.dxf"
     suffix = filename.lower()
     if suffix.endswith(".dxf"):
@@ -165,16 +173,94 @@ async def _read_upload_input(file: UploadFile, *, dxf_only: bool = False) -> dic
     raise HTTPException(status_code=415, detail="Supported files: .dxf or .json")
 
 
-def _manual_parameters_from_json(config: str) -> TaskParameters:
-    try:
-        payload = json.loads(config or "{}")
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid JSON config: {exc.msg}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError("config должен быть JSON-объектом")
-    payload = dict(payload)
-    payload.setdefault("n", [1])
+def _parameters_from_upload_config(config: str | None, *, start: bool) -> TaskParameters:
+    if config is None or not config.strip():
+        if start:
+            raise ValueError("config is required when start=true")
+        payload: dict = {"n": [1]}
+    else:
+        try:
+            raw = json.loads(config)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON config: {exc.msg}") from exc
+        if not isinstance(raw, dict):
+            raise ValueError("config должен быть JSON-объектом")
+        payload = dict(raw)
+        if not start:
+            payload.setdefault("n", [1])
     return TaskParameters.model_validate(payload)
+
+
+def _upload_source_mode(
+    *,
+    file_present: bool,
+    nodes_present: bool,
+    elements_present: bool,
+    loads_present: bool,
+) -> str:
+    xlsx_flags = (nodes_present, elements_present, loads_present)
+    any_xlsx = any(xlsx_flags)
+    all_xlsx = all(xlsx_flags)
+    if file_present and any_xlsx:
+        raise ValueError("Exactly one source mode is allowed: file (.dxf/.json) or three XLSX tables")
+    if file_present:
+        return "file"
+    if any_xlsx and not all_xlsx:
+        raise ValueError("XLSX source requires all three XLSX files: nodes_file, elements_file, loads_file")
+    if all_xlsx:
+        return "xlsx"
+    raise ValueError("A source is required: file (.dxf/.json) or three XLSX tables")
+
+
+async def _read_xlsx_file(file: UploadFile, *, label: str) -> bytes:
+    filename = file.filename or ""
+    if not filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=415, detail=f"{label} must be an .xlsx file")
+    return await _read_upload_bytes(file, label=label)
+
+
+async def _read_task_upload_source(
+    *,
+    file: UploadFile | None,
+    nodes_file: UploadFile | None,
+    elements_file: UploadFile | None,
+    loads_file: UploadFile | None,
+    load_column: int | None,
+) -> dict:
+    try:
+        mode = _upload_source_mode(
+            file_present=file is not None,
+            nodes_present=nodes_file is not None,
+            elements_present=elements_file is not None,
+            loads_present=loads_file is not None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if mode == "file":
+        if load_column is not None:
+            raise HTTPException(status_code=422, detail="load_column is allowed only for XLSX source")
+        assert file is not None
+        return await _read_upload_input(file)
+
+    if load_column is None:
+        raise HTTPException(status_code=422, detail="load_column is required for XLSX source and must be 1..4")
+    assert nodes_file is not None and elements_file is not None and loads_file is not None
+    nodes_content, elements_content, loads_content = await asyncio.gather(
+        _read_xlsx_file(nodes_file, label="nodes_file"),
+        _read_xlsx_file(elements_file, label="elements_file"),
+        _read_xlsx_file(loads_file, label="loads_file"),
+    )
+    try:
+        return await run_in_threadpool(
+            source_polygons_from_xlsx,
+            nodes_content,
+            elements_content,
+            loads_content,
+            int(load_column),
+        )
+    except SourcePolygonsError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _apply_upload_overrides(
@@ -222,15 +308,25 @@ async def create_task(request: TaskCreate):
 
 @app.post("/v1/tasks/upload", response_model=TaskCreated)
 async def create_task_upload(
-    config: Annotated[str, Form()],
-    file: Annotated[UploadFile, File()],
+    config: Annotated[str | None, Form()] = None,
+    file: Annotated[UploadFile | None, File()] = None,
+    nodes_file: Annotated[UploadFile | None, File()] = None,
+    elements_file: Annotated[UploadFile | None, File()] = None,
+    loads_file: Annotated[UploadFile | None, File()] = None,
+    load_column: Annotated[int | None, Form(ge=1, le=4)] = None,
+    start: bool = Query(True),
     scan_mode: str | None = Query(None),
     whole: bool | None = Query(None),
     component_result_top_k: int | None = Query(None, ge=1, le=100),
     validate_results: bool | None = Query(None),
 ):
+    """Create a task from DXF, source-polygons JSON, or three XLSX tables.
+
+    ``start=false`` persists the task only; later calls to ``/components/prepare``
+    and ``/components/{component_id}/n`` control preparation and solving.
+    """
     try:
-        parameters = TaskParameters.model_validate_json(config)
+        parameters = _parameters_from_upload_config(config, start=bool(start))
         parameters = _apply_upload_overrides(
             parameters,
             scan_mode=scan_mode,
@@ -240,33 +336,24 @@ async def create_task_upload(
         )
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
-    input_obj = await _read_upload_input(file)
-
-    try:
-        return await run_in_threadpool(_build_task, parameters, input_obj)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    input_obj = await _read_task_upload_source(
+        file=file,
+        nodes_file=nodes_file,
+        elements_file=elements_file,
+        loads_file=loads_file,
+        load_column=load_column,
+    )
 
-@app.post("/v1/tasks/upload-only", response_model=TaskCreated)
-async def create_task_upload_only(
-    file: Annotated[UploadFile, File()],
-    config: Annotated[str, Form()] = "{}",
-):
-    """Persist a DXF task without starting preparation or any solver jobs."""
-    try:
-        parameters = _manual_parameters_from_json(config)
-    except (ValidationError, ValueError) as exc:
-        detail = exc.errors() if isinstance(exc, ValidationError) else str(exc)
-        raise HTTPException(status_code=422, detail=detail) from exc
-    input_obj = await _read_upload_input(file, dxf_only=True)
     try:
         return await run_in_threadpool(
             lambda: _build_task(
                 parameters,
                 input_obj,
-                start_pipeline=False,
-                manual_mode=True,
+                start_pipeline=bool(start),
+                manual_mode=not bool(start),
             )
         )
     except ValueError as exc:
@@ -330,7 +417,6 @@ async def list_components(task_id: str):
     )
 
 
-@app.post("/v1/tasks/{task_id}/component-pipeline/prepare", status_code=202)
 @app.post("/v1/tasks/{task_id}/components/prepare", status_code=202)
 async def prepare_existing_task(task_id: str):
     if await run_in_threadpool(store.get_meta, task_id) is None:
