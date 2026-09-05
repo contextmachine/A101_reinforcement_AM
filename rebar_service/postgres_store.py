@@ -234,13 +234,18 @@ class PostgresStore:
 
     def load_variant_polygons(self, task_id: str, *, variant: str = "raw") -> list[dict[str, Any]]:
         with self.database.connect() as conn:
-            value = conn.execute(
-                text("SELECT polygons FROM task_variants WHERE task_id=:task_id AND variant=:variant"),
+            row = conn.execute(
+                text(
+                    "SELECT polygons, preparation_state FROM task_variants "
+                    "WHERE task_id=:task_id AND variant=:variant"
+                ),
                 {"task_id": task_id, "variant": self._variant(variant)},
-            ).scalar_one_or_none()
-        if value is None:
+            ).mappings().first()
+        if row is None:
             raise KeyError(f"variant={variant} for task={task_id} not found")
-        return list(_json_value(value, []))
+        if str(row["preparation_state"]) == "source_pending":
+            raise KeyError(f"variant={variant} for task={task_id} is not materialized yet")
+        return list(_json_value(row["polygons"], []))
 
     def get_object(self, task_id: str, name: str) -> Any:
         if name == "input":
@@ -1344,10 +1349,11 @@ class PostgresStore:
         plan: Mapping[str, Any],
         input_obj: Mapping[str, Any],
     ) -> None:
-        variants = build_polygon_variants(input_obj)
+        kind = str(input_obj.get("kind", "polygons"))
+        deferred_source = kind == "dxf"
+        variants = {"raw": [], "smooth": []} if deferred_source else build_polygon_variants(input_obj)
         initial_variant = self._variant(str(meta.get("initial_variant", "raw")))
         requested = list(dict.fromkeys(int(n) for n in plan.get("order", meta.get("requested_n", []))))
-        kind = str(input_obj.get("kind", "polygons"))
         filename = str(input_obj.get("filename")) if input_obj.get("filename") else None
         content = input_obj.get("content") if kind == "dxf" else None
         source_bytes = bytes(content) if isinstance(content, (bytes, bytearray, memoryview)) else None
@@ -1410,7 +1416,12 @@ class PostgresStore:
                     },
                 )
                 for variant, polygons in variants.items():
-                    smoothing = {"algorithm": "smooth_load", "version": 1, "threshold": 0.6} if variant == "smooth" else None
+                    smoothing = (
+                        {"algorithm": "smooth_load", "version": 1, "threshold": 0.6}
+                        if variant == "smooth" and not deferred_source
+                        else None
+                    )
+                    variant_state = "source_pending" if deferred_source else "stored"
                     conn.execute(
                         text(
                             """
@@ -1419,7 +1430,7 @@ class PostgresStore:
                                 created_at, updated_at
                             ) VALUES (
                                 :task_id, :variant, CAST(:polygons AS jsonb), CAST(:smoothing AS jsonb),
-                                'stored', :created_at, :created_at
+                                :preparation_state, :created_at, :created_at
                             )
                             """
                         ),
@@ -1428,6 +1439,7 @@ class PostgresStore:
                             "variant": variant,
                             "polygons": _json_param(polygons),
                             "smoothing": None if smoothing is None else _json_param(smoothing),
+                            "preparation_state": variant_state,
                             "created_at": now,
                         },
                     )
@@ -1458,6 +1470,78 @@ class PostgresStore:
             if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
                 raise ValueError(f"Задача {task_id} уже существует") from exc
             raise
+
+    def ensure_polygon_variants(self, task_id: str) -> bool:
+        """Materialize deferred DXF raw/smooth variants exactly once in a worker.
+
+        DXF uploads persist the source bytes and placeholder variant rows so the
+        HTTP upload can return immediately.  The first preparation job acquires
+        a PostgreSQL advisory transaction lock, parses the source, and replaces
+        both placeholders atomically.
+        """
+        with self.database.begin() as conn:
+            conn.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:task_id, 0))"),
+                {"task_id": task_id},
+            )
+            states = conn.execute(
+                text(
+                    "SELECT variant, preparation_state FROM task_variants "
+                    "WHERE task_id=:task_id ORDER BY variant"
+                ),
+                {"task_id": task_id},
+            ).mappings().all()
+            if not states:
+                raise KeyError(f"variants for task={task_id} not found")
+            if all(str(row["preparation_state"]) != "source_pending" for row in states):
+                return False
+
+            source = conn.execute(
+                text(
+                    "SELECT kind, filename, content, sha256 FROM task_sources "
+                    "WHERE task_id=:task_id"
+                ),
+                {"task_id": task_id},
+            ).mappings().first()
+            if source is None:
+                raise KeyError(f"source input for task={task_id} not found")
+            if str(source["kind"]) != "dxf":
+                raise ValueError(f"source_pending is supported only for DXF tasks: {task_id}")
+
+            content = bytes(source["content"] or b"")
+            if sha256(content) != str(source["sha256"]):
+                raise IOError(f"source input for task={task_id} повреждён")
+            input_obj = {
+                "kind": "dxf",
+                "filename": source["filename"] or "input.dxf",
+                "content": content,
+            }
+            variants = build_polygon_variants(input_obj)
+            for variant, polygons in variants.items():
+                smoothing = (
+                    {"algorithm": "smooth_load", "version": 1, "threshold": 0.6}
+                    if variant == "smooth"
+                    else None
+                )
+                conn.execute(
+                    text(
+                        """
+                        UPDATE task_variants SET
+                            polygons=CAST(:polygons AS jsonb),
+                            smoothing_metadata=CAST(:smoothing AS jsonb),
+                            preparation_state='stored',
+                            updated_at=now()
+                        WHERE task_id=:task_id AND variant=:variant
+                        """
+                    ),
+                    {
+                        "task_id": task_id,
+                        "variant": variant,
+                        "polygons": _json_param(polygons),
+                        "smoothing": None if smoothing is None else _json_param(smoothing),
+                    },
+                )
+        return True
 
     # ---------- overlay event log / analysis identity ----------
     def overlay_events(self, task_id: str) -> list[dict[str, Any]]:

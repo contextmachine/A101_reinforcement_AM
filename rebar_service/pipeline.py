@@ -398,6 +398,10 @@ class PipelineWorkflow:
     ) -> list[dict[str, Any]]:
         method = getattr(self.store, "load_variant_polygons", None)
         if callable(method):
+            if str(input_obj.get("kind", "")) == "dxf":
+                materialize = getattr(self.store, "ensure_polygon_variants", None)
+                if callable(materialize):
+                    materialize(task_id)
             return list(method(task_id, variant=variant))
         # Compatibility path for small historical test doubles only. Production Store always persists variants.
         if variant != "raw":
