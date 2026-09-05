@@ -10,6 +10,23 @@ import shapely
 from shapely.strtree import STRtree
 
 
+def _is_usable_face(points, eps: float = 1e-9) -> bool:
+    """Return True for 3DFACE geometry that represents a non-zero area polygon.
+
+    DXF exports may contain line-like 3DFACE entities with only two unique
+    vertices.  Those are not reinforcement cells and must not invalidate the
+    entire drawing.  Triangles remain valid even when vtx3 repeats vtx2.
+    """
+    arr = np.asarray(points, dtype=float)
+    if arr.ndim != 2 or arr.shape[0] < 3 or arr.shape[1] < 2:
+        return False
+    xy = arr[:, :2]
+    if len(np.unique(xy, axis=0)) < 3:
+        return False
+    geometry = Polygon(xy)
+    return (not geometry.is_empty) and float(geometry.area) > float(eps)
+
+
 def _extract_polygons_from_doc(doc):
     msp = doc.modelspace()
 
@@ -52,17 +69,22 @@ def _extract_polygons_from_doc(doc):
     mosaic = []
     for face in msp.query('3DFACE[layer=="KLEENKA"]'):
         color = int(face.dxf.color)
+        points = (
+            np.array(
+                [
+                    tuple(list(face.dxf.vtx0)[:2]),
+                    tuple(list(face.dxf.vtx1)[:2]),
+                    tuple(list(face.dxf.vtx2)[:2]),
+                    tuple(list(face.dxf.vtx3)[:2]),
+                ]
+            )
+            * 1000
+        )
+        if not _is_usable_face(points):
+            continue
         mosaic.append(
             {
-                "points": np.array(
-                    [
-                        tuple(list(face.dxf.vtx0)[:2]),
-                        tuple(list(face.dxf.vtx1)[:2]),
-                        tuple(list(face.dxf.vtx2)[:2]),
-                        tuple(list(face.dxf.vtx3)[:2]),
-                    ]
-                )
-                * 1000,
+                "points": points,
                 "color": color,
                 "load": color_map[color] - 1,
             }
