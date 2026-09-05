@@ -1,6 +1,4 @@
-import shapely
-from shapely.geometry import Polygon, MultiPolygon, box, GeometryCollection
-from collections import defaultdict
+from shapely.geometry import Polygon, MultiPolygon, box
 import numpy as np
 from shapely.strtree import STRtree
 import matplotlib.pyplot as plt
@@ -64,97 +62,47 @@ def clean_poly(polygons):
             result.append(new_obj)
     return result
 
-def fix(g):
-    if g is None or g.is_empty:
-        return g
-    return g if g.is_valid else shapely.make_valid(g)
-
-
-def polygons_only(g):
-    if g is None or g.is_empty:
-        return []
-    if isinstance(g, Polygon):
-        return [g]
-    if isinstance(g, (MultiPolygon, GeometryCollection)):
-        return sum((polygons_only(x) for x in g.geoms), [])
-    return []
-
-
-def group_touching(polys, grid_size=None):
-    """Касающиеся/пересекающиеся полигоны -> один объект."""
-    groups = []
-
-    while polys:
-        group = [polys.pop()]
-        changed = True
-
-        while changed:
-            changed = False
-            for p in polys[:]:
-                if any(p.intersects(x) for x in group):
-                    group.append(p)
-                    polys.remove(p)
-                    changed = True
-
-        groups.append(shapely.union_all(group, grid_size=grid_size))
-
-    return groups
-
-
-def resolve_overlaps(polygons, grid_size=None):
-    by_load = defaultdict(list)
-
-    for obj in polygons:
-        g = fix(obj["geometry"])
-        if g is not None and not g.is_empty:
-            by_load[obj["load"]].append((obj, g))
+def resolve_overlaps(polygons):
+    # Сначала самые "сильные" полигоны
+    polygons_sorted = sorted(
+        polygons,
+        key=lambda obj: obj["load"],
+        reverse=True
+    )
 
     result = []
     occupied = None
 
-    for load in sorted(by_load, reverse=True):
-        items = by_load[load]
+    for obj in polygons_sorted:
+        geom = obj["geometry"]
 
-        # Все геометрии с одинаковым load объединяем
-        same_load = fix(shapely.union_all(
-            [g for _, g in items],
-            grid_size=grid_size
-        ))
+        # Убираем из текущего полигона всё,
+        # что уже занято полигонами с большим load
+        if occupied is not None:
+            geom = geom.difference(occupied)
 
-        if same_load is None or same_load.is_empty:
+        # После вычитания геометрия может исчезнуть
+        if geom.is_empty:
             continue
 
-        # Вычитаем только более высокий load
-        geom = same_load if occupied is None else fix(
-            shapely.difference(
-                same_load,
-                occupied,
-                grid_size=grid_size
-            )
-        )
+        # difference может вернуть Polygon или MultiPolygon.
+        # Разбиваем MultiPolygon на отдельные объекты.
+        if isinstance(geom, MultiPolygon):
+            for polygon in geom.geoms:
+                new_obj = obj.copy()
+                new_obj["geometry"] = polygon
+                result.append(new_obj)
+        else:
+            new_obj = obj.copy()
+            new_obj["geometry"] = geom
+            result.append(new_obj)
 
-        if geom is None or geom.is_empty:
-            continue
-
-        # Разделяем только действительно независимые области.
-        # Касающиеся остаются одним объектом.
-        parts = group_touching(
-            polygons_only(geom),
-            grid_size
-        )
-
-        for part in parts:
-            obj = items[0][0].copy()
-            obj["geometry"] = part
-            result.append(obj)
-
-        # Для следующего load всё текущее становится occupied
-        occupied = same_load if occupied is None else fix(
-            shapely.union_all(
-                [occupied, same_load],
-                grid_size=grid_size
-            )
-        )
+        # Добавляем исходную геометрию в занятую область,
+        # а не обрезанную geom
+        if occupied is None:
+            occupied = obj["geometry"]
+        else:
+            occupied = occupied.union(obj["geometry"])
 
     return result
 

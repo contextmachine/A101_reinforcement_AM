@@ -1,36 +1,27 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
-
 metadata:
   name: rebar-api
-
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt
-
-    # DXF у API разрешён до 64 MB.
-    nginx.ingress.kubernetes.io/proxy-body-size: "70m"
-
-    # Долгие HTTP/WebSocket соединения.
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
-
+    nginx.ingress.kubernetes.io/proxy-body-size: 70m
+    nginx.ingress.kubernetes.io/proxy-read-timeout: '3600'
+    nginx.ingress.kubernetes.io/proxy-send-timeout: '3600'
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: '60'
 spec:
   ingressClassName: nginx
-
   tls:
-    - hosts:
-        - rebar.contextmachine.cloud
-      secretName: rebar-api-tls
-
+  - hosts:
+    - rebar.contextmachine.cloud
+    secretName: rebar-api-tls
   rules:
-    - host: rebar.contextmachine.cloud
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: rebar-api
-                port:
-                  number: 80
+  - host: rebar.contextmachine.cloud
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: rebar-api
+            port:
+              number: 80

@@ -25,7 +25,6 @@ try:  # package import
         _best_warm_start_prepared,
         _cached_optimal_entry_prepared,
         _default_solver_time_limit,
-        _normalize_timeout,
         _ensure_job_result_metadata,
         _kill_process_tree,
         _mark_hard_timeout_fallback,
@@ -45,7 +44,6 @@ except ImportError:  # direct module import
         _best_warm_start_prepared,
         _cached_optimal_entry_prepared,
         _default_solver_time_limit,
-        _normalize_timeout,
         _ensure_job_result_metadata,
         _kill_process_tree,
         _mark_hard_timeout_fallback,
@@ -291,8 +289,8 @@ class RectangleSolverJob:
         prepared: Mapping[str, Any],
         data: dict[str, Any],
         N: int,
-        timeout: float | None,
-        solver_time_limit: float | None,
+        timeout: float,
+        solver_time_limit: float,
         warm_indices: list[int] | None,
         warm_from_N: int | None,
         require_optimal: bool,
@@ -306,8 +304,8 @@ class RectangleSolverJob:
         self._prepared = prepared
         self._data = data
         self._N = int(N)
-        self._timeout = _normalize_timeout(timeout)
-        self._solver_time_limit = None if solver_time_limit is None else float(solver_time_limit)
+        self._timeout = float(timeout)
+        self._solver_time_limit = float(solver_time_limit)
         self._warm_indices = warm_indices
         self._warm_from_N = warm_from_N
         self._require_optimal = bool(require_optimal)
@@ -488,7 +486,7 @@ class RectangleSolverJob:
                 self._process.join(timeout=1)
             self._closed = True
             return
-        if self._timeout is not None and self._elapsed() >= self._timeout:
+        if self._elapsed() >= self._timeout:
             self._hard_timeout()
             return
         if self._process is not None and not self._process.is_alive():
@@ -567,7 +565,7 @@ def start_rectangle_job(
     prepared,
     data: Mapping[str, Any] | None,
     N: int,
-    timeout: float | None = 300.0,
+    timeout: float = 300.0,
     solver_time_limit: float | None = None,
     threads: int = 1,
     solver_msg: bool = False,
@@ -592,7 +590,9 @@ def start_rectangle_job(
     if isinstance(N, bool) or int(N) != N or int(N) < 0:
         raise ValueError("N должен быть неотрицательным целым")
     N = int(N)
-    timeout = _normalize_timeout(timeout)
+    timeout = float(timeout)
+    if not np.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout должен быть положительным")
     if isinstance(threads, bool) or int(threads) != threads or int(threads) <= 0:
         raise ValueError("threads должен быть положительным целым")
     threads = int(threads)
@@ -673,15 +673,12 @@ def start_rectangle_job(
     else:
         warm_indices = warm_from_N = None
 
-    hard_solver_limit = _default_solver_time_limit(timeout)
     if solver_time_limit is None:
-        solver_time_limit = hard_solver_limit
+        solver_time_limit = _default_solver_time_limit(timeout)
     else:
-        solver_time_limit = float(solver_time_limit)
+        solver_time_limit = min(float(solver_time_limit), _default_solver_time_limit(timeout))
         if not np.isfinite(solver_time_limit) or solver_time_limit <= 0:
             raise ValueError("solver_time_limit должен быть положительным")
-        if hard_solver_limit is not None:
-            solver_time_limit = min(solver_time_limit, hard_solver_limit)
 
     options = dict(highs_options or {})
     if emit_heartbeat:
@@ -690,7 +687,7 @@ def start_rectangle_job(
         "prepared": prepared,
         "initial_indices": warm_indices,
         "solver_msg": bool(solver_msg),
-        "time_limit": solver_time_limit,
+        "time_limit": float(solver_time_limit),
         "threads": threads,
         "highs_options": options,
     }
@@ -721,7 +718,7 @@ def start_rectangle_job(
         data=updated_data,
         N=N,
         timeout=timeout,
-        solver_time_limit=solver_time_limit,
+        solver_time_limit=float(solver_time_limit),
         warm_indices=warm_indices,
         warm_from_N=warm_from_N,
         require_optimal=require_optimal,

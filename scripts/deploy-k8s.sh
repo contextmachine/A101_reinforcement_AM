@@ -14,7 +14,7 @@ esac
 [ -d "$OVERLAY" ] || { echo "missing $OVERLAY" >&2; exit 2; }
 
 kubectl kustomize "$OVERLAY" \
-  | sed "s#ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch#$IMAGE#g; s#rebar.example.com#$HOST#g" \
+  | sed "s#ghcr.io/contextmachine/a101_reinforcement_am:latest#$IMAGE#g; s#rebar.example.com#$HOST#g" \
   > /tmp/rebar-rendered.yaml
 
 kubectl apply -f /tmp/rebar-rendered.yaml

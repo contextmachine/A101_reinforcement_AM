@@ -21,12 +21,5 @@ spec:
       listName: rebar:jobs:workload
       listLength: '1'
       activationListLength: '0'
-    authenticationRef: &id001
+    authenticationRef:
       name: rebar-redis-auth
-  - type: redis
-    metadata:
-      address: rebar-redis.rebar-optimizer.svc.cluster.local:6379
-      listName: rebar:component:workload
-      listLength: '1'
-      activationListLength: '0'
-    authenticationRef: *id001

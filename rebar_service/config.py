@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     max_planned_n_values: int = 10_000
     max_n_value: int = 100_000
     max_solver_threads: int = 4
-    max_solver_timeout_seconds: float | None = None
+    max_solver_timeout_seconds: float = 21_600.0
 
     ready_queue: str = "rebar:jobs:ready"
     processing_queue: str = "rebar:jobs:processing"

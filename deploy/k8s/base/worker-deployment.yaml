@@ -15,11 +15,6 @@ spec:
       automountServiceAccountToken: false
       imagePullSecrets:
       - name: ghcr-secret
-      tolerations:
-        - effect: NoSchedule
-          key: workload
-          operator: Equal
-          value: heavy-jobs
       terminationGracePeriodSeconds: 21630
       securityContext:
         runAsNonRoot: true
@@ -33,9 +28,9 @@ spec:
         image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
         imagePullPolicy: Always
         command:
-          - python
-          - -m
-          - rebar_service.universal_worker
+        - python
+        - -m
+        - rebar_service.worker
         envFrom:
         - configMapRef:
             name: rebar-config

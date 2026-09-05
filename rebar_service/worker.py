@@ -20,14 +20,6 @@ from .pipeline import finalize_solution, prepare_pipeline
 from .store import RedisStore
 
 
-def _optional_timeout(value: Any) -> float | None:
-    if value is None:
-        return None
-    if isinstance(value, str) and value.strip().lower() in {"", "none", "null"}:
-        return None
-    return float(value)
-
-
 class PreparedCache:
     def __init__(self, root: str, limit: int):
         self.root = Path(root)
@@ -183,7 +175,7 @@ def _process_solve(store: RedisStore, cache: PreparedCache, task_id: str, n: int
             prepared=prepared_path,
             data=solver_data,
             N=n,
-            timeout=_optional_timeout(opts.get("timeout_seconds")),
+            timeout=float(opts.get("timeout_seconds", 120.0)),
             solver_time_limit=opts.get("solver_time_limit"),
             threads=int(opts.get("threads", 1)),
             require_optimal=bool(opts.get("require_optimal", True)),
@@ -224,7 +216,7 @@ def _process_solve(store: RedisStore, cache: PreparedCache, task_id: str, n: int
             prepared=prepared_path,
             data=solver_data,
             N=n,
-            timeout=_optional_timeout(opts.get("timeout_seconds")),
+            timeout=float(opts.get("timeout_seconds", 120.0)),
             solver_time_limit=opts.get("solver_time_limit"),
             threads=int(opts.get("threads", 1)),
             backend="pulp",

@@ -47,7 +47,7 @@ class QuantizerOptions(BaseModel):
 
 class SolverOptions(BaseModel):
     backend: Literal["highs", "cbc"] = "highs"
-    timeout_seconds: float | None = Field(default=None, gt=0)
+    timeout_seconds: float = Field(default=120.0, gt=0)
     solver_time_limit: float | None = Field(default=None, gt=0)
     threads: int = Field(default=1, ge=1)
     require_optimal: bool = True

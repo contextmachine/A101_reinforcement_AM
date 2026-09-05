@@ -282,7 +282,7 @@ Secret в git не коммить.
 ```bash
 IMAGE=ghcr.io/MY_ORG/MY_REPO:latest
 kubectl kustomize deploy/k8s/overlays/dev \
-  | sed "s#ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch#$IMAGE#g" \
+  | sed "s#ghcr.io/contextmachine/a101_reinforcement_am:latest#$IMAGE#g" \
   | kubectl apply -f -
 ```
 
@@ -338,7 +338,7 @@ kubectl apply -f /tmp/rebar-secrets.yaml
 IMAGE=ghcr.io/MY_ORG/MY_REPO:sha-abc123
 HOST=rebar.my-domain.ru
 kubectl kustomize deploy/k8s/overlays/prod \
-  | sed "s#ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch#$IMAGE#g; s#rebar.example.com#$HOST#g" \
+  | sed "s#ghcr.io/contextmachine/a101_reinforcement_am:latest#$IMAGE#g; s#rebar.example.com#$HOST#g" \
   | kubectl apply -f -
 ```
 
@@ -542,3 +542,8 @@ pytest
 6. дождаться пустого workload;
 7. убедиться, что примерно через пять минут workers масштабировались в 0;
 8. проверить восстановление job после принудительного удаления worker pod.
+
+## Production architecture
+
+The service has one calculation pipeline. FastAPI is served from `rebar_service.api:app`; workers run `python -m rebar_service.worker`. Every task enters the component-based pipeline and its final solutions are exposed both through the extended `/solutions` API and the existing `/results/{total_N}` compatibility API. `run3.py` is a local diagnostic runner only and is never used as a Kubernetes entrypoint.
+

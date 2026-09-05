@@ -63,15 +63,15 @@ spec:
           initialDelaySeconds: 15
           periodSeconds: 10
         command:
-          - python
-          - -m
-          - uvicorn
+        - python
+        - -m
+        - uvicorn
         args:
-          - rebar_service.run3_app:app
-          - --host
-          - "0.0.0.0"
-          - --port
-          - "8000"
+        - rebar_service.api:app
+        - --host
+        - 0.0.0.0
+        - --port
+        - '8000'
       volumes:
       - name: tmp
         emptyDir: {}
