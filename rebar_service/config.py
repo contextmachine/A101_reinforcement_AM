@@ -10,10 +10,19 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="REBAR_", extra="ignore")
 
     redis_url: str = "redis://localhost:6379/0"
+    queue_state_ttl_seconds: int = 30 * 24 * 3600
 
-    task_ttl_seconds: int = 2 * 24 * 3600
-    event_maxlen: int = 10_000
-    blob_chunk_bytes: int = 8 * 1024 * 1024
+    postgres_host: str = "a101-postgres"
+    postgres_port: int = 5432
+    postgres_db: str = "a101"
+    postgres_user: str = "a101"
+    postgres_password: str = ""
+    postgres_sslmode: str = "disable"
+    db_pool_size: int = 5
+    db_max_overflow: int = 5
+    db_pool_recycle_seconds: int = 1800
+    event_poll_interval_seconds: float = 0.5
+
     max_upload_bytes: int = 64 * 1024 * 1024
     max_planned_n_values: int = 10_000
     max_n_value: int = 100_000
@@ -25,7 +34,6 @@ class Settings(BaseSettings):
     job_lease_seconds: int = 90
     max_jobs_per_task: int = 28_031_998
     schedule_window_factor: int = 1
-
 
     default_solver_threads: int = 1
     max_solver_threads: int = 4
@@ -63,6 +71,20 @@ class Settings(BaseSettings):
         if isinstance(value, str) and value.strip().lower() in {"", "none", "null", "off", "unlimited"}:
             return None
         return value
+
+    @property
+    def database_url(self):
+        from sqlalchemy.engine import URL
+
+        return URL.create(
+            drivername="postgresql+psycopg",
+            username=self.postgres_user,
+            password=self.postgres_password,
+            host=self.postgres_host,
+            port=self.postgres_port,
+            database=self.postgres_db,
+            query={"sslmode": self.postgres_sslmode},
+        )
 
     @property
     def cors_origin_list(self) -> list[str]:

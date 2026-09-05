@@ -41,11 +41,11 @@ from .source_polygons import (
     source_polygons_from_input,
     source_polygons_from_xlsx,
 )
-from .store import RedisStore
+from .store import Store
 
 
 settings = get_settings()
-store = RedisStore(settings)
+store = Store(settings)
 workflow = PipelineWorkflow(store, settings)
 
 
@@ -92,7 +92,15 @@ def _build_task(
 
     mode, order, n_source = normalize_n_request(parameters.n)
     params = parameters.model_dump(mode="python")
-    params.pop("n", None)
+    for control_key in (
+        "n",
+        "scan_mode",
+        "whole",
+        "component_result_top_k",
+        "validate_results",
+        "max_concurrent_jobs",
+    ):
+        params.pop(control_key, None)
     prepared_max_n = params.get("solver", {}).get("prepared_max_n")
     if prepared_max_n is not None and int(prepared_max_n) > settings.max_n_value:
         raise ValueError(
@@ -108,7 +116,6 @@ def _build_task(
         "state": initial_state,
         "created_at": now,
         "updated_at": now,
-        "expires_at": now + settings.task_ttl_seconds,
         "cancelled": False,
         "paused": False,
         "parameters": params,
@@ -390,17 +397,14 @@ async def get_task(task_id: str):
 
 
 @app.get("/v1/tasks/{task_id}/source-polygons")
-async def get_source_polygons(task_id: str):
+async def get_source_polygons(task_id: str, smooth: bool = Query(False)):
     if await run_in_threadpool(store.get_meta, task_id) is None:
         raise HTTPException(status_code=404, detail="Task not found")
+    variant = analysis_variant(smooth)
     try:
-        source_input = await run_in_threadpool(store.get_object, task_id, "input")
+        polygons = await run_in_threadpool(lambda: store.load_variant_polygons(task_id, variant=variant))
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Source input not found") from exc
-    try:
-        polygons = await run_in_threadpool(source_polygons_from_input, source_input)
-    except SourcePolygonsError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Source polygon variant not found") from exc
     return JSONResponse(polygons)
 
 
@@ -622,7 +626,7 @@ async def get_events(task_id: str, after: str = "0-0", count: int = 200):
 async def add_n(task_id: str, mutation: NMutation, smooth: bool = Query(False)):
     ns = mutation.n if isinstance(mutation.n, list) else [mutation.n]
     try:
-        plan = await run_in_threadpool(store.add_requested_ns, task_id, ns)
+        plan = await run_in_threadpool(lambda: store.add_requested_ns(task_id, ns, variant=analysis_variant(smooth)))
         queued = await run_in_threadpool(lambda: workflow.schedule_requested_for_all(task_id, ns, smooth=bool(smooth)))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Task not found") from exc
@@ -673,7 +677,7 @@ async def _ws_command(task_id: str, raw: dict) -> dict:
         ns = command.n if isinstance(command.n, list) else [command.n]
         if ns == [None]:
             raise ValueError("Для add требуется n")
-        await run_in_threadpool(store.add_requested_ns, task_id, ns)
+        await run_in_threadpool(lambda: store.add_requested_ns(task_id, ns, variant=analysis_variant(command.smooth)))
         queued = await run_in_threadpool(
             lambda: workflow.schedule_requested_for_all(task_id, ns, smooth=bool(command.smooth))
         )
@@ -685,7 +689,7 @@ async def _ws_command(task_id: str, raw: dict) -> dict:
         ns = command.n if isinstance(command.n, list) else [command.n]
         if ns == [None]:
             raise ValueError("Для cancel требуется n")
-        await run_in_threadpool(store.cancel_ns, task_id, ns)
+        await run_in_threadpool(lambda: store.cancel_ns(task_id, ns, variant=analysis_variant(command.smooth)))
     elif command.action in {"pause_range", "resume_range"}:
         await run_in_threadpool(store.set_paused, task_id, command.action == "pause_range")
     elif command.action == "cancel_task":
@@ -702,20 +706,17 @@ async def task_websocket(websocket: WebSocket, task_id: str, after: str = "0-0")
     await websocket.accept()
     send_lock = asyncio.Lock()
     await websocket.send_json({"type": "snapshot", "data": to_jsonable(snapshot)})
-    stream_key = store.task_key(task_id, "events")
-
     async def sender():
         nonlocal after
         while True:
-            rows = await run_in_threadpool(
-                lambda: store.redis.xread({stream_key: after}, count=100, block=1000)
-            )
-            for _, events in rows:
-                for event_id, fields in events:
-                    after = event_id.decode() if isinstance(event_id, bytes) else str(event_id)
-                    body = loads(fields.get(b"json"), {})
-                    async with send_lock:
-                        await websocket.send_json({"id": after, **to_jsonable(body)})
+            rows = await run_in_threadpool(lambda: store.read_events(task_id, after, 100))
+            if not rows:
+                await asyncio.sleep(settings.event_poll_interval_seconds)
+                continue
+            for body in rows:
+                after = str(body["id"])
+                async with send_lock:
+                    await websocket.send_json(to_jsonable(body))
 
     async def receiver():
         while True:

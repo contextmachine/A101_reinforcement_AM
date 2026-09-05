@@ -1,26 +1,20 @@
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: batch/v1
+kind: Job
 metadata:
-  name: rebar-worker
+  name: rebar-db-migrate
+  namespace: rebar-optimizer
 spec:
-  replicas: 0
-  selector:
-    matchLabels:
-      app: rebar-worker
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 600
   template:
     metadata:
       labels:
-        app: rebar-worker
+        app: rebar-db-migrate
     spec:
+      restartPolicy: Never
       automountServiceAccountToken: false
       imagePullSecrets:
       - name: ghcr-secret
-      tolerations:
-        - effect: NoSchedule
-          key: workload
-          operator: Equal
-          value: heavy-jobs
-      terminationGracePeriodSeconds: 21630
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -29,19 +23,23 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-      - name: worker
+      - name: migrate
         image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
         imagePullPolicy: Always
         command:
-          - python
-          - -m
-          - rebar_service.worker
-        envFrom:
-        - configMapRef:
-            name: rebar-config
-        - secretRef:
-            name: rebar-secrets
+        - alembic
+        args:
+        - upgrade
+        - head
         env:
+        - name: REBAR_POSTGRES_HOST
+          value: a101-postgres
+        - name: REBAR_POSTGRES_PORT
+          value: "5432"
+        - name: REBAR_POSTGRES_DB
+          value: a101
+        - name: REBAR_POSTGRES_SSLMODE
+          value: disable
         - name: REBAR_POSTGRES_USER
           valueFrom:
             secretKeyRef:
@@ -52,10 +50,6 @@ spec:
             secretKeyRef:
               name: a101-postgres-auth
               key: POSTGRES_PASSWORD
-        - name: REBAR_DB_POOL_SIZE
-          value: "1"
-        - name: REBAR_DB_MAX_OVERFLOW
-          value: "0"
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -65,17 +59,6 @@ spec:
         volumeMounts:
         - name: tmp
           mountPath: /tmp
-        - name: cache
-          mountPath: /tmp/rebar-cache
-        resources:
-          requests:
-            cpu: '1'
-            memory: 2Gi
-          limits:
-            cpu: '4'
-            memory: 8Gi
       volumes:
       - name: tmp
-        emptyDir: {}
-      - name: cache
         emptyDir: {}

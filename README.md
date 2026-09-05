@@ -1,8 +1,8 @@
 # A101 reinforcement optimizer
 
-Сервис расчёта дополнительного армирования: один FastAPI API, один Redis-store, один тип worker и один актуальный component-aware pipeline.
+Сервис расчёта дополнительного армирования: FastAPI API, PostgreSQL как долговременное хранилище, Redis только как очередь/KEDA coordination и один тип worker с component-aware pipeline.
 
-`run.py`, `run2.py`, `run3.py` — только локальные тестовые сценарии. Kubernetes их не запускает.
+`run.py`, `run2.py`, `run3.py` — локальные тестовые сценарии. Kubernetes их не запускает.
 
 ## Production architecture
 
@@ -12,42 +12,89 @@ client/frontend
       v
 rebar_service.api:app
       |
-      +-- old frontend-compatible endpoints
-      +-- component / solution endpoints
-      |
-      v
-RedisStore
-  rebar:jobs:ready
-  rebar:jobs:processing
-  rebar:jobs:workload
-      |
-      v
-rebar_service.worker
-      |
-      v
-PipelineWorkflow
-  prepare_field
-  prepare_component
-  solve_component
-  fit_component
-  combine_frontiers
-  layout_solution
-  validate_solution (optional)
-  prepare_whole / solve_whole / fit_whole (optional)
-      |
-      +--> /v1/tasks/{id}/solutions
-      +--> /v1/tasks/{id}/results/{total_N}
+      +-----------------------------+
+      |                             |
+      v                             v
+PostgreSQL                       Redis
+(tasks, variants,              ready / processing
+components, results,           workload / leases
+solutions, events)             dedupe / slots
+      ^                             |
+      |                             v
+      +------ rebar_service.worker -+
+                    |
+                    v
+             PipelineWorkflow
 ```
 
-`/results/{total_N}` сохраняет формат, который использовал существующий frontend, но данные берутся из того же актуального solution, что и `/solutions`.
+PostgreSQL — единственный durable source of truth. Redis можно полностью очистить без потери завершённых задач и результатов; после очистки теряются только незавершённые jobs очереди.
+
+`/results/{total_N}` сохраняет frontend-compatible response shape, но отдельная legacy-копия результата не хранится: ответ строится из canonical `solutions`.
+
+## PostgreSQL storage
+
+Используется PostgreSQL 16 через Kubernetes Service:
+
+```text
+host: a101-postgres
+port: 5432
+database: a101
+namespace: rebar-optimizer
+```
+
+API, worker и migration Job получают username/password из уже существующего Secret `a101-postgres-auth`, keys `POSTGRES_USER` и `POSTGRES_PASSWORD`. Значения credentials в репозиторий не записываются.
+
+Основные таблицы:
+
+```text
+tasks
+├── task_sources
+├── task_variants          # raw + smooth polygon JSONB
+├── task_n_requests        # N/status per variant
+├── components
+│   └── component_results  # frontier per component/N
+├── runtime_artifacts      # internal pickle+zstd BYTEA checkpoints
+├── solutions              # canonical final results
+└── task_events            # durable ordered events
+```
+
+`task_variants` всегда содержит отдельные `raw` и `smooth` записи. Smooth рассчитывается один раз при создании задачи и больше не пересчитывается worker-ом.
+
+Данные задач, raw/smooth JSON, компоненты, frontier, solutions, исходный DXF и events хранятся бессрочно. Временные `solver_result` и `candidate` artifacts удаляются после успешного потребления. Field/component/problem checkpoints остаются, чтобы к старой задаче можно было позже добавить новые N.
+
+Schema migrations выполняет Alembic. Initial migration:
+
+```text
+migrations/versions/0001_postgres_storage.py
+```
+
+## Redis
+
+Redis содержит только ephemeral queue/coordination state:
+
+```text
+rebar:jobs:ready          # full job JSON
+rebar:jobs:processing     # full claimed job JSON
+rebar:jobs:workload       # job_id only; KEDA uses LLEN
+rebar:job:<id>
+rebar:job:<id>:lease
+rebar:job-dedupe:<hash>
+rebar:task:<id>:pending
+rebar:task:<id>:slots
+rebar:lock:queue-reaper
+```
+
+В Redis больше нет task metadata, polygons, blobs, frontiers, solutions, results, events, generation или cancellation state.
+
+`REBAR_JOB_LEASE_SECONDS` — не ограничение времени вычисления. Worker продлевает lease heartbeat-ом; lease нужен для возврата job после падения Pod.
 
 ## Component semantics
 
-`n: [1, 2, 3]` означает кандидаты `N=1,2,3` **для каждой компоненты отдельно**. Для компоненты считаются только значения `N <= max_useful_n`.
+`n: [1, 2, 3]` означает кандидаты `N=1,2,3` для каждой компоненты отдельно. Для компоненты считаются только значения `N <= max_useful_n`.
 
-Если все запрошенные `N` больше `max_useful_n`, для этой компоненты создаётся fallback `N=1` — один прямоугольник, покрывающий компоненту.
+Если все запрошенные N больше `max_useful_n`, для этой компоненты создаётся fallback `N=1` — один прямоугольник, покрывающий компоненту.
 
-После расчёта component frontiers они комбинируются. Поэтому итоговый `total_N` обычно не равен одному из исходных `N`:
+После расчёта component frontiers они комбинируются, поэтому итоговый `total_N` обычно не равен одному из исходных N:
 
 ```text
 component 0 -> N=1
@@ -59,6 +106,8 @@ total_N = 4
 
 `scan_mode=hard` перебирает `1..max_useful_n` для каждой компоненты. `whole=true` дополнительно запускает расчёт всего поля как одной компоненты.
 
+Raw/smooth имеют независимые `task_n_requests`, component rows и results.
+
 ## API
 
 Swagger:
@@ -69,9 +118,9 @@ https://rebar.contextmachine.cloud/docs
 
 ### Создание задачи
 
-`POST /v1/tasks/upload` — multipart upload DXF/JSON.
+`POST /v1/tasks/upload` — multipart upload DXF/JSON/XLSX source.
 
-Поле `config` — **JSON-строка**, например:
+Поле `config` — JSON-строка, например:
 
 ```json
 {
@@ -97,24 +146,28 @@ https://rebar.contextmachine.cloud/docs
 {"n":[1,2,3]}
 ```
 
-Пример curl:
-
 ```bash
 curl -X POST 'https://rebar.contextmachine.cloud/v1/tasks/upload' \
   -F 'config={"n":[1,2,3]}' \
   -F 'file=@drawing.dxf'
 ```
 
-Дополнительные query-параметры upload:
+Query-параметры upload:
 
 - `scan_mode=requested|hard`
 - `whole=true|false`
 - `component_result_top_k=5`
 - `validate_results=true|false`
+- `smooth=true|false`
+
+Persisted source polygons:
+
+```text
+GET /v1/tasks/{task_id}/source-polygons?smooth=false
+GET /v1/tasks/{task_id}/source-polygons?smooth=true
+```
 
 ### Frontend-compatible endpoints
-
-Сохранены старые URL и основные response shapes:
 
 ```text
 POST /v1/tasks
@@ -146,25 +199,15 @@ GET  /v1/tasks/{task_id}/solutions
 GET  /v1/tasks/{task_id}/solutions/{solution_id}
 ```
 
-Для `POST .../components/{component_id}/n` значения выше `max_useful_n` отклоняются с HTTP 422.
-
 ## Local `run3.py`
 
-`run3.py` не запускает API и worker. Это локальный запуск текущей схемы без Redis:
+`run3.py` не запускает API/worker/PostgreSQL/Redis:
 
 ```bash
 python run3.py drawing.dxf -n 1 2 3
 python run3.py drawing.dxf -n 1 2 3 --hard-scan
 python run3.py drawing.dxf -n 1 2 3 --whole
 ```
-
-По умолчанию solver/fit не имеют ограничения по времени. При необходимости его можно задать явно:
-
-```bash
-python run3.py drawing.dxf -n 1 2 3 --timeout 3600 --time-limit 3500
-```
-
-Результаты пишутся в `run3_output/run3_result.pkl` и `run3_output/run3_summary.json`.
 
 ## Production entrypoints
 
@@ -180,21 +223,11 @@ Worker:
 python -m rebar_service.worker
 ```
 
-Docker image по умолчанию стартует API. Worker Deployment переопределяет command.
+Migration:
 
-## Redis
-
-Используется одна физическая семья очередей:
-
-```text
-rebar:jobs:ready
-rebar:jobs:processing
-rebar:jobs:workload
+```bash
+alembic upgrade head
 ```
-
-`workload` хранит все незавершённые jobs до `ack`, поэтому KEDA видит не только ожидающие, но и уже выполняющиеся работы.
-
-`REBAR_JOB_LEASE_SECONDS` — не ограничение времени вычисления. Worker продлевает lease heartbeat-ом; lease нужен для возврата job после реального падения Pod.
 
 ## Solver time limits
 
@@ -206,16 +239,7 @@ REBAR_SOLVER_TIME_LIMIT=none
 REBAR_FIT_TIME_LIMIT=none
 ```
 
-`none`, `null`, `off` и `unlimited` интерпретируются как отсутствие лимита. Явный timeout можно передать в task config.
-
-Потоки solver:
-
-```text
-REBAR_DEFAULT_SOLVER_THREADS=1
-REBAR_MAX_SOLVER_THREADS=4
-```
-
-Количество Pod и количество solver threads независимы.
+`none`, `null`, `off` и `unlimited` интерпретируются как отсутствие лимита.
 
 ## Kubernetes
 
@@ -231,8 +255,8 @@ rebar-optimizer
 deploy/k8s/base/api.yaml
 deploy/k8s/base/worker-deployment.yaml
 deploy/k8s/base/configmap.yaml
+deploy/k8s/base/db-migrate-job.yaml
 deploy/k8s/overlays/prod/worker-scaledobject.yaml
-deploy/k8s/overlays/prod/ingress.yaml
 ```
 
 KEDA 2.20.2:
@@ -244,75 +268,126 @@ helm upgrade --install keda kedacore/keda \
   --version 2.20.2
 ```
 
-Manifests рассчитаны на Kubernetes 1.33–1.35.
+Manifests рассчитаны на Kubernetes 1.33–1.35. KEDA смотрит только на `rebar:jobs:workload`.
 
-KEDA смотрит только на `rebar:jobs:workload` и масштабирует Deployment `rebar-worker` от 0.
+## First clean cutover: Redis -> PostgreSQL
 
-Redis для KEDA указывается полным cluster DNS:
+Этот переход намеренно не мигрирует старые Redis tasks. Скрипт сначала проверяет PostgreSQL и успешно применяет Alembic migration, затем останавливает старый API/worker, удаляет KEDA ScaledObject на время перехода, выполняет `FLUSHDB` и применяет новую версию. Поэтому необратимый шаг происходит только после успешной миграции схемы.
 
-```text
-rebar-redis.rebar-optimizer.svc.cluster.local:6379
-```
-
-## Image / branch
-
-Рабочий image:
-
-```text
-ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
-```
-
-`.github/workflows/ci.yml` запускается на каждый push в `am-super-branch` и публикует branch tag + sha tag. `latest` публикуется только для default branch.
-
-Оба Kustomize overlay используют:
-
-```yaml
-newTag: am-super-branch
-```
-
-После новой сборки branch tag:
+Сначала соберите/push-ните новый image, содержащий этот код. Затем:
 
 ```bash
-kubectl -n rebar-optimizer rollout restart deployment/rebar-api
-kubectl -n rebar-optimizer rollout restart deployment/rebar-worker
+export IMAGE='ghcr.io/contextmachine/a101_reinforcement_am:<new-tag>'
+CONFIRM_REDIS_FLUSH=YES \
+  ./scripts/cutover-postgres.sh prod "$IMAGE" rebar.contextmachine.cloud
 ```
 
-`imagePullPolicy: Always` заставляет новый Pod проверить актуальный digest плавающего branch tag.
+`CONFIRM_REDIS_FLUSH=YES` обязателен специально: `FLUSHDB` необратимо удаляет текущие Redis keys. Скрипт использует только выбранную Redis DB и не выполняет `FLUSHALL`.
 
-## Production ingress
-
-```text
-https://rebar.contextmachine.cloud
-```
-
-Ingress class: `nginx`; TLS secret: `rebar-api-tls`; cert-manager issuer: `letsencrypt`.
-
-Проверка:
+Если нужно выполнить шаги отдельно:
 
 ```bash
-curl https://rebar.contextmachine.cloud/health/live
-curl https://rebar.contextmachine.cloud/openapi.json
+export IMAGE='ghcr.io/contextmachine/a101_reinforcement_am:<new-tag>'
+
+./scripts/migrate-db.sh "$IMAGE"
+
+kubectl -n rebar-optimizer scale deployment/rebar-api --replicas=0
+kubectl -n rebar-optimizer delete scaledobject rebar-worker --ignore-not-found=true
+kubectl -n rebar-optimizer scale deployment/rebar-worker --replicas=0
+
+./scripts/clear-redis.sh
+./scripts/deploy-k8s.sh prod "$IMAGE" rebar.contextmachine.cloud
 ```
+
+### Redis credential rotation
+
+Предыдущий dev manifest содержал Redis password в репозитории. Файл удалён и заменён на `deploy/k8s/secrets/rebar-secrets.dev.example.yaml`. Считайте старое значение скомпрометированным и смените Redis credential.
+
+Для Redis StatefulSet, который читает `rebar-secrets`, можно создать новый Secret без вывода пароля на экран:
+
+```bash
+NEW_REDIS_PASSWORD="$(openssl rand -hex 32)"
+kubectl -n rebar-optimizer create secret generic rebar-secrets \
+  --from-literal=REBAR_REDIS_PASSWORD="$NEW_REDIS_PASSWORD" \
+  --from-literal=REBAR_REDIS_URL="redis://:${NEW_REDIS_PASSWORD}@rebar-redis:6379/0" \
+  --from-literal=REBAR_REDIS_ADDRESS='rebar-redis:6379' \
+  --dry-run=client -o yaml | kubectl apply -f -
+unset NEW_REDIS_PASSWORD
+```
+
+После обновления Secret перезапустите workload Redis, который задаёт `--requirepass`, а API/worker будут перезапущены новым deployment. Если production Redis управляется отдельным manifest/operator, обновите credential тем же значением там до запуска API/worker.
+
+## Database verification after cutover
+
+Проверить Alembic revision и таблицы без раскрытия PostgreSQL credentials:
+
+```bash
+kubectl -n rebar-optimizer exec deploy/a101-postgres -- sh -ec \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT version_num FROM alembic_version;"'
+
+kubectl -n rebar-optimizer exec deploy/a101-postgres -- sh -ec \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\\dt"'
+```
+
+После создания первой новой задачи проверить raw/smooth:
+
+```bash
+kubectl -n rebar-optimizer exec deploy/a101-postgres -- sh -ec \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT task_id, variant, jsonb_array_length(polygons) AS polygons FROM task_variants ORDER BY task_id, variant;"'
+```
+
+Проверить, что canonical solutions появились:
+
+```bash
+kubectl -n rebar-optimizer exec deploy/a101-postgres -- sh -ec \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT task_id, variant, total_n, status, actual_mass_kg FROM solutions ORDER BY created_at DESC LIMIT 20;"'
+```
+
+Проверить Redis queue keys:
+
+```bash
+REDIS_POD="$(kubectl -n rebar-optimizer get pod -l app=rebar-redis -o jsonpath='{.items[0].metadata.name}')"
+kubectl -n rebar-optimizer exec "$REDIS_POD" -c redis -- sh -ec \
+  'redis-cli -a "$REBAR_REDIS_PASSWORD" --no-auth-warning --scan'
+```
+
+После cutover до постановки новых jobs список должен быть пустым. После работы допустимы только queue/lease/dedupe/pending/slots/reaper key families, описанные выше.
+
+## Normal deployment after cutover
+
+Для будущих версий с migrations сначала выполняйте migration Job из нового image, затем deploy:
+
+```bash
+export IMAGE='ghcr.io/contextmachine/a101_reinforcement_am:<tag>'
+./scripts/migrate-db.sh "$IMAGE"
+./scripts/deploy-k8s.sh prod "$IMAGE" rebar.contextmachine.cloud
+```
+
+Alembic migrations должны быть backward-compatible с ещё работающей предыдущей версией API/worker, если deploy выполняется без downtime.
 
 ## Verification
 
-```bash
-python -m compileall -q A101 rebar_service run3.py
-pytest -q
-python run3.py --help
-```
-
-Render manifests:
+Локально:
 
 ```bash
-kubectl kustomize deploy/k8s/overlays/prod > rendered-prod.yaml
-kubectl apply --dry-run=server -f rendered-prod.yaml
+./scripts/verify.sh
 ```
 
-Проверить image:
+Внутри скрипта выполняются:
+
+```text
+python -m compileall
+pytest
+alembic upgrade head --sql
+kubectl kustomize ...   # если kubectl установлен
+```
+
+Production readiness:
 
 ```bash
-grep 'image:' rendered-prod.yaml
+kubectl -n rebar-optimizer rollout status deployment/rebar-api --timeout=5m
+kubectl -n rebar-optimizer get deployment/rebar-worker
+kubectl -n rebar-optimizer get scaledobject/rebar-worker
+curl https://rebar.contextmachine.cloud/health/live
+curl https://rebar.contextmachine.cloud/health/ready
 ```
-
-Ожидается `ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch`.

@@ -23,8 +23,9 @@ def test_result_rank_prefers_postprocessed_feasible_over_raw_incumbent():
     assert RedisStore._result_rank(raw) < RedisStore._result_rank(broken)
 
 
-def test_store_tracks_total_outstanding_work_for_keda():
+def test_store_tracks_total_outstanding_work_for_keda_by_job_id_only():
     from pathlib import Path
-    source = (Path(__file__).resolve().parents[1] / "rebar_service/store.py").read_text(encoding="utf-8")
-    assert "lpush(self.settings.workload_queue, raw)" in source
-    assert "lrem(self.settings.workload_queue, 1, raw)" in source
+    source = (Path(__file__).resolve().parents[1] / "rebar_service/redis_queue.py").read_text(encoding="utf-8")
+    assert "lpush(self.settings.workload_queue, job_id)" in source
+    assert "lrem(self.settings.workload_queue, 1, job_id)" in source
+    assert "lpush(self.settings.workload_queue, raw)" not in source

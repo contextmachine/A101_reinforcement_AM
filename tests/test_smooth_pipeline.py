@@ -91,6 +91,15 @@ class PrepareFieldStore:
         assert name == "input"
         return self.input
 
+    def load_variant_polygons(self, task_id, *, variant="raw"):
+        assert variant in {"raw", "smooth"}
+        if variant == "smooth":
+            return [
+                {"points": row["points"], "load": 1.0}
+                for row in self.input["polygons"]
+            ]
+        return list(self.input["polygons"])
+
     def publish_event(self, *args, **kwargs):
         return "1-0"
 
@@ -111,7 +120,7 @@ class PrepareFieldStore:
         raise AssertionError("test decomposition intentionally has no components")
 
 
-def test_prepare_field_applies_smooth_load_and_stores_smooth_variant(monkeypatch):
+def test_prepare_field_uses_persisted_smooth_variant_without_recomputing_smoothing(monkeypatch):
     import A101.axis_orientation as axis_module
     import A101.calculate_mass as mass_module
     import A101.grid_work as grid_module
@@ -119,19 +128,11 @@ def test_prepare_field_applies_smooth_load_and_stores_smooth_variant(monkeypatch
     import A101.read_dxf as dxf_module
     import A101.reinforcement_components as components_module
 
-    smooth_calls = []
-
-    def fake_smooth(polygons):
-        smooth_calls.append([p["load"] for p in polygons])
-        out = []
-        for p in polygons:
-            row = dict(p)
-            row["old_load"] = row["load"]
-            row["load"] = 1.0
-            out.append(row)
-        return out
-
-    monkeypatch.setattr(dxf_module, "smooth_load", fake_smooth)
+    monkeypatch.setattr(
+        dxf_module,
+        "smooth_load",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("smooth_load must run only during task creation")),
+    )
     monkeypatch.setattr(axis_module, "class_holds", lambda *a, **k: ({}, {}, {}))
     monkeypatch.setattr(bbox_module, "rect_polygons", lambda rows: rows)
     monkeypatch.setattr(grid_module, "clean_poly", lambda rows: rows)
@@ -167,8 +168,8 @@ def test_prepare_field_applies_smooth_load_and_stores_smooth_variant(monkeypatch
         PipelineJob("prepare_field", "task", {"auto_solve": False, "variant": "smooth", "smooth": True})
     )
 
-    assert smooth_calls == [[5.0, 2.0]]
     assert "smooth" in store.fields
     assert [p["load"] for p in store.fields["smooth"]["start_polygons"]] == [1.0, 1.0]
     assert store.fields["smooth"]["smooth"] is True
     assert store.meta["effective_rebar_config"]["smooth"]["source"] == "test"
+

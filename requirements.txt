@@ -1,6 +1,9 @@
 fastapi[standard]==0.128.2
 pydantic-settings>=2.10,<3
 redis[hiredis]>=6.2,<7
+SQLAlchemy>=2.0,<3
+psycopg[binary]>=3.2,<4
+alembic>=1.18,<2
 zstandard>=0.23,<1
 numpy>=2.3,<2.5
 scipy>=1.17,<1.19

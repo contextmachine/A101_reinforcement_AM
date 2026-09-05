@@ -9,11 +9,11 @@ import uuid
 
 from .config import get_settings
 from .pipeline import PipelineJob, PipelineWorkflow
-from .store import RedisStore
+from .store import Store
 
 
 class LeaseHeartbeat:
-    def __init__(self, store: RedisStore, job: dict, worker_id: str) -> None:
+    def __init__(self, store: Store, job: dict, worker_id: str) -> None:
         self.store = store
         self.job = job
         self.worker_id = worker_id
@@ -43,7 +43,7 @@ class LeaseHeartbeat:
 
 def run_worker() -> None:
     settings = get_settings()
-    store = RedisStore(settings)
+    store = Store(settings)
     workflow = PipelineWorkflow(store, settings)
     worker_id = f"{os.getenv('HOSTNAME', 'worker')}-{uuid.uuid4().hex[:8]}"
     stopping = threading.Event()

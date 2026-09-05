@@ -16,7 +16,7 @@ from shapely.geometry import Polygon, box
 from shapely.ops import unary_union
 
 from .config import Settings
-from .store import RedisStore
+from .store import Store
 
 
 WHOLE_COMPONENT_ID = -1
@@ -294,7 +294,7 @@ def to_compat_result(solution: Mapping[str, Any]) -> dict[str, Any]:
 class PipelineWorkflow:
     """The only production calculation workflow used by the API and workers."""
 
-    def __init__(self, store: RedisStore, settings: Settings) -> None:
+    def __init__(self, store: Store, settings: Settings) -> None:
         self.store = store
         self.settings = settings
 
@@ -307,6 +307,44 @@ class PipelineWorkflow:
     def _variant_call(method, *args, variant: str = "raw"):
         """Keep raw calls compatible with historical store/test doubles."""
         return method(*args) if variant == "raw" else method(*args, variant=variant)
+
+    def _requested_ns(self, task_id: str, variant: str) -> list[int]:
+        method = getattr(self.store, "requested_ns", None)
+        if callable(method):
+            try:
+                values = method(task_id, variant=variant)
+            except TypeError:
+                values = method(task_id)
+            if values:
+                return [int(n) for n in values]
+        meta = self.store.get_meta(task_id) or {}
+        return [int(n) for n in meta.get("requested_n", [1])]
+
+    def _is_n_cancelled(self, task_id: str, n: int, variant: str) -> bool:
+        method = self.store.is_n_cancelled
+        try:
+            return bool(method(task_id, int(n), variant=variant))
+        except TypeError:
+            return bool(method(task_id, int(n)))
+
+    def _persisted_variant_polygons(
+        self, task_id: str, variant: str, input_obj: Mapping[str, Any]
+    ) -> list[dict[str, Any]]:
+        method = getattr(self.store, "load_variant_polygons", None)
+        if callable(method):
+            return list(method(task_id, variant=variant))
+        # Compatibility path for small historical test doubles only. Production Store always persists variants.
+        if variant != "raw":
+            raise AttributeError("store does not expose persisted smooth polygons")
+        rows = polygons_from_input(input_obj)
+        return [
+            {
+                "points": [[float(x), float(y)] for x, y in row["points"]],
+                "load": float(row["load"]),
+                **({"color": int(row["color"])} if row.get("color") is not None else {}),
+            }
+            for row in rows
+        ]
 
     def enqueue(
         self,
@@ -347,7 +385,7 @@ class PipelineWorkflow:
             task_id,
             {
                 "type": "pipeline_queued",
-                "requested_n": list(meta.get("requested_n", [])),
+                "requested_n": self._requested_ns(task_id, variant),
                 "scan_mode": meta.get("scan_mode", "requested"),
                 "whole": bool(meta.get("whole", False)),
                 "auto_solve": bool(auto_solve),
@@ -392,7 +430,6 @@ class PipelineWorkflow:
         from A101.calculate_mass import resolve_rebar_config
         from A101.grid_work import clean_poly
         from A101.poly_bbox import rect_polygons
-        from A101.read_dxf import smooth_load
         from A101.reinforcement_components import split_reinforcement_components
 
         task_id = job.task_id
@@ -403,9 +440,8 @@ class PipelineWorkflow:
         self._publish(task_id, {"type": "component_prepare_started", "variant": variant, "smooth": smooth})
         input_obj = self.store.get_object(task_id, "input")
         params = self._params(task_id)
-        polygons = polygons_from_input(input_obj)
-        if smooth:
-            polygons = smooth_load(polygons)
+        persisted_polygons = self._persisted_variant_polygons(task_id, variant, input_obj)
+        polygons = polygons_from_input({"kind": "polygons", "units": "mm", "polygons": persisted_polygons})
 
         cfg = resolve_rebar_config(
             polygons,
@@ -469,7 +505,7 @@ class PipelineWorkflow:
             if variant != "raw":
                 whole_payload.update(variant=variant, smooth=True)
             self.enqueue(JobKind.prepare_whole, task_id, whole_payload)
-        self.store.patch_meta(task_id, state="components_ready", component_count=len(split.get("components", [])))
+        self.store.patch_meta(task_id, state="components_ready")
         self._publish(
             task_id,
             {
@@ -539,7 +575,7 @@ class PipelineWorkflow:
         kind = JobKind.solve_whole if whole else JobKind.solve_component
         smooth = variant_is_smooth(variant)
         for n in plan[int(start) : end]:
-            if self.store.is_n_cancelled(task_id, int(n)):
+            if self._is_n_cancelled(task_id, int(n), variant):
                 continue
             self.enqueue(
                 kind,
@@ -576,7 +612,7 @@ class PipelineWorkflow:
         prepared = self._prepare_problem(task_id, cid, record["component"]) if variant == "raw" else self._prepare_problem(task_id, cid, record["component"], variant=variant)
         meta = self.store.get_meta(task_id) or {}
         plan, force_single = choose_component_ns(
-            meta.get("requested_n", [1]), prepared["max_useful_n"], str(meta.get("scan_mode")) == "hard"
+            self._requested_ns(task_id, variant) or [1], prepared["max_useful_n"], str(meta.get("scan_mode")) == "hard"
         )
         record.update(
             state="prepared", plan=plan, force_single_box=force_single,
@@ -672,7 +708,7 @@ class PipelineWorkflow:
 
         task_id, cid, n = job.task_id, int(job.payload["component_id"]), int(job.payload["n"])
         variant = payload_variant(job.payload)
-        if self.store.is_n_cancelled(task_id, n):
+        if self._is_n_cancelled(task_id, n, variant):
             self._publish(task_id, {"type": "component_n_cancelled", "component_id": cid, "n": n, "variant": variant})
             return
         if n == 1 or job.payload.get("force_single_box"):
@@ -845,27 +881,21 @@ class PipelineWorkflow:
             "variant": variant, "smooth": variant_is_smooth(variant),
         })
         best = self.store.best_solution(task_id, solution["total_N"], variant=variant)
-        if variant == "raw" and best and best.get("solution_id") == solution["solution_id"]:
-            compatible = to_compat_result(solution)
-            self.store.save_best_result(task_id, solution["total_N"], compatible, "final")
+        if best and best.get("solution_id") == solution["solution_id"]:
             status = "feasible" if solution["is_feasible"] else "infeasible"
+            result_url = (
+                f"/v1/tasks/{task_id}/results/{solution['total_N']}"
+                if variant == "raw"
+                else f"/v1/tasks/{task_id}/solutions/{solution['solution_id']}"
+            )
             self.store.set_n_status(
-                task_id, solution["total_N"], status, solution_id=solution["solution_id"], source=solution["source"],
-                result_url=f"/v1/tasks/{task_id}/results/{solution['total_N']}",
+                task_id, solution["total_N"], status, variant=variant,
+                solution_id=solution["solution_id"], source=solution["source"], result_url=result_url,
             )
             self._publish(task_id, {
                 "type": "n_finished", "n": solution["total_N"], "status": status,
-                "result_url": f"/v1/tasks/{task_id}/results/{solution['total_N']}",
-                "solution_id": solution["solution_id"], "source": solution["source"],
-                "variant": variant, "smooth": False,
-            })
-        elif variant == "smooth":
-            self._publish(task_id, {
-                "type": "n_finished", "n": solution["total_N"],
-                "status": "feasible" if solution["is_feasible"] else "infeasible",
-                "result_url": f"/v1/tasks/{task_id}/solutions/{solution['solution_id']}",
-                "solution_id": solution["solution_id"], "source": solution["source"],
-                "variant": variant, "smooth": True,
+                "result_url": result_url, "solution_id": solution["solution_id"], "source": solution["source"],
+                "variant": variant, "smooth": variant_is_smooth(variant),
             })
         if (self.store.get_meta(task_id) or {}).get("validate_results") and solution.get("is_feasible"):
             self.enqueue(JobKind.validate_solution, task_id, {
@@ -940,7 +970,7 @@ class PipelineWorkflow:
             force_single = False
         else:
             plan, force_single = choose_component_ns(
-                meta.get("requested_n", [1]), prepared["max_useful_n"], str(meta.get("scan_mode")) == "hard"
+                self._requested_ns(task_id, variant) or [1], prepared["max_useful_n"], str(meta.get("scan_mode")) == "hard"
             )
         record = {
             "component": component, "state": "prepared", "plan": plan, "force_single_box": force_single,
@@ -968,7 +998,7 @@ class PipelineWorkflow:
         stored = self._variant_call(self.store.load_problem, task_id, "whole", variant=variant)
         if not stored:
             raise KeyError("whole problem missing")
-        if self.store.is_n_cancelled(task_id, n):
+        if self._is_n_cancelled(task_id, n, variant):
             return
         _, threads, timeout, time_limit, backend, require_optimal = self._solver_options(task_id)
         results, data = solve_component_frontier(
