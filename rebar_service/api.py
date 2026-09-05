@@ -541,6 +541,7 @@ async def list_solutions(
                 "proxy_mass": row.get("proxy_mass"),
                 "actual_mass_kg": row.get("actual_mass_kg"),
                 "is_feasible": bool(row.get("is_feasible")),
+                "is_optimal": bool(row.get("is_optimal")),
                 "status": row.get("status"),
                 "result_url": f"/v1/tasks/{task_id}/solutions/{row['solution_id']}",
             }

@@ -853,11 +853,29 @@ class PipelineWorkflow:
         })
         choices = candidate.get("component_choices", {}) or {}
         optimal = bool(choices) and all(bool(row.get("is_optimal")) for row in choices.values())
+        is_optimal = bool(optimal and feasible)
+
+        status = (
+            "optimal"
+            if is_optimal
+            else "feasible"
+            if feasible
+            else str(layout.get("status", "infeasible")).lower()
+        )
+
         return {
-            **dict(candidate), "solution_id": solution_id, "source": source, "variant": variant,
-            "smooth": variant_is_smooth(variant), "total_N": total_n, "component_ns": component_ns,
-            "actual_mass_kg": float(mass), "is_feasible": feasible, "is_optimal": optimal and feasible,
-            "status": "feasible" if feasible else str(layout.get("status", "infeasible")), "bar_layout": layout,
+            **dict(candidate),
+            "solution_id": solution_id,
+            "source": source,
+            "variant": variant,
+            "smooth": variant_is_smooth(variant),
+            "total_N": total_n,
+            "component_ns": component_ns,
+            "actual_mass_kg": float(mass),
+            "is_feasible": feasible,
+            "is_optimal": is_optimal,
+            "status": status,
+            "bar_layout": layout,
             "metadata": {
                 "threads": self.settings.effective_threads(self._solver(task_id).get("threads")),
                 "created_at": time.time(), "variant": variant, "smooth": variant_is_smooth(variant),
@@ -882,7 +900,13 @@ class PipelineWorkflow:
         })
         best = self.store.best_solution(task_id, solution["total_N"], variant=variant)
         if best and best.get("solution_id") == solution["solution_id"]:
-            status = "feasible" if solution["is_feasible"] else "infeasible"
+            status = (
+                "optimal"
+                if solution.get("is_optimal")
+                else "feasible"
+                if solution.get("is_feasible")
+                else "infeasible"
+            )
             result_url = (
                 f"/v1/tasks/{task_id}/results/{solution['total_N']}"
                 if variant == "raw"

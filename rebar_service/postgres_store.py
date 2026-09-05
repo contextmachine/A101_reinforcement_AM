@@ -1036,7 +1036,16 @@ class PostgresStore:
         selected = self._variant(variant)
         cid = self.component_db_id(component_id)
         result = dict(json_safe_value(dict(value)))
-        status = str(result.get("status", result.get("solve_state", "feasible" if result.get("is_feasible") else "failed")))
+        is_feasible = bool(result.get("is_feasible", False))
+        is_optimal = bool(result.get("is_optimal", False))
+        if is_optimal and is_feasible:
+            status = "optimal"
+        elif is_feasible:
+            status = "feasible"
+        else:
+            status = str(
+                result.get("status", result.get("solve_state", "infeasible"))
+            ).lower()
         proxy = result.get("proxy_mass", result.get("total_cost"))
         with self.database.begin() as conn:
             conn.execute(
@@ -1258,7 +1267,10 @@ class PostgresStore:
         }
 
     def get_result_metas(self, task_id: str) -> dict[str, dict[str, Any]]:
-        rows = self.solutions(task_id, variant="raw")
+        meta = self.get_meta(task_id) or {}
+        variant = str(meta.get("initial_variant", "raw"))
+
+        rows = self.solutions(task_id, variant=variant)
         best: dict[int, dict[str, Any]] = {}
         for row in rows:
             n = int(row.get("total_N", row.get("total_n", -1)))
