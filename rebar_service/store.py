@@ -313,50 +313,89 @@ class RedisStore:
         return {(k.decode() if isinstance(k, bytes) else str(k)): loads(v, {}) for k, v in raw.items()}
 
     # ---------- component pipeline data ----------
-    def save_field(self, task_id: str, value: Mapping[str, Any]) -> None:
-        self.put_object(task_id, "field", dict(value))
+    @staticmethod
+    def _variant(variant: str | None = "raw") -> str:
+        value = str(variant or "raw").lower()
+        if value not in {"raw", "smooth"}:
+            raise ValueError(f"Unknown analysis variant: {variant}")
+        return value
 
-    def load_field(self, task_id: str) -> dict[str, Any]:
-        return dict(self._get_object_optional(task_id, "field", {}) or {})
+    @classmethod
+    def _variant_name(cls, raw_name: str, variant: str | None = "raw") -> str:
+        value = cls._variant(variant)
+        return raw_name if value == "raw" else f"{raw_name}-smooth"
 
-    def save_component(self, task_id: str, component_id: Any, value: Mapping[str, Any]) -> None:
+    @classmethod
+    def _variant_component_name(cls, prefix: str, component_id: Any, variant: str | None = "raw") -> str:
+        value = cls._variant(variant)
         cid = str(component_id)
-        self.put_object(task_id, f"component-{cid}", dict(value))
-        key = self.task_key(task_id, "components")
+        return f"{prefix}-{cid}" if value == "raw" else f"{prefix}-smooth:{cid}"
+
+    def save_field(self, task_id: str, value: Mapping[str, Any], *, variant: str = "raw") -> None:
+        self.put_object(task_id, self._variant_name("field", variant), dict(value))
+
+    def load_field(self, task_id: str, *, variant: str = "raw") -> dict[str, Any]:
+        return dict(self._get_object_optional(task_id, self._variant_name("field", variant), {}) or {})
+
+    def save_component(self, task_id: str, component_id: Any, value: Mapping[str, Any], *, variant: str = "raw") -> None:
+        cid = str(component_id)
+        self.put_object(task_id, self._variant_component_name("component", cid, variant), dict(value))
+        key = self.task_key(task_id, self._variant_name("components", variant).replace("-smooth", ":smooth"))
         self.redis.sadd(key, cid)
         self.redis.expireat(key, self._task_expire_at(task_id))
 
-    def load_component(self, task_id: str, component_id: Any) -> dict[str, Any] | None:
-        value = self._get_object_optional(task_id, f"component-{component_id}", None)
+    def load_component(self, task_id: str, component_id: Any, *, variant: str = "raw") -> dict[str, Any] | None:
+        value = self._get_object_optional(
+            task_id, self._variant_component_name("component", component_id, variant), None
+        )
         return None if value is None else dict(value)
 
-    def component_ids(self, task_id: str) -> list[str]:
-        values = self.redis.smembers(self.task_key(task_id, "components")) or []
+    def component_ids(self, task_id: str, *, variant: str = "raw") -> list[str]:
+        suffix = "components" if self._variant(variant) == "raw" else "components:smooth"
+        values = self.redis.smembers(self.task_key(task_id, suffix)) or []
         out = [v.decode() if isinstance(v, bytes) else str(v) for v in values]
         return sorted(out, key=lambda x: (x == "whole", int(x) if x.lstrip("-").isdigit() else x))
 
-    def components(self, task_id: str) -> list[dict[str, Any]]:
-        return [value for cid in self.component_ids(task_id) if (value := self.load_component(task_id, cid)) is not None]
+    def components(self, task_id: str, *, variant: str = "raw") -> list[dict[str, Any]]:
+        return [
+            value
+            for cid in self.component_ids(task_id, variant=variant)
+            if (value := self.load_component(task_id, cid, variant=variant)) is not None
+        ]
 
-    def save_problem(self, task_id: str, component_id: Any, value: Mapping[str, Any]) -> None:
-        self.put_object(task_id, f"problem-{component_id}", dict(value))
+    def save_problem(self, task_id: str, component_id: Any, value: Mapping[str, Any], *, variant: str = "raw") -> None:
+        self.put_object(task_id, self._variant_component_name("problem", component_id, variant), dict(value))
 
-    def load_problem(self, task_id: str, component_id: Any) -> dict[str, Any] | None:
-        value = self._get_object_optional(task_id, f"problem-{component_id}", None)
+    def load_problem(self, task_id: str, component_id: Any, *, variant: str = "raw") -> dict[str, Any] | None:
+        value = self._get_object_optional(
+            task_id, self._variant_component_name("problem", component_id, variant), None
+        )
         return None if value is None else dict(value)
 
-    def save_solver_result(self, task_id: str, component_id: Any, n: int, value: Mapping[str, Any]) -> None:
-        self.put_object(task_id, f"solver-{component_id}-{int(n)}", dict(value))
+    def save_solver_result(
+        self, task_id: str, component_id: Any, n: int, value: Mapping[str, Any], *, variant: str = "raw"
+    ) -> None:
+        prefix = self._variant_component_name("solver", component_id, variant)
+        self.put_object(task_id, f"{prefix}-{int(n)}", dict(value))
 
-    def load_solver_result(self, task_id: str, component_id: Any, n: int) -> dict[str, Any] | None:
-        value = self._get_object_optional(task_id, f"solver-{component_id}-{int(n)}", None)
+    def load_solver_result(
+        self, task_id: str, component_id: Any, n: int, *, variant: str = "raw"
+    ) -> dict[str, Any] | None:
+        prefix = self._variant_component_name("solver", component_id, variant)
+        value = self._get_object_optional(task_id, f"{prefix}-{int(n)}", None)
         return None if value is None else dict(value)
 
-    def save_frontier_result(self, task_id: str, component_id: Any, n: int, value: Mapping[str, Any]) -> None:
+    def save_frontier_result(
+        self, task_id: str, component_id: Any, n: int, value: Mapping[str, Any], *, variant: str = "raw"
+    ) -> None:
         cid = str(component_id)
-        self.put_object(task_id, f"frontier-{cid}-{int(n)}", dict(value))
-        n_key = self.task_key(task_id, f"frontier-n:{cid}")
-        version_key = self.task_key(task_id, "frontier-version")
+        value_variant = self._variant(variant)
+        prefix = f"frontier-{cid}" if value_variant == "raw" else f"frontier-smooth:{cid}"
+        self.put_object(task_id, f"{prefix}-{int(n)}", dict(value))
+        n_suffix = f"frontier-n:{cid}" if value_variant == "raw" else f"frontier-n:smooth:{cid}"
+        version_suffix = "frontier-version" if value_variant == "raw" else "frontier-version:smooth"
+        n_key = self.task_key(task_id, n_suffix)
+        version_key = self.task_key(task_id, version_suffix)
         pipe = self.redis.pipeline(transaction=False)
         pipe.sadd(n_key, int(n))
         pipe.incr(version_key)
@@ -364,26 +403,32 @@ class RedisStore:
         pipe.expireat(version_key, self._task_expire_at(task_id))
         pipe.execute()
 
-    def frontier_version(self, task_id: str) -> int:
-        return int(self.redis.get(self.task_key(task_id, "frontier-version")) or 0)
+    def frontier_version(self, task_id: str, *, variant: str = "raw") -> int:
+        suffix = "frontier-version" if self._variant(variant) == "raw" else "frontier-version:smooth"
+        return int(self.redis.get(self.task_key(task_id, suffix)) or 0)
 
-    def load_frontier(self, task_id: str, component_id: Any) -> dict[int, dict[str, Any]]:
+    def load_frontier(self, task_id: str, component_id: Any, *, variant: str = "raw") -> dict[int, dict[str, Any]]:
         cid = str(component_id)
-        values = self.redis.smembers(self.task_key(task_id, f"frontier-n:{cid}")) or []
+        value_variant = self._variant(variant)
+        n_suffix = f"frontier-n:{cid}" if value_variant == "raw" else f"frontier-n:smooth:{cid}"
+        values = self.redis.smembers(self.task_key(task_id, n_suffix)) or []
         out: dict[int, dict[str, Any]] = {}
+        prefix = f"frontier-{cid}" if value_variant == "raw" else f"frontier-smooth:{cid}"
         for raw in values:
             n = int(raw)
-            value = self._get_object_optional(task_id, f"frontier-{cid}-{n}", None)
+            value = self._get_object_optional(task_id, f"{prefix}-{n}", None)
             if value is not None:
                 out[n] = dict(value)
         return dict(sorted(out.items()))
 
-    def all_frontiers(self, task_id: str, include_whole: bool = False) -> dict[Any, dict[int, dict[str, Any]]]:
+    def all_frontiers(
+        self, task_id: str, include_whole: bool = False, *, variant: str = "raw"
+    ) -> dict[Any, dict[int, dict[str, Any]]]:
         out: dict[Any, dict[int, dict[str, Any]]] = {}
-        for cid in self.component_ids(task_id):
+        for cid in self.component_ids(task_id, variant=variant):
             if cid == "whole" and not include_whole:
                 continue
-            frontier = self.load_frontier(task_id, cid)
+            frontier = self.load_frontier(task_id, cid, variant=variant)
             if frontier:
                 key: Any = int(cid) if cid.lstrip("-").isdigit() else cid
                 out[key] = frontier
@@ -401,18 +446,24 @@ class RedisStore:
         sid = str(row["solution_id"])
         total_n = int(row["total_N"])
         source = str(row.get("source", "components"))
+        variant = self._variant(str(row.get("variant", "raw")))
+        row["variant"] = variant
+        row["smooth"] = variant == "smooth"
         score = float(row.get("actual_mass_kg", row.get("proxy_mass", float("inf"))))
         self.put_object(task_id, f"solution-{sid}", row)
         total_key = self.task_key(task_id, f"solutions:{total_n}")
         source_key = self.task_key(task_id, f"solution-source:{source}")
+        variant_key = self.task_key(task_id, f"solution-variant:{variant}")
         all_key = self.task_key(task_id, "solution-ids")
         pipe = self.redis.pipeline(transaction=False)
         pipe.zadd(total_key, {sid: score})
         pipe.sadd(source_key, sid)
+        pipe.sadd(variant_key, sid)
         pipe.sadd(all_key, sid)
         expires = self._task_expire_at(task_id)
         pipe.expireat(total_key, expires)
         pipe.expireat(source_key, expires)
+        pipe.expireat(variant_key, expires)
         pipe.expireat(all_key, expires)
         pipe.execute()
 
@@ -420,11 +471,20 @@ class RedisStore:
         value = self._get_object_optional(task_id, f"solution-{solution_id}", None)
         return None if value is None else dict(value)
 
-    def solutions(self, task_id: str, total_n: int | None = None, source: str | None = None) -> list[dict[str, Any]]:
+    def solutions(
+        self,
+        task_id: str,
+        total_n: int | None = None,
+        source: str | None = None,
+        variant: str | None = None,
+    ) -> list[dict[str, Any]]:
         if total_n is not None:
             ids = self.redis.zrange(self.task_key(task_id, f"solutions:{int(total_n)}"), 0, -1) or []
         elif source is not None:
             ids = self.redis.smembers(self.task_key(task_id, f"solution-source:{source}")) or []
+        elif variant is not None:
+            value_variant = self._variant(variant)
+            ids = self.redis.smembers(self.task_key(task_id, f"solution-variant:{value_variant}")) or []
         else:
             ids = self.redis.smembers(self.task_key(task_id, "solution-ids")) or []
         decoded = [x.decode() if isinstance(x, bytes) else str(x) for x in ids]
@@ -433,6 +493,9 @@ class RedisStore:
             rows = [r for r in rows if int(r.get("total_N", -1)) == int(total_n)]
         if source is not None:
             rows = [r for r in rows if str(r.get("source")) == str(source)]
+        if variant is not None:
+            value_variant = self._variant(variant)
+            rows = [r for r in rows if str(r.get("variant", "raw")) == value_variant]
         return sorted(
             rows,
             key=lambda r: (
@@ -442,8 +505,8 @@ class RedisStore:
             ),
         )
 
-    def best_solution(self, task_id: str, total_n: int) -> dict[str, Any] | None:
-        rows = self.solutions(task_id, total_n=total_n)
+    def best_solution(self, task_id: str, total_n: int, *, variant: str | None = None) -> dict[str, Any] | None:
+        rows = self.solutions(task_id, total_n=total_n, variant=variant)
         return rows[0] if rows else None
 
     # ---------- generation / cancellation / pause ----------

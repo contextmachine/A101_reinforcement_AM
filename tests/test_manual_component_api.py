@@ -282,7 +282,17 @@ class FieldPrepareStore(QueueStore):
         self.records = {}
         self.saved_components = {}
         self.saved_field = None
-        self.meta = {"whole": False, "manual_mode": True}
+        self.meta = {
+            "whole": False,
+            "manual_mode": True,
+            "parameters": {
+                "back_grid": (18, 300),
+                "stock": [(18, 300), (20, 150)],
+                "max_layers": 2,
+                "axis": "y",
+                "anchor_factor": 32.0,
+            },
+        }
         self.events = []
 
     def patch_meta(self, task_id, **changes):

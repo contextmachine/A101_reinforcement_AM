@@ -67,12 +67,9 @@ class TaskParameters(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     n: NRequest
-    back_grid: tuple[int, int] = (18, 300)
-    stock: list[tuple[int, int]] = Field(
-        default_factory=lambda: [(18, 300), (20, 150), (20, 100), (25, 150), (25, 100)],
-        min_length=1,
-    )
-    max_layers: int = Field(default=2, ge=1)
+    back_grid: tuple[int, int] | None = None
+    stock: list[tuple[int, int]] | None = Field(default=None, min_length=1)
+    max_layers: int | None = Field(default=None, ge=1)
     min_width_mm: float = Field(default=1000.0, gt=0)
     steel_density_kg_m3: float = Field(default=7850.0, gt=0)
     anchor_factor: float = Field(default=32.0, ge=0)
@@ -90,6 +87,8 @@ class TaskParameters(BaseModel):
     @field_validator("back_grid")
     @classmethod
     def validate_grid(cls, value):
+        if value is None:
+            return value
         if value[0] <= 0 or value[1] <= 0:
             raise ValueError("Диаметр и шаг должны быть положительными")
         return value
@@ -97,6 +96,8 @@ class TaskParameters(BaseModel):
     @field_validator("stock")
     @classmethod
     def validate_stock(cls, value):
+        if value is None:
+            return value
         if any(d <= 0 or step <= 0 for d, step in value):
             raise ValueError("Все stock-пары должны быть положительными")
         return value
@@ -117,6 +118,7 @@ class CancelMutation(BaseModel):
 class WsCommand(BaseModel):
     action: Literal["add", "cancel", "pause_range", "resume_range", "cancel_task", "snapshot"]
     n: int | list[int] | None = None
+    smooth: bool = False
 
 
 class TaskCreated(BaseModel):

@@ -583,6 +583,107 @@ def select_rebar_config(
         "selection_strategy": strategy,
     }
 
+
+def normalize_rebar_stock(stock):
+    """Remove step variants representable by integer multiples of larger steps.
+
+    The reduction is performed independently for each diameter.  Exact
+    duplicates are removed.  The returned ``max_layers`` is the largest
+    multiplicity needed to reproduce any removed step, with a minimum of 1.
+    """
+    pairs = []
+    seen = set()
+    for raw in stock or ():
+        diameter, step = map(int, raw)
+        if diameter <= 0 or step <= 0:
+            raise ValueError("Диаметр и шаг stock должны быть положительными")
+        pair = (diameter, step)
+        if pair not in seen:
+            seen.add(pair)
+            pairs.append(pair)
+
+    if not pairs:
+        raise ValueError("stock не должен быть пустым")
+
+    keep = set()
+    max_layers = 1
+    by_diameter = defaultdict(list)
+    for diameter, step in pairs:
+        by_diameter[diameter].append(step)
+
+    for diameter, steps in by_diameter.items():
+        retained = []
+        for step in sorted(set(steps), reverse=True):
+            ratios = [
+                larger // step
+                for larger in retained
+                if larger > step and larger % step == 0 and larger // step >= 2
+            ]
+            if ratios:
+                max_layers = max(max_layers, max(ratios))
+                continue
+            retained.append(step)
+            keep.add((diameter, step))
+
+    normalized = [pair for pair in pairs if pair in keep]
+    return normalized, int(max_layers)
+
+
+def resolve_rebar_config(
+    data,
+    *,
+    back_grid=None,
+    stock=None,
+    max_layers=None,
+    strategy="min_background",
+):
+    """Resolve effective reinforcement configuration for one analysis variant.
+
+    ``stock`` supplied by a user is normalized through
+    :func:`normalize_rebar_stock`; catalog stock is used as curated.
+    """
+    effective_max = int(max_layers) if max_layers is not None else 2
+    if effective_max < 1:
+        raise ValueError("max_layers должен быть положительным")
+
+    if back_grid is None and stock is not None:
+        raise ValueError("back_grid обязателен, если stock передан пользователем")
+
+    if back_grid is None and stock is None:
+        cfg = dict(select_rebar_config(data, max_lay=effective_max, strategy=strategy))
+        cfg["back_grid"] = tuple(map(int, cfg["back_grid"]))
+        cfg["stock"] = [tuple(map(int, row)) for row in cfg["stock"]]
+        cfg["max_layers"] = effective_max
+        cfg["rebar_config_source"] = "catalog_auto"
+        return cfg
+
+    back_grid = tuple(map(int, back_grid))
+    if back_grid[0] <= 0 or back_grid[1] <= 0:
+        raise ValueError("Диаметр и шаг фонового армирования должны быть положительными")
+
+    if stock is None:
+        catalog_stock = REBAR_CATALOG.get(back_grid)
+        if catalog_stock is None:
+            raise ValueError(f"back_grid={back_grid} отсутствует в REBAR_CATALOG")
+        effective_stock = [tuple(map(int, row)) for row in catalog_stock]
+        source = "catalog_background"
+    else:
+        effective_stock, effective_max = normalize_rebar_stock(stock)
+        source = "user"
+
+    loads = sorted({
+        float(item["load"] if isinstance(item, dict) else item)
+        for item in data
+    })
+    cfg = dict(make_rebar_classes(loads, back_grid, effective_stock, max_lay=effective_max))
+    cfg.update(
+        back_grid=back_grid,
+        stock=list(effective_stock),
+        max_layers=int(effective_max),
+        rebar_config_source=source,
+    )
+    return cfg
+
 def loads_to_classes(load_matrix, load2cls, *, atol=1e-8):
     """Map physical loads to integer classes; NaN/uncovered cells become 0."""
 

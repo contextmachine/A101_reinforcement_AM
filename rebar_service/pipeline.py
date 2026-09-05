@@ -34,6 +34,21 @@ def component_storage_id(component_id: int | str) -> int | str:
     return WHOLE_COMPONENT_KEY if value == WHOLE_COMPONENT_ID else value
 
 
+def analysis_variant(smooth: bool = False) -> str:
+    return "smooth" if bool(smooth) else "raw"
+
+
+def variant_is_smooth(variant: str | None) -> bool:
+    return str(variant or "raw") == "smooth"
+
+
+def payload_variant(payload: Mapping[str, Any]) -> str:
+    value = str(payload.get("variant") or analysis_variant(bool(payload.get("smooth", False))))
+    if value not in {"raw", "smooth"}:
+        raise ValueError(f"Unknown analysis variant: {value}")
+    return value
+
+
 class JobKind(str, Enum):
     prepare_field = "prepare_field"
     prepare_component = "prepare_component"
@@ -74,7 +89,7 @@ class PipelineJob:
     def default_dedupe_key(self) -> str:
         coordinate = {
             key: self.payload.get(key)
-            for key in ("component_id", "n", "total_n", "solution_id", "source", "frontier_version", "offset")
+            for key in ("component_id", "n", "total_n", "solution_id", "source", "frontier_version", "offset", "variant")
             if key in self.payload
         }
         if not coordinate:
@@ -288,6 +303,11 @@ class PipelineWorkflow:
         event_type = str(row.pop("type"))
         return self.store.publish_event(task_id, event_type, row)
 
+    @staticmethod
+    def _variant_call(method, *args, variant: str = "raw"):
+        """Keep raw calls compatible with historical store/test doubles."""
+        return method(*args) if variant == "raw" else method(*args, variant=variant)
+
     def enqueue(
         self,
         kind: JobKind | str,
@@ -309,12 +329,19 @@ class PipelineWorkflow:
         )
         return self.store.enqueue_pipeline_job(job.to_dict())
 
-    def prepare_task(self, task_id: str, *, auto_solve: bool | None = None) -> bool:
+    def prepare_task(
+        self,
+        task_id: str,
+        *,
+        auto_solve: bool | None = None,
+        smooth: bool = False,
+    ) -> bool:
         meta = self.store.get_meta(task_id)
         if meta is None:
             raise KeyError(task_id)
         if auto_solve is None:
             auto_solve = not bool(meta.get("manual_mode", False))
+        variant = analysis_variant(smooth)
         self.store.patch_meta(task_id, state="queued_preparation", generation=self.store.generation(task_id))
         self._publish(
             task_id,
@@ -324,12 +351,18 @@ class PipelineWorkflow:
                 "scan_mode": meta.get("scan_mode", "requested"),
                 "whole": bool(meta.get("whole", False)),
                 "auto_solve": bool(auto_solve),
+                "variant": variant,
+                "smooth": bool(smooth),
             },
         )
-        return self.enqueue(JobKind.prepare_field, task_id, {"auto_solve": bool(auto_solve)})
+        return self.enqueue(
+            JobKind.prepare_field,
+            task_id,
+            {"auto_solve": bool(auto_solve), "variant": variant, "smooth": bool(smooth)},
+        )
 
-    def bootstrap_task(self, task_id: str) -> bool:
-        return self.prepare_task(task_id, auto_solve=True)
+    def bootstrap_task(self, task_id: str, *, smooth: bool = False) -> bool:
+        return self.prepare_task(task_id, auto_solve=True, smooth=smooth)
 
     def dispatch(self, job: PipelineJob) -> None:
         if int(job.generation) != self.store.generation(job.task_id):
@@ -348,40 +381,54 @@ class PipelineWorkflow:
     def _solver(self, task_id: str) -> dict[str, Any]:
         return dict(self._params(task_id).get("solver", {}) or {})
 
-    def _field(self, task_id: str) -> dict[str, Any]:
-        field = self.store.load_field(task_id)
+    def _field(self, task_id: str, variant: str = "raw") -> dict[str, Any]:
+        field = self._variant_call(self.store.load_field, task_id, variant=variant)
         if not field:
-            raise KeyError(f"field не подготовлен для task {task_id}")
+            raise KeyError(f"field variant={variant} не подготовлен для task {task_id}")
         return field
 
     def handle_prepare_field(self, job: PipelineJob) -> None:
         from A101.axis_orientation import class_holds, normalize_axis
-        from A101.calculate_mass import make_rebar_classes
+        from A101.calculate_mass import resolve_rebar_config
         from A101.grid_work import clean_poly
         from A101.poly_bbox import rect_polygons
+        from A101.read_dxf import smooth_load
         from A101.reinforcement_components import split_reinforcement_components
 
         task_id = job.task_id
+        variant = payload_variant(job.payload)
+        smooth = variant_is_smooth(variant)
         auto_solve = bool(job.payload.get("auto_solve", True))
         self.store.patch_meta(task_id, state="preparing_components")
-        self._publish(task_id, {"type": "component_prepare_started"})
+        self._publish(task_id, {"type": "component_prepare_started", "variant": variant, "smooth": smooth})
         input_obj = self.store.get_object(task_id, "input")
         params = self._params(task_id)
         polygons = polygons_from_input(input_obj)
-        loads = sorted({float(row["load"]) for row in polygons})
-        cfg = make_rebar_classes(
-            loads,
-            tuple(params.get("back_grid", (18, 300))),
-            [tuple(row) for row in params.get("stock", [])],
-            max_lay=int(params.get("max_layers", 2)),
+        if smooth:
+            polygons = smooth_load(polygons)
+
+        cfg = resolve_rebar_config(
+            polygons,
+            back_grid=params.get("back_grid"),
+            stock=params.get("stock"),
+            max_layers=params.get("max_layers"),
         )
-        cfg["back_grid"] = tuple(params.get("back_grid", (18, 300)))
-        cfg["stock"] = [tuple(row) for row in params.get("stock", [])]
         axis = normalize_axis(str(params.get("axis", "y")))
         cfg["axis"] = axis
         anchor_factor = float(params.get("anchor_factor", 32.0))
         base_holds, holds, leaves = class_holds(cfg["diameters"], cfg.get("recipes"), anchor_factor)
         cfg.update(base_holds=base_holds, holds=holds, recipe_leaves=leaves)
+
+        meta_before = self.store.get_meta(task_id) or {}
+        effective = dict(meta_before.get("effective_rebar_config", {}) or {})
+        effective[variant] = {
+            "back_grid": tuple(cfg["back_grid"]),
+            "stock": [tuple(row) for row in cfg["stock"]],
+            "max_layers": int(cfg["max_layers"]),
+            "source": cfg.get("rebar_config_source"),
+        }
+        self.store.patch_meta(task_id, effective_rebar_config=effective)
+
         ortho = clean_poly(rect_polygons(polygons))
         split = split_reinforcement_components(
             ortho,
@@ -401,19 +448,27 @@ class PipelineWorkflow:
             "cfg": cfg,
             "decomposition": split,
             "field_geometry": field_geometry,
+            "variant": variant,
+            "smooth": smooth,
         }
-        self.store.save_field(task_id, field)
+        self._variant_call(self.store.save_field, task_id, field, variant=variant)
         for component in split.get("components", []):
             cid = int(component["id"])
-            self.store.save_component(
-                task_id,
-                cid,
-                {"component": component, "info": component_public_info(component), "state": "queued"},
+            self._variant_call(
+                self.store.save_component, task_id, cid,
+                {"component": component, "info": component_public_info(component), "state": "queued", "variant": variant},
+                variant=variant,
             )
-            self.enqueue(JobKind.prepare_component, task_id, {"component_id": cid, "auto_solve": auto_solve})
+            prepare_payload = {"component_id": cid, "auto_solve": auto_solve}
+            if variant != "raw":
+                prepare_payload.update(variant=variant, smooth=True)
+            self.enqueue(JobKind.prepare_component, task_id, prepare_payload)
         meta = self.store.get_meta(task_id) or {}
         if (not auto_solve) or bool(meta.get("whole")):
-            self.enqueue(JobKind.prepare_whole, task_id, {"auto_solve": auto_solve})
+            whole_payload = {"auto_solve": auto_solve}
+            if variant != "raw":
+                whole_payload.update(variant=variant, smooth=True)
+            self.enqueue(JobKind.prepare_whole, task_id, whole_payload)
         self.store.patch_meta(task_id, state="components_ready", component_count=len(split.get("components", [])))
         self._publish(
             task_id,
@@ -423,13 +478,17 @@ class PipelineWorkflow:
                 "active_indices": split.get("active_indices", []),
                 "background_only_indices": split.get("background_only_indices", []),
                 "degenerate_indices": split.get("degenerate_indices", []),
+                "variant": variant,
+                "smooth": smooth,
             },
         )
 
-    def _prepare_problem(self, task_id: str, component_id: Any, component: Mapping[str, Any]) -> dict[str, Any]:
+    def _prepare_problem(
+        self, task_id: str, component_id: Any, component: Mapping[str, Any], *, variant: str = "raw"
+    ) -> dict[str, Any]:
         from A101.reinforcement_components import component_n_bounds, prepare_component_problem
 
-        field = self._field(task_id)
+        field = self._field(task_id, variant)
         cfg = field["cfg"]
         params = self._params(task_id)
         solver = self._solver(task_id)
@@ -460,8 +519,8 @@ class PipelineWorkflow:
         )
         bounds = component_n_bounds(problem["prepared"], cap=prepared_max_n or self.settings.max_n_value)
         max_useful = max(1, int(bounds["nonredundant_upper_bound"]))
-        stored = {"problem": problem, "bounds": bounds, "max_useful_n": max_useful}
-        self.store.save_problem(task_id, component_id, stored)
+        stored = {"problem": problem, "bounds": bounds, "max_useful_n": max_useful, "variant": variant}
+        self._variant_call(self.store.save_problem, task_id, component_id, stored, variant=variant)
         return stored
 
     def _schedule_plan(
@@ -472,10 +531,13 @@ class PipelineWorkflow:
         force_single: bool,
         start: int = 0,
         whole: bool = False,
+        *,
+        variant: str = "raw",
     ) -> None:
         batch = max(1, int(self.settings.scheduler_batch_size))
         end = min(len(plan), int(start) + batch)
         kind = JobKind.solve_whole if whole else JobKind.solve_component
+        smooth = variant_is_smooth(variant)
         for n in plan[int(start) : end]:
             if self.store.is_n_cancelled(task_id, int(n)):
                 continue
@@ -487,101 +549,88 @@ class PipelineWorkflow:
                     "n": int(n),
                     "force_single_box": bool(force_single and int(n) == 1),
                     "source": "whole" if whole else "components",
+                    "variant": variant,
+                    "smooth": smooth,
                 },
             )
         if end < len(plan):
             self.enqueue(
                 JobKind.prepare_whole if whole else JobKind.prepare_component,
                 task_id,
-                {"component_id": component_id, "schedule_only": True, "start": end},
-                dedupe_key=f"schedule:{task_id}:{component_id}:{end}:{self.store.generation(task_id)}",
+                {"component_id": component_id, "schedule_only": True, "start": end, "variant": variant, "smooth": smooth},
+                dedupe_key=f"schedule:{task_id}:{variant}:{component_id}:{end}:{self.store.generation(task_id)}",
             )
 
     def handle_prepare_component(self, job: PipelineJob) -> None:
         task_id, cid = job.task_id, int(job.payload["component_id"])
-        record = self.store.load_component(task_id, cid)
+        variant = payload_variant(job.payload)
+        record = self._variant_call(self.store.load_component, task_id, cid, variant=variant)
         if record is None:
-            raise KeyError(f"component {cid} not found")
+            raise KeyError(f"component {cid} variant={variant} not found")
         if job.payload.get("schedule_only"):
             self._schedule_plan(
-                task_id,
-                cid,
-                list(record.get("plan", [])),
-                bool(record.get("force_single_box")),
-                int(job.payload.get("start", 0)),
+                task_id, cid, list(record.get("plan", [])), bool(record.get("force_single_box")),
+                int(job.payload.get("start", 0)), variant=variant,
             )
             return
-        prepared = self._prepare_problem(task_id, cid, record["component"])
+        prepared = self._prepare_problem(task_id, cid, record["component"]) if variant == "raw" else self._prepare_problem(task_id, cid, record["component"], variant=variant)
         meta = self.store.get_meta(task_id) or {}
         plan, force_single = choose_component_ns(
-            meta.get("requested_n", [1]),
-            prepared["max_useful_n"],
-            str(meta.get("scan_mode")) == "hard",
+            meta.get("requested_n", [1]), prepared["max_useful_n"], str(meta.get("scan_mode")) == "hard"
         )
         record.update(
-            state="prepared",
-            plan=plan,
-            force_single_box=force_single,
-            max_useful_n=prepared["max_useful_n"],
-            bounds=prepared["bounds"],
+            state="prepared", plan=plan, force_single_box=force_single,
+            max_useful_n=prepared["max_useful_n"], bounds=prepared["bounds"],
             info=component_public_info(record["component"], prepared["max_useful_n"], "prepared"),
+            variant=variant, smooth=variant_is_smooth(variant),
         )
-        self.store.save_component(task_id, cid, record)
-        self._publish(
-            task_id,
-            {
-                "type": "component_prepared",
-                "component_id": cid,
-                "max_useful_n": prepared["max_useful_n"],
-                "planned_n": plan,
-                "fallback_single_box": force_single,
-            },
-        )
+        self._variant_call(self.store.save_component, task_id, cid, record, variant=variant)
+        self._publish(task_id, {
+            "type": "component_prepared", "component_id": cid, "max_useful_n": prepared["max_useful_n"],
+            "planned_n": plan, "fallback_single_box": force_single, "variant": variant,
+            "smooth": variant_is_smooth(variant),
+        })
         if bool(job.payload.get("auto_solve", True)):
-            self._schedule_plan(task_id, cid, plan, force_single)
+            self._schedule_plan(task_id, cid, plan, force_single, variant=variant)
 
-    def _single_component_frontier(self, task_id: str, component_id: Any, source: str = "components") -> dict[str, Any]:
+    def _single_component_frontier(
+        self, task_id: str, component_id: Any, source: str = "components", *, variant: str = "raw"
+    ) -> dict[str, Any]:
         from A101.axis_orientation import add_box_anchorage
-        from A101.fit_box_layout import fit_box_layout
 
-        field = self._field(task_id)
+        field = self._field(task_id, variant)
         cfg = field["cfg"]
         params = self._params(task_id)
-        stored = self.store.load_problem(task_id, component_id)
+        stored = self._variant_call(self.store.load_problem, task_id, component_id, variant=variant)
         if not stored:
             raise KeyError("component problem missing")
         problem = stored["problem"]
         component = problem.get("component", {})
-        bounds = tuple(
-            map(
-                float,
-                component.get("demand_bounds")
-                or component.get("bounds")
-                or problem["component"]["geometry"].bounds,
-            )
-        )
-        cls = max(map(int, component.get("classes", [1])))
-        fitted = fit_box_layout(
-            problem["poly_mos"],
-            [(*bounds, cls)],
-            recipes=cfg.get("recipes"),
-            densities=cfg["densities"],
-            min_w=float(params.get("min_width_mm", 1000.0)),
-            time_limit=self.settings.fit_time_limit,
-            allow_class_upgrade=True,
-            milp_backend=self.settings.fit_milp_backend,
-            threads=self.settings.effective_threads(self._solver(task_id).get("threads")),
-        )
-        if not fitted.get("is_feasible"):
-            raise RuntimeError(f"single component box fit failed: {fitted.get('errors')}")
+        bounds = tuple(map(float, component.get("demand_bounds") or component.get("bounds") or component["geometry"].bounds))
+        classes = [int(x) for x in component.get("classes", []) if int(x) > 0]
+        if not classes:
+            classes = [
+                int(row.get("class", 0))
+                for row in component.get("polygons", [])
+                if isinstance(row, Mapping) and int(row.get("class", 0)) > 0
+            ]
+        if not classes:
+            raise ValueError("component has no positive reinforcement class")
+        cls = max(classes)
+        rectangle = (*bounds, cls)
+        fit_result = {
+            "status": "N=1 direct bounding box",
+            "is_feasible": True,
+            "is_optimal": True,
+            "rectangles": [rectangle],
+            "objective": 0.0,
+            "class_changes": [],
+            "stats": {"n1_fast_path": True},
+            "n1_fast_path": True,
+        }
         anchored = add_box_anchorage(
-            fitted,
-            recipes=cfg.get("recipes"),
-            diameters=cfg["diameters"],
-            steps=cfg["steps"],
-            anchor_factor=float(params.get("anchor_factor", 32.0)),
-            axis=cfg["axis"],
-            field=field["field_geometry"],
+            [rectangle], recipes=cfg.get("recipes"), diameters=cfg["diameters"], steps=cfg["steps"],
+            anchor_factor=float(params.get("anchor_factor", 32.0)), axis=cfg["axis"], field=field["field_geometry"],
         )
         for row in anchored:
             row["component_id"] = component_id
@@ -592,23 +641,17 @@ class PipelineWorkflow:
                 geometry = box(*row["bounds"][:4])
             density = cfg["densities"].get(row.get("class"), cfg["densities"].get(str(row.get("class")), 1.0))
             proxy_mass += float(geometry.area) * float(density)
+        smooth = variant_is_smooth(variant)
         return {
-            "n": 1,
-            "component_id": component_id,
-            "is_feasible": True,
-            "is_optimal": False,
-            "solve_state": "feasible",
+            "n": 1, "component_id": component_id, "is_feasible": True, "is_optimal": True,
+            "solve_state": "optimal",
             "solver_result": {
-                "is_feasible": True,
-                "fallback": "single_component_box",
-                "rectangles": [(*bounds, cls)],
+                "is_feasible": True, "is_optimal": True, "status": "Optimal",
+                "n1_fast_path": True, "rectangles": [rectangle],
             },
-            "rectangles": [(*bounds, cls)],
-            "fit_result": fitted,
-            "class_changes": list(fitted.get("class_changes", [])),
-            "anchored_boxes": anchored,
-            "proxy_mass": float(proxy_mass),
-            "source": source,
+            "rectangles": [rectangle], "fit_result": fit_result, "class_changes": [],
+            "anchored_boxes": anchored, "proxy_mass": float(proxy_mass), "source": source,
+            "variant": variant, "smooth": smooth, "n1_fast_path": True,
         }
 
     def _solver_options(self, task_id: str) -> tuple[dict[str, Any], int, float | None, float | None, str, bool]:
@@ -628,94 +671,87 @@ class PipelineWorkflow:
         from A101.reinforcement_components import solve_component_frontier
 
         task_id, cid, n = job.task_id, int(job.payload["component_id"]), int(job.payload["n"])
+        variant = payload_variant(job.payload)
         if self.store.is_n_cancelled(task_id, n):
-            self._publish(task_id, {"type": "component_n_cancelled", "component_id": cid, "n": n})
+            self._publish(task_id, {"type": "component_n_cancelled", "component_id": cid, "n": n, "variant": variant})
             return
-        if job.payload.get("force_single_box"):
-            result = self._single_component_frontier(task_id, cid)
-            self.store.save_frontier_result(task_id, cid, 1, result)
-            self._frontier_ready(task_id, cid, 1, result)
+        if n == 1 or job.payload.get("force_single_box"):
+            result = self._single_component_frontier(task_id, cid, variant=variant)
+            self._variant_call(self.store.save_frontier_result, task_id, cid, 1, result, variant=variant)
+            self._frontier_ready(task_id, cid, 1, result, variant=variant)
             return
-        stored = self.store.load_problem(task_id, cid)
+        stored = self._variant_call(self.store.load_problem, task_id, cid, variant=variant)
         if not stored:
             raise KeyError("problem missing")
         _, threads, timeout, time_limit, backend, require_optimal = self._solver_options(task_id)
         results, data = solve_component_frontier(
-            stored["problem"],
-            [n],
-            data={},
-            timeout=timeout,
-            solver_time_limit=time_limit,
-            threads=threads,
-            backend=backend,
-            require_optimal=require_optimal,
-            return_best_on_timeout=True,
-            raise_errors=False,
+            stored["problem"], [n], data={}, timeout=timeout, solver_time_limit=time_limit, threads=threads,
+            backend=backend, require_optimal=require_optimal, return_best_on_timeout=True, raise_errors=False,
         )
-        self.store.save_solver_result(task_id, cid, n, {"results": results, "data": data, "threads": threads})
-        self.enqueue(JobKind.fit_component, task_id, {"component_id": cid, "n": n, "source": "components"})
-        self._publish(task_id, {"type": "component_n_finished", "component_id": cid, "n": n, "stage": "solver"})
+        self._variant_call(
+            self.store.save_solver_result, task_id, cid, n,
+            {"results": results, "data": data, "threads": threads, "variant": variant}, variant=variant
+        )
+        self.enqueue(JobKind.fit_component, task_id, {
+            "component_id": cid, "n": n, "source": "components", "variant": variant,
+            "smooth": variant_is_smooth(variant),
+        })
+        self._publish(task_id, {
+            "type": "component_n_finished", "component_id": cid, "n": n, "stage": "solver",
+            "variant": variant, "smooth": variant_is_smooth(variant),
+        })
 
     def handle_fit_component(self, job: PipelineJob) -> None:
         from A101.reinforcement_components import fit_component_frontier
 
         task_id, cid, n = job.task_id, int(job.payload["component_id"]), int(job.payload["n"])
-        stored = self.store.load_problem(task_id, cid)
-        solved = self.store.load_solver_result(task_id, cid, n)
+        variant = payload_variant(job.payload)
+        stored = self._variant_call(self.store.load_problem, task_id, cid, variant=variant)
+        solved = self._variant_call(self.store.load_solver_result, task_id, cid, n, variant=variant)
         if not stored or not solved:
             raise KeyError("problem/solver result missing")
-        field = self._field(task_id)
+        field = self._field(task_id, variant)
         cfg = field["cfg"]
         params = self._params(task_id)
         threads = self.settings.effective_threads(self._solver(task_id).get("threads"))
         frontier = fit_component_frontier(
-            stored["problem"],
-            solved["results"],
-            recipes=cfg.get("recipes"),
-            densities=cfg["densities"],
-            diameters=cfg["diameters"],
-            steps=cfg["steps"],
-            anchor_factor=float(params.get("anchor_factor", 32.0)),
-            axis=cfg["axis"],
-            field=field["field_geometry"],
-            min_width=float(params.get("min_width_mm", 1000.0)),
-            time_limit=self.settings.fit_time_limit,
-            allow_class_upgrade=True,
-            fit_milp_backend=self.settings.fit_milp_backend,
-            fit_threads=threads,
+            stored["problem"], solved["results"], recipes=cfg.get("recipes"), densities=cfg["densities"],
+            diameters=cfg["diameters"], steps=cfg["steps"], anchor_factor=float(params.get("anchor_factor", 32.0)),
+            axis=cfg["axis"], field=field["field_geometry"], min_width=float(params.get("min_width_mm", 1000.0)),
+            time_limit=self.settings.fit_time_limit, allow_class_upgrade=True,
+            fit_milp_backend=self.settings.fit_milp_backend, fit_threads=threads,
         )
         result = dict(frontier.get(n, {"n": n, "is_feasible": False, "error": "fit result missing"}))
-        self.store.save_frontier_result(task_id, cid, n, result)
-        self._frontier_ready(task_id, cid, n, result)
+        result.update(variant=variant, smooth=variant_is_smooth(variant))
+        self._variant_call(self.store.save_frontier_result, task_id, cid, n, result, variant=variant)
+        self._frontier_ready(task_id, cid, n, result, variant=variant)
 
-    def _frontier_ready(self, task_id: str, cid: Any, n: int, result: Mapping[str, Any]) -> None:
-        self._publish(
-            task_id,
-            {
-                "type": "component_fit_finished",
-                "component_id": cid,
-                "n": int(n),
-                "status": "feasible" if result.get("is_feasible") else result.get("solve_state", "failed"),
-            },
-        )
-        version = self.store.frontier_version(task_id)
+    def _frontier_ready(
+        self, task_id: str, cid: Any, n: int, result: Mapping[str, Any], *, variant: str = "raw"
+    ) -> None:
+        self._publish(task_id, {
+            "type": "component_fit_finished", "component_id": cid, "n": int(n),
+            "status": "feasible" if result.get("is_feasible") else result.get("solve_state", "failed"),
+            "variant": variant, "smooth": variant_is_smooth(variant),
+        })
+        version = self._variant_call(self.store.frontier_version, task_id, variant=variant)
         self.enqueue(
-            JobKind.combine_frontiers,
-            task_id,
-            {"frontier_version": version, "offset": 0},
-            dedupe_key=f"combine:{task_id}:{self.store.generation(task_id)}:{version}",
+            JobKind.combine_frontiers, task_id,
+            {"frontier_version": version, "offset": 0, "variant": variant, "smooth": variant_is_smooth(variant)},
+            dedupe_key=f"combine:{task_id}:{variant}:{self.store.generation(task_id)}:{version}",
         )
 
     def handle_combine_frontiers(self, job: PipelineJob) -> None:
         from A101.reinforcement_components import combine_component_frontiers
 
         task_id = job.task_id
-        current_version = self.store.frontier_version(task_id)
+        variant = payload_variant(job.payload)
+        current_version = self._variant_call(self.store.frontier_version, task_id, variant=variant)
         requested_version = int(job.payload.get("frontier_version", current_version))
         if requested_version < current_version and int(job.payload.get("offset", 0)) == 0:
             return
-        component_ids = [cid for cid in self.store.component_ids(task_id) if cid != "whole"]
-        frontiers = self.store.all_frontiers(task_id)
+        component_ids = [cid for cid in self._variant_call(self.store.component_ids, task_id, variant=variant) if cid != "whole"]
+        frontiers = self._variant_call(self.store.all_frontiers, task_id, variant=variant)
         if not component_ids or any(
             (int(cid) if cid.lstrip("-").isdigit() else cid) not in frontiers for cid in component_ids
         ):
@@ -728,105 +764,68 @@ class PipelineWorkflow:
         meta = self.store.get_meta(task_id) or {}
         top_k = int(meta.get("component_result_top_k", self.settings.frontier_top_k))
         combined = combine_component_frontiers(frontiers, top_k=top_k)
-        flat = [
-            (int(total_n), rank, candidate)
-            for total_n, rows in sorted(combined.items())
-            for rank, candidate in enumerate(rows)
-        ]
+        flat = [(int(total_n), rank, candidate) for total_n, rows in sorted(combined.items()) for rank, candidate in enumerate(rows)]
         start = int(job.payload.get("offset", 0))
         end = min(len(flat), start + max(1, int(self.settings.combine_batch_size)))
         queued = 0
         for total_n, _rank, candidate in flat[start:end]:
-            candidate_id = stable_digest(
-                {
-                    "task_id": task_id,
-                    "source": "components",
-                    "total_n": total_n,
-                    "component_ns": candidate.get("component_ns", {}),
-                }
-            )
+            candidate_id = stable_digest({
+                "task_id": task_id, "source": "components", "variant": variant, "total_n": total_n,
+                "component_ns": candidate.get("component_ns", {}),
+            })
             candidate = {
-                **dict(candidate),
-                "candidate_id": candidate_id,
-                "source": "components",
-                "total_N": total_n,
+                **dict(candidate), "candidate_id": candidate_id, "source": "components", "total_N": total_n,
+                "variant": variant, "smooth": variant_is_smooth(variant),
             }
             self.store.save_candidate(task_id, candidate_id, candidate)
-            queued += int(
-                self.enqueue(
-                    JobKind.layout_solution,
-                    task_id,
-                    {"candidate_id": candidate_id, "total_n": total_n, "source": "components"},
-                )
-            )
+            queued += int(self.enqueue(JobKind.layout_solution, task_id, {
+                "candidate_id": candidate_id, "total_n": total_n, "source": "components", "variant": variant,
+                "smooth": variant_is_smooth(variant),
+            }))
         if end < len(flat):
             self.enqueue(
-                JobKind.combine_frontiers,
-                task_id,
-                {"frontier_version": current_version, "offset": end},
-                dedupe_key=f"combine:{task_id}:{self.store.generation(task_id)}:{current_version}:{end}",
+                JobKind.combine_frontiers, task_id,
+                {"frontier_version": current_version, "offset": end, "variant": variant, "smooth": variant_is_smooth(variant)},
+                dedupe_key=f"combine:{task_id}:{variant}:{self.store.generation(task_id)}:{current_version}:{end}",
             )
-        self._publish(
-            task_id,
-            {
-                "type": "frontier_updated",
-                "frontier_version": current_version,
-                "total_n": sorted(map(int, combined)),
-                "queued_solutions": queued,
-            },
-        )
+        self._publish(task_id, {
+            "type": "frontier_updated", "frontier_version": current_version, "total_n": sorted(map(int, combined)),
+            "queued_solutions": queued, "variant": variant, "smooth": variant_is_smooth(variant),
+        })
 
     def _layout_candidate(self, task_id: str, candidate: Mapping[str, Any]) -> dict[str, Any]:
         from A101.rebar_field_layout import layout_rebars
         from A101.reinforcement_components import bar_mass_kg
 
-        field = self._field(task_id)
+        variant = str(candidate.get("variant", "raw"))
+        field = self._field(task_id, variant)
         cfg = field["cfg"]
         params = self._params(task_id)
-        layout = dict(
-            layout_rebars(
-                polygons=[p["geometry"] for p in field["start_polygons"]],
-                boxes=candidate.get("anchored_boxes", []),
-                background=tuple(params.get("back_grid", cfg.get("back_grid", (18, 300)))),
-                axis=cfg["axis"],
-                min_step=float(self.settings.min_internal_step),
-            )
-            or {}
-        )
+        layout = dict(layout_rebars(
+            polygons=[p["geometry"] for p in field["start_polygons"]],
+            boxes=candidate.get("anchored_boxes", []), background=tuple(cfg["back_grid"]), axis=cfg["axis"],
+            min_step=float(self.settings.min_internal_step),
+        ) or {})
         feasible = bool(layout.get("is_feasible"))
-        mass = (
-            bar_mass_kg(layout.get("bars", []), float(params.get("steel_density_kg_m3", 7850.0)))
-            if feasible
-            else float("inf")
-        )
+        mass = bar_mass_kg(layout.get("bars", []), float(params.get("steel_density_kg_m3", 7850.0))) if feasible else float("inf")
         component_ns = {str(k): int(v) for k, v in dict(candidate.get("component_ns", {})).items()}
         total_n = int(candidate.get("total_N", candidate.get("total_n", sum(component_ns.values()))))
         source = str(candidate.get("source", "components"))
-        solution_id = stable_digest(
-            {
-                "task_id": task_id,
-                "source": source,
-                "total_n": total_n,
-                "component_ns": component_ns,
-                "candidate": candidate.get("candidate_id"),
-            }
-        )
+        solution_id = stable_digest({
+            "task_id": task_id, "source": source, "variant": variant, "total_n": total_n,
+            "component_ns": component_ns, "candidate": candidate.get("candidate_id"),
+        })
         choices = candidate.get("component_choices", {}) or {}
         optimal = bool(choices) and all(bool(row.get("is_optimal")) for row in choices.values())
         return {
-            **dict(candidate),
-            "solution_id": solution_id,
-            "source": source,
-            "total_N": total_n,
-            "component_ns": component_ns,
-            "actual_mass_kg": float(mass),
-            "is_feasible": feasible,
-            "is_optimal": optimal and feasible,
-            "status": "feasible" if feasible else str(layout.get("status", "infeasible")),
-            "bar_layout": layout,
+            **dict(candidate), "solution_id": solution_id, "source": source, "variant": variant,
+            "smooth": variant_is_smooth(variant), "total_N": total_n, "component_ns": component_ns,
+            "actual_mass_kg": float(mass), "is_feasible": feasible, "is_optimal": optimal and feasible,
+            "status": "feasible" if feasible else str(layout.get("status", "infeasible")), "bar_layout": layout,
             "metadata": {
                 "threads": self.settings.effective_threads(self._solver(task_id).get("threads")),
-                "created_at": time.time(),
+                "created_at": time.time(), "variant": variant, "smooth": variant_is_smooth(variant),
+                "rebar_config_source": cfg.get("rebar_config_source"),
             },
         }
 
@@ -836,45 +835,42 @@ class PipelineWorkflow:
         if candidate is None:
             raise KeyError("candidate missing")
         solution = self._layout_candidate(task_id, candidate)
+        variant = str(solution.get("variant", "raw"))
         self.store.save_solution(task_id, solution)
-        self._publish(
-            task_id,
-            {
-                "type": "solution_available",
-                "solution_id": solution["solution_id"],
-                "source": solution["source"],
-                "total_N": solution["total_N"],
-                "is_feasible": solution["is_feasible"],
-                "actual_mass_kg": solution["actual_mass_kg"],
-                "result_url": f"/v1/tasks/{task_id}/solutions/{solution['solution_id']}",
-            },
-        )
-        best = self.store.best_solution(task_id, solution["total_N"])
-        if best and best.get("solution_id") == solution["solution_id"]:
+        self._publish(task_id, {
+            "type": "solution_available", "solution_id": solution["solution_id"], "source": solution["source"],
+            "total_N": solution["total_N"], "is_feasible": solution["is_feasible"],
+            "actual_mass_kg": solution["actual_mass_kg"],
+            "result_url": f"/v1/tasks/{task_id}/solutions/{solution['solution_id']}",
+            "variant": variant, "smooth": variant_is_smooth(variant),
+        })
+        best = self.store.best_solution(task_id, solution["total_N"], variant=variant)
+        if variant == "raw" and best and best.get("solution_id") == solution["solution_id"]:
             compatible = to_compat_result(solution)
             self.store.save_best_result(task_id, solution["total_N"], compatible, "final")
             status = "feasible" if solution["is_feasible"] else "infeasible"
             self.store.set_n_status(
-                task_id,
-                solution["total_N"],
-                status,
-                solution_id=solution["solution_id"],
-                source=solution["source"],
+                task_id, solution["total_N"], status, solution_id=solution["solution_id"], source=solution["source"],
                 result_url=f"/v1/tasks/{task_id}/results/{solution['total_N']}",
             )
-            self._publish(
-                task_id,
-                {
-                    "type": "n_finished",
-                    "n": solution["total_N"],
-                    "status": status,
-                    "result_url": f"/v1/tasks/{task_id}/results/{solution['total_N']}",
-                    "solution_id": solution["solution_id"],
-                    "source": solution["source"],
-                },
-            )
+            self._publish(task_id, {
+                "type": "n_finished", "n": solution["total_N"], "status": status,
+                "result_url": f"/v1/tasks/{task_id}/results/{solution['total_N']}",
+                "solution_id": solution["solution_id"], "source": solution["source"],
+                "variant": variant, "smooth": False,
+            })
+        elif variant == "smooth":
+            self._publish(task_id, {
+                "type": "n_finished", "n": solution["total_N"],
+                "status": "feasible" if solution["is_feasible"] else "infeasible",
+                "result_url": f"/v1/tasks/{task_id}/solutions/{solution['solution_id']}",
+                "solution_id": solution["solution_id"], "source": solution["source"],
+                "variant": variant, "smooth": True,
+            })
         if (self.store.get_meta(task_id) or {}).get("validate_results") and solution.get("is_feasible"):
-            self.enqueue(JobKind.validate_solution, task_id, {"solution_id": solution["solution_id"]})
+            self.enqueue(JobKind.validate_solution, task_id, {
+                "solution_id": solution["solution_id"], "variant": variant, "smooth": variant_is_smooth(variant),
+            })
 
     def handle_validate_solution(self, job: PipelineJob) -> None:
         solution = self.store.load_solution(job.task_id, str(job.payload["solution_id"]))
@@ -883,8 +879,8 @@ class PipelineWorkflow:
         solution = {**solution, "validation": {"status": "not_configured"}}
         self.store.save_solution(job.task_id, solution)
 
-    def _whole_component(self, task_id: str) -> dict[str, Any]:
-        field = self._field(task_id)
+    def _whole_component(self, task_id: str, variant: str = "raw") -> dict[str, Any]:
+        field = self._field(task_id, variant)
         cfg = field["cfg"]
         rows = []
         for index, raw in enumerate(field["ortho_polygons"]):
@@ -901,47 +897,40 @@ class PipelineWorkflow:
             raise ValueError("В whole field нет дополнительного армирования")
         demand = unary_union([r["geometry"] for r in rows])
         return {
-            "id": -1,
-            "axis": cfg["axis"],
-            "polygon_indices": [r["source_index"] for r in rows],
-            "polygons": rows,
-            "geometry": demand,
-            "demand_geometry": demand,
-            "bounds": tuple(map(float, demand.bounds)),
-            "demand_bounds": tuple(map(float, demand.bounds)),
-            "classes": sorted({r["class"] for r in rows}),
-            "loads": sorted({r["load"] for r in rows}),
+            "id": -1, "axis": cfg["axis"], "polygon_indices": [r["source_index"] for r in rows],
+            "polygons": rows, "geometry": demand, "demand_geometry": demand,
+            "bounds": tuple(map(float, demand.bounds)), "demand_bounds": tuple(map(float, demand.bounds)),
+            "classes": sorted({r["class"] for r in rows}), "loads": sorted({r["load"] for r in rows}),
             "max_hold": max(map(float, cfg.get("holds", {0: 0}).values()), default=0.0),
-            "expanded_polygons": [],
+            "expanded_polygons": [], "variant": variant, "smooth": variant_is_smooth(variant),
         }
 
-    def whole_component_info(self, task_id: str) -> dict[str, Any]:
-        record = self.store.load_component(task_id, WHOLE_COMPONENT_KEY)
+    def whole_component_info(self, task_id: str, *, variant: str = "raw") -> dict[str, Any]:
+        record = self._variant_call(self.store.load_component, task_id, WHOLE_COMPONENT_KEY, variant=variant)
         if record is not None:
             return dict(record.get("info", record))
-        component = self._whole_component(task_id)
-        return component_public_info(component, max_useful_n=None, state="available")
+        component = self._whole_component(task_id) if variant == "raw" else self._whole_component(task_id, variant)
+        info = component_public_info(component, max_useful_n=None, state="available")
+        info.update(variant=variant, smooth=variant_is_smooth(variant))
+        return info
 
     def handle_prepare_whole(self, job: PipelineJob) -> None:
         task_id = job.task_id
+        variant = payload_variant(job.payload)
         if job.payload.get("schedule_only"):
-            record = self.store.load_component(task_id, "whole") or {}
+            record = self._variant_call(self.store.load_component, task_id, "whole", variant=variant) or {}
             self._schedule_plan(
-                task_id,
-                "whole",
-                record.get("plan", []),
-                bool(record.get("force_single_box")),
-                int(job.payload.get("start", 0)),
-                whole=True,
+                task_id, "whole", record.get("plan", []), bool(record.get("force_single_box")),
+                int(job.payload.get("start", 0)), whole=True, variant=variant,
             )
             return
-        component = self._whole_component(task_id)
-        self.store.save_component(
-            task_id,
-            "whole",
-            {"component": component, "state": "preparing", "info": component_public_info(component)},
+        component = self._whole_component(task_id) if variant == "raw" else self._whole_component(task_id, variant)
+        self._variant_call(
+            self.store.save_component, task_id, "whole",
+            {"component": component, "state": "preparing", "info": component_public_info(component), "variant": variant},
+            variant=variant,
         )
-        prepared = self._prepare_problem(task_id, "whole", component)
+        prepared = self._prepare_problem(task_id, "whole", component) if variant == "raw" else self._prepare_problem(task_id, "whole", component, variant=variant)
         meta = self.store.get_meta(task_id) or {}
         explicit_requested = job.payload.get("requested_n")
         invalid: list[int] = []
@@ -951,171 +940,147 @@ class PipelineWorkflow:
             force_single = False
         else:
             plan, force_single = choose_component_ns(
-                meta.get("requested_n", [1]),
-                prepared["max_useful_n"],
-                str(meta.get("scan_mode")) == "hard",
+                meta.get("requested_n", [1]), prepared["max_useful_n"], str(meta.get("scan_mode")) == "hard"
             )
         record = {
-            "component": component,
-            "state": "prepared",
-            "plan": plan,
-            "force_single_box": force_single,
-            "max_useful_n": prepared["max_useful_n"],
-            "bounds": prepared["bounds"],
+            "component": component, "state": "prepared", "plan": plan, "force_single_box": force_single,
+            "max_useful_n": prepared["max_useful_n"], "bounds": prepared["bounds"],
             "info": component_public_info(component, prepared["max_useful_n"], "prepared"),
+            "variant": variant, "smooth": variant_is_smooth(variant),
         }
-        self.store.save_component(task_id, "whole", record)
+        self._variant_call(self.store.save_component, task_id, "whole", record, variant=variant)
         if invalid:
-            raise ValueError(
-                f"n вне допустимого диапазона 1..{prepared['max_useful_n']}: {invalid}"
-            )
+            raise ValueError(f"n вне допустимого диапазона 1..{prepared['max_useful_n']}: {invalid}")
         if bool(job.payload.get("auto_solve", True)):
-            self._schedule_plan(task_id, "whole", plan, force_single, whole=True)
+            self._schedule_plan(task_id, "whole", plan, force_single, whole=True, variant=variant)
 
     def handle_solve_whole(self, job: PipelineJob) -> None:
         from A101.reinforcement_components import solve_component_frontier
 
         task_id = job.task_id
-        if job.payload.get("force_single_box"):
-            result = self._single_component_frontier(task_id, "whole", "whole")
-            self.store.save_frontier_result(task_id, "whole", 1, result)
-            self._queue_whole_layout(task_id, result)
+        variant = payload_variant(job.payload)
+        n = int(job.payload["n"])
+        if n == 1 or job.payload.get("force_single_box"):
+            result = self._single_component_frontier(task_id, "whole", "whole", variant=variant)
+            self._variant_call(self.store.save_frontier_result, task_id, "whole", 1, result, variant=variant)
+            self._queue_whole_layout(task_id, result, variant=variant)
             return
-        stored = self.store.load_problem(task_id, "whole")
+        stored = self._variant_call(self.store.load_problem, task_id, "whole", variant=variant)
         if not stored:
             raise KeyError("whole problem missing")
-        n = int(job.payload["n"])
         if self.store.is_n_cancelled(task_id, n):
             return
         _, threads, timeout, time_limit, backend, require_optimal = self._solver_options(task_id)
         results, data = solve_component_frontier(
-            stored["problem"],
-            [n],
-            data={},
-            timeout=timeout,
-            solver_time_limit=time_limit,
-            threads=threads,
-            backend=backend,
-            require_optimal=require_optimal,
-            return_best_on_timeout=True,
-            raise_errors=False,
+            stored["problem"], [n], data={}, timeout=timeout, solver_time_limit=time_limit, threads=threads,
+            backend=backend, require_optimal=require_optimal, return_best_on_timeout=True, raise_errors=False,
         )
-        self.store.save_solver_result(task_id, "whole", n, {"results": results, "data": data, "threads": threads})
-        self.enqueue(JobKind.fit_whole, task_id, {"component_id": "whole", "n": n, "source": "whole"})
+        self._variant_call(
+            self.store.save_solver_result, task_id, "whole", n,
+            {"results": results, "data": data, "threads": threads, "variant": variant}, variant=variant
+        )
+        self.enqueue(JobKind.fit_whole, task_id, {
+            "component_id": "whole", "n": n, "source": "whole", "variant": variant,
+            "smooth": variant_is_smooth(variant),
+        })
 
     def handle_fit_whole(self, job: PipelineJob) -> None:
         from A101.reinforcement_components import fit_component_frontier
 
         task_id, n = job.task_id, int(job.payload["n"])
-        stored = self.store.load_problem(task_id, "whole")
-        solved = self.store.load_solver_result(task_id, "whole", n)
+        variant = payload_variant(job.payload)
+        stored = self._variant_call(self.store.load_problem, task_id, "whole", variant=variant)
+        solved = self._variant_call(self.store.load_solver_result, task_id, "whole", n, variant=variant)
         if not stored or not solved:
             raise KeyError("whole problem/solver result missing")
-        field = self._field(task_id)
+        field = self._field(task_id, variant)
         cfg = field["cfg"]
         params = self._params(task_id)
         threads = self.settings.effective_threads(self._solver(task_id).get("threads"))
         frontier = fit_component_frontier(
-            stored["problem"],
-            solved["results"],
-            recipes=cfg.get("recipes"),
-            densities=cfg["densities"],
-            diameters=cfg["diameters"],
-            steps=cfg["steps"],
-            anchor_factor=float(params.get("anchor_factor", 32.0)),
-            axis=cfg["axis"],
-            field=field["field_geometry"],
-            min_width=float(params.get("min_width_mm", 1000.0)),
-            time_limit=self.settings.fit_time_limit,
-            allow_class_upgrade=True,
-            fit_milp_backend=self.settings.fit_milp_backend,
-            fit_threads=threads,
+            stored["problem"], solved["results"], recipes=cfg.get("recipes"), densities=cfg["densities"],
+            diameters=cfg["diameters"], steps=cfg["steps"], anchor_factor=float(params.get("anchor_factor", 32.0)),
+            axis=cfg["axis"], field=field["field_geometry"], min_width=float(params.get("min_width_mm", 1000.0)),
+            time_limit=self.settings.fit_time_limit, allow_class_upgrade=True,
+            fit_milp_backend=self.settings.fit_milp_backend, fit_threads=threads,
         )
         result = dict(frontier.get(n, {"n": n, "is_feasible": False}))
-        result["source"] = "whole"
-        self.store.save_frontier_result(task_id, "whole", n, result)
+        result.update(source="whole", variant=variant, smooth=variant_is_smooth(variant))
+        self._variant_call(self.store.save_frontier_result, task_id, "whole", n, result, variant=variant)
         if result.get("is_feasible"):
-            self._queue_whole_layout(task_id, result)
+            self._queue_whole_layout(task_id, result, variant=variant)
 
-    def _queue_whole_layout(self, task_id: str, result: Mapping[str, Any]) -> None:
+    def _queue_whole_layout(
+        self, task_id: str, result: Mapping[str, Any], *, variant: str = "raw"
+    ) -> None:
         n = int(result.get("n", 1))
-        candidate_id = stable_digest({"task_id": task_id, "source": "whole", "n": n})
+        candidate_id = stable_digest({"task_id": task_id, "source": "whole", "variant": variant, "n": n})
         candidate = {
-            **dict(result),
-            "candidate_id": candidate_id,
-            "source": "whole",
-            "total_N": n,
-            "component_ns": {"whole": n},
-            "component_choices": {"whole": dict(result)},
+            **dict(result), "candidate_id": candidate_id, "source": "whole", "total_N": n,
+            "component_ns": {"whole": n}, "component_choices": {"whole": dict(result)},
+            "variant": variant, "smooth": variant_is_smooth(variant),
         }
         self.store.save_candidate(task_id, candidate_id, candidate)
-        self.enqueue(
-            JobKind.layout_solution,
-            task_id,
-            {"candidate_id": candidate_id, "total_n": n, "source": "whole"},
-        )
+        self.enqueue(JobKind.layout_solution, task_id, {
+            "candidate_id": candidate_id, "total_n": n, "source": "whole", "variant": variant,
+            "smooth": variant_is_smooth(variant),
+        })
 
-    def schedule_requested_for_all(self, task_id: str, values: Sequence[int]) -> dict[str, list[int]]:
+    def schedule_requested_for_all(
+        self, task_id: str, values: Sequence[int], *, smooth: bool = False
+    ) -> dict[str, list[int]]:
+        variant = analysis_variant(smooth)
         queued: dict[str, list[int]] = {}
-        for cid in self.store.component_ids(task_id):
+        for cid in self._variant_call(self.store.component_ids, task_id, variant=variant):
             if cid == "whole":
                 continue
-            record = self.store.load_component(task_id, cid) or {}
+            record = self._variant_call(self.store.load_component, task_id, cid, variant=variant) or {}
             max_n = record.get("max_useful_n")
             if not max_n:
                 continue
             plan, fallback = choose_component_ns(values, int(max_n), False)
             queued[cid] = plan
             for n in plan:
-                self.enqueue(
-                    JobKind.solve_component,
-                    task_id,
-                    {
-                        "component_id": int(cid),
-                        "n": int(n),
-                        "force_single_box": bool(fallback and int(n) == 1),
-                        "source": "components",
-                    },
-                )
-        whole = self.store.load_component(task_id, "whole")
+                self.enqueue(JobKind.solve_component, task_id, {
+                    "component_id": int(cid), "n": int(n), "force_single_box": bool(fallback and int(n) == 1),
+                    "source": "components", "variant": variant, "smooth": smooth,
+                })
+        whole = self._variant_call(self.store.load_component, task_id, "whole", variant=variant)
         if whole and whole.get("max_useful_n"):
             plan, fallback = choose_component_ns(values, int(whole["max_useful_n"]), False)
             queued["whole"] = plan
             for n in plan:
-                self.enqueue(
-                    JobKind.solve_whole,
-                    task_id,
-                    {
-                        "component_id": "whole",
-                        "n": int(n),
-                        "force_single_box": bool(fallback and int(n) == 1),
-                        "source": "whole",
-                    },
-                )
+                self.enqueue(JobKind.solve_whole, task_id, {
+                    "component_id": "whole", "n": int(n), "force_single_box": bool(fallback and int(n) == 1),
+                    "source": "whole", "variant": variant, "smooth": smooth,
+                })
         return queued
 
-    def schedule_component_n(self, task_id: str, component_id: int, values: Sequence[int]) -> list[int]:
+    def schedule_component_n(
+        self, task_id: str, component_id: int, values: Sequence[int], *, smooth: bool = False
+    ) -> list[int]:
+        variant = analysis_variant(smooth)
         storage_id = component_storage_id(component_id)
         requested = list(dict.fromkeys(int(n) for n in values))
         invalid_basic = [n for n in requested if n < 1 or n > int(self.settings.max_n_value)]
         if invalid_basic:
             raise ValueError(f"n вне допустимого диапазона 1..{self.settings.max_n_value}: {invalid_basic}")
-        record = self.store.load_component(task_id, storage_id)
+        record = self._variant_call(self.store.load_component, task_id, storage_id, variant=variant)
         if storage_id == WHOLE_COMPONENT_KEY and (record is None or not record.get("max_useful_n")):
-            if not self.store.load_field(task_id):
-                raise KeyError("field не подготовлен; сначала вызовите /components/prepare")
+            if not self._variant_call(self.store.load_field, task_id, variant=variant):
+                raise KeyError(f"field variant={variant} не подготовлен; сначала вызовите /components/prepare?smooth={str(smooth).lower()}")
             self.enqueue(
-                JobKind.prepare_whole,
-                task_id,
-                {"auto_solve": True, "requested_n": requested},
+                JobKind.prepare_whole, task_id,
+                ({"auto_solve": True, "requested_n": requested}
+                 if variant == "raw" else
+                 {"auto_solve": True, "requested_n": requested, "variant": variant, "smooth": True}),
                 dedupe_key=(
-                    f"prepare-whole-explicit:{task_id}:{self.store.generation(task_id)}:"
-                    f"{stable_digest(requested)}"
+                    f"prepare-whole-explicit:{task_id}:{variant}:{self.store.generation(task_id)}:{stable_digest(requested)}"
                 ),
             )
             return requested
         if record is None or not record.get("max_useful_n"):
-            raise KeyError("component не подготовлена")
+            raise KeyError(f"component variant={variant} не подготовлена")
         max_n = int(record["max_useful_n"])
         invalid = [n for n in requested if n < 1 or n > max_n]
         if invalid:
@@ -1123,14 +1088,9 @@ class PipelineWorkflow:
         whole = storage_id == WHOLE_COMPONENT_KEY
         kind = JobKind.solve_whole if whole else JobKind.solve_component
         for n in requested:
-            self.enqueue(
-                kind,
-                task_id,
-                {
-                    "component_id": WHOLE_COMPONENT_KEY if whole else int(storage_id),
-                    "n": n,
-                    "force_single_box": False,
-                    "source": "whole" if whole else "components",
-                },
-            )
+            self.enqueue(kind, task_id, {
+                "component_id": WHOLE_COMPONENT_KEY if whole else int(storage_id), "n": n,
+                "force_single_box": False, "source": "whole" if whole else "components",
+                "variant": variant, "smooth": smooth,
+            })
         return requested
