@@ -227,7 +227,7 @@ def restore_bar_layout(layout: Mapping[str, Any], axis: str) -> dict[str, Any]:
     q["bars"] = orient_bars(q.get("bars", []), "x")
 
     for zone in q.get("zones", []):
-        for key in ("bounds", "primary_bounds", "original_bounds", "fitted_bounds", "anchored_bounds"):
+        for key in ("bounds", "primary_bounds", "original_bounds", "fitted_bounds", "anchored_bounds", "anchored_bounds_unclipped"):
             if zone.get(key) is not None:
                 zone[key] = _swap_bounds(zone[key])
         if zone.get("bars") is not None:
@@ -452,6 +452,7 @@ def add_box_anchorage(
             hold = float(anchor_factor) * diameter
             x0, y0, x1, y1 = fitted
             anchored = (x0, y0 - hold, x1, y1 + hold) if axis == "y" else (x0 - hold, y0, x1 + hold, y1)
+            anchored_unclipped = tuple(map(float, anchored))
             if component is not None:
                 fx0, fy0, fx1, fy1 = map(float, component.bounds)
                 anchored = (
@@ -474,6 +475,7 @@ def add_box_anchorage(
                 "hold": hold,
                 "original_bounds": tuple(map(float, meta.get("original_bounds", fitted))),
                 "fitted_bounds": fitted,
+                "anchored_bounds_unclipped": anchored_unclipped,
                 "bounds": tuple(map(float, anchored)),
                 "geometry": geometry,
                 "assigned_polygons": list(meta.get("assigned_polygons", ()) or ()),

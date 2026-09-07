@@ -1274,12 +1274,15 @@ def layout_rebars_y(
         else:
             bounds, parts, touched = z.bounds, [], sorted(z.components)
             warnings.append({"type": "zone_without_bars", "zone": z.input_id})
+        raw_meta = dict(z.raw) if isinstance(z.raw, Mapping) else {}
         out_zones.append({
             "id": len(out_zones), "input_id": z.input_id, "source_index": z.source_index,
             "component_id": touched[0] if len(touched) == 1 else None, "component_ids": touched,
             "class": z.cls, "parent_class": z.parent_class, "layer_index": z.layer_index,
             "background": False, "diameter": z.diameter, "step": z.step,
             "primary_bounds": z.bounds, "bounds": bounds, "track_ids": z.track_ids,
+            "fitted_bounds": tuple(map(float, raw_meta.get("fitted_bounds", z.bounds))),
+            "anchored_bounds_unclipped": tuple(map(float, raw_meta.get("anchored_bounds_unclipped", z.bounds))),
             "bars": z.bars, "parts": parts, "assigned_polygons": list(z.assigned),
         })
 

@@ -3,6 +3,28 @@ from bisect import bisect_right
 from collections import defaultdict
 from math import pi, hypot, isfinite
 
+
+class ReinforcementCapacityError(ValueError):
+    """Selected reinforcement cannot strictly exceed the requested load."""
+
+    def __init__(
+        self,
+        load: float,
+        max_supported_load: float,
+        *,
+        max_layers: int | None = None,
+        back_grid=None,
+    ) -> None:
+        self.load = float(load)
+        self.max_supported_load = float(max_supported_load)
+        self.max_layers = None if max_layers is None else int(max_layers)
+        self.back_grid = None if back_grid is None else tuple(map(int, back_grid))
+        super().__init__(
+            f"Недостаточно армирования для load={self.load}; "
+            f"максимально доступно {self.max_supported_load}"
+        )
+
+
 def comb_indices(length, n):
     return list(combinations_with_replacement(range(length), n))
 
@@ -315,7 +337,9 @@ def make_rebar_classes(loads, back_grid, stock, max_lay=2):
     for load in sorted(set(loads)):
         j = bisect_right(values, load)
         if j == len(variants):
-            raise ValueError(f"Недостаточно армирования для load={load}")
+            raise ReinforcementCapacityError(
+                float(load), float(values[-1]), max_layers=int(max_lay), back_grid=back_grid
+            )
         selected[load] = variants[j][1]
 
     # Базовые сетки, реально используемые выбранными комбинациями
@@ -380,7 +404,7 @@ REBAR_CATALOG = {
         (32, 100), (36, 100),
     ),
     (18, 300): (
-        (18, 300), #(18, 150),
+        (18, 300), (18, 150),
         (20, 150), (20, 100),
         (25, 100), (28, 100),
         (32, 100), (36, 100),
@@ -395,14 +419,14 @@ REBAR_CATALOG = {
         (22, 300), #(22, 150),
         (25, 150), (25, 100),
         (28, 100), (32, 100), (36, 100),
-        (32, 50),  # 32×2 @100
-        (36, 50),  # 36×2 @100
+        #(32, 50),  # 32×2 @100
+        #(36, 50),  # 36×2 @100
     ),
     (25, 300): (
         (25, 300), #(25, 150),
         (28, 100), (32, 100), (36, 100),
-        (32, 50),  # 32×2 @100
-        (36, 50),  # 36×2 @100
+        #(32, 50),  # 32×2 @100
+        #(36, 50),  # 36×2 @100
     ),
 
     (12, 300): (
@@ -503,7 +527,7 @@ def select_rebar_config(
                 max_lay=max_lay,
                 #clamp_over_capacity=False,
             )
-        except ValueError:
+        except ReinforcementCapacityError:
             continue
 
         def installed_arm(load):
@@ -553,10 +577,13 @@ def select_rebar_config(
         ))
 
     if not candidates:
-        raise ValueError(
-            "Не найден допустимый набор армирования: "
-            f"min_load={min_load}, max_load={max_load}, "
-            f"max_lay={max_lay}"
+        capacities = [
+            ds_arm(*back_grid) + int(max_lay) * max(ds_arm(*x) for x in stock)
+            for back_grid, stock in REBAR_CATALOG.items()
+            if stock
+        ]
+        raise ReinforcementCapacityError(
+            float(max_load), max(capacities, default=0.0), max_layers=int(max_lay), back_grid=None
         )
 
     (
