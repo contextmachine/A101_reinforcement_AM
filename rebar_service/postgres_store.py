@@ -155,10 +155,30 @@ class PostgresStore:
         initial_variant = self._variant(str(meta.get("initial_variant", "raw")))
         requested = list(dict.fromkeys(int(n) for n in plan.get("order", meta.get("requested_n", []))))
         kind = str(input_obj.get("kind", "polygons"))
-        filename = str(input_obj.get("filename")) if input_obj.get("filename") else None
-        content = input_obj.get("content") if deferred_source else None
-        source_bytes = bytes(content) if isinstance(content, (bytes, bytearray, memoryview)) else None
-        source_sha256 = sha256(source_bytes if source_bytes is not None else _json_param(variants["raw"]).encode("utf-8"))
+        filename = (
+            str(input_obj.get("filename"))
+            if input_obj.get("filename")
+            else None
+        )
+
+        content = input_obj.get("content")
+
+        source_bytes = (
+            bytes(content)
+            if isinstance(content, (bytes, bytearray, memoryview))
+            else None
+        )
+
+        if deferred_source and source_bytes is None:
+            raise ValueError(
+                f"source content is required for deferred source kind={kind}"
+            )
+
+        source_sha256 = sha256(
+            source_bytes
+            if source_bytes is not None
+            else _json_param(variants["raw"]).encode("utf-8")
+        )
         source_meta = {
             key: json_safe_value(value)
             for key, value in input_obj.items()
@@ -1391,10 +1411,30 @@ class PostgresStore:
         variants = {"raw": [], "smooth": []} if deferred_source else build_polygon_variants(input_obj)
         initial_variant = self._variant(str(meta.get("initial_variant", "raw")))
         requested = list(dict.fromkeys(int(n) for n in plan.get("order", meta.get("requested_n", []))))
-        filename = str(input_obj.get("filename")) if input_obj.get("filename") else None
-        content = input_obj.get("content") if kind == "dxf" else None
-        source_bytes = bytes(content) if isinstance(content, (bytes, bytearray, memoryview)) else None
-        source_sha256 = sha256(source_bytes if source_bytes is not None else _json_param(variants["raw"]).encode("utf-8"))
+        filename = (
+            str(input_obj.get("filename"))
+            if input_obj.get("filename")
+            else None
+        )
+
+        content = input_obj.get("content")
+
+        source_bytes = (
+            bytes(content)
+            if isinstance(content, (bytes, bytearray, memoryview))
+            else None
+        )
+
+        if deferred_source and source_bytes is None:
+            raise ValueError(
+                f"source content is required for deferred source kind={kind}"
+            )
+
+        source_sha256 = sha256(
+            source_bytes
+            if source_bytes is not None
+            else _json_param(variants["raw"]).encode("utf-8")
+        )
         source_meta = {
             key: json_safe_value(value)
             for key, value in input_obj.items()
