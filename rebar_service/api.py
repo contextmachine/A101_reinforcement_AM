@@ -40,8 +40,8 @@ from .pipeline import (
 from .planner import normalize_n_request, validate_n_request_limits, validate_solver_limits
 from .source_polygons import (
     SourcePolygonsError,
+    pack_xlsx_tables_bundle,
     source_polygons_from_input,
-    source_polygons_from_xlsx,
 )
 from .store import Store
 
@@ -154,7 +154,10 @@ def _build_task(
             "smooth": bool(smooth),
         },
     )
-    if start_pipeline:
+    deferred_source = str(input_obj.get("kind", "")) in {"dxf", "xlsx_tables", "json", "pickle"}
+    if deferred_source:
+        workflow.materialize_task_source(task_id, continue_pipeline=bool(start_pipeline), smooth=smooth)
+    elif start_pipeline:
         workflow.bootstrap_task(task_id, smooth=smooth)
     return TaskCreated(
         task_id=task_id,
@@ -206,77 +209,6 @@ def _parameters_from_upload_config(config: str | None, *, start: bool) -> TaskPa
     return TaskParameters.model_validate(payload)
 
 
-def _upload_source_mode(
-    *,
-    file_present: bool,
-    nodes_present: bool,
-    elements_present: bool,
-    loads_present: bool,
-) -> str:
-    xlsx_flags = (nodes_present, elements_present, loads_present)
-    any_xlsx = any(xlsx_flags)
-    all_xlsx = all(xlsx_flags)
-    if file_present and any_xlsx:
-        raise ValueError("Exactly one source mode is allowed: file (.dxf/.json) or three XLSX tables")
-    if file_present:
-        return "file"
-    if any_xlsx and not all_xlsx:
-        raise ValueError("XLSX source requires all three XLSX files: nodes_file, elements_file, loads_file")
-    if all_xlsx:
-        return "xlsx"
-    raise ValueError("A source is required: file (.dxf/.json) or three XLSX tables")
-
-
-async def _read_xlsx_file(file: UploadFile, *, label: str) -> bytes:
-    filename = file.filename or ""
-    if not filename.lower().endswith(".xlsx"):
-        raise HTTPException(status_code=415, detail=f"{label} must be an .xlsx file")
-    return await _read_upload_bytes(file, label=label)
-
-
-async def _read_task_upload_source(
-    *,
-    file: UploadFile | None,
-    nodes_file: UploadFile | None,
-    elements_file: UploadFile | None,
-    loads_file: UploadFile | None,
-    load_column: int | None,
-) -> dict:
-    try:
-        mode = _upload_source_mode(
-            file_present=file is not None,
-            nodes_present=nodes_file is not None,
-            elements_present=elements_file is not None,
-            loads_present=loads_file is not None,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    if mode == "file":
-        if load_column is not None:
-            raise HTTPException(status_code=422, detail="load_column is allowed only for XLSX source")
-        assert file is not None
-        return await _read_upload_input(file)
-
-    if load_column is None:
-        raise HTTPException(status_code=422, detail="load_column is required for XLSX source and must be 1..4")
-    assert nodes_file is not None and elements_file is not None and loads_file is not None
-    nodes_content, elements_content, loads_content = await asyncio.gather(
-        _read_xlsx_file(nodes_file, label="nodes_file"),
-        _read_xlsx_file(elements_file, label="elements_file"),
-        _read_xlsx_file(loads_file, label="loads_file"),
-    )
-    try:
-        return await run_in_threadpool(
-            source_polygons_from_xlsx,
-            nodes_content,
-            elements_content,
-            loads_content,
-            int(load_column),
-        )
-    except SourcePolygonsError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
 
 def _apply_upload_overrides(
     parameters: TaskParameters,
@@ -323,14 +255,44 @@ async def create_task(request: TaskCreate, smooth: bool = Query(False)):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+def _upload_parameters(
+    config: str | None, *, start: bool, scan_mode: str | None, whole: bool | None,
+    component_result_top_k: int | None, validate_results: bool | None,
+) -> TaskParameters:
+    parameters = _parameters_from_upload_config(config, start=bool(start))
+    return _apply_upload_overrides(
+        parameters, scan_mode=scan_mode, whole=whole,
+        component_result_top_k=component_result_top_k, validate_results=validate_results,
+    )
+
+
+async def _finish_source_upload(
+    *, config: str | None, input_obj: dict, start: bool, smooth: bool, scan_mode: str | None,
+    whole: bool | None, component_result_top_k: int | None, validate_results: bool | None,
+) -> TaskCreated:
+    try:
+        parameters = _upload_parameters(
+            config, start=start, scan_mode=scan_mode, whole=whole,
+            component_result_top_k=component_result_top_k, validate_results=validate_results,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        return await run_in_threadpool(
+            lambda: _build_task(
+                parameters, input_obj, start_pipeline=bool(start), manual_mode=not bool(start), smooth=bool(smooth)
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.post("/v1/tasks/upload", response_model=TaskCreated)
 async def create_task_upload(
     config: Annotated[str | None, Form()] = None,
-    file: Annotated[UploadFile | None, File()] = None,
-    nodes_file: Annotated[UploadFile | None, File()] = None,
-    elements_file: Annotated[UploadFile | None, File()] = None,
-    loads_file: Annotated[UploadFile | None, File()] = None,
-    load_column: Annotated[int | None, Form(ge=1, le=4)] = None,
+    file: Annotated[UploadFile, File()] = ...,
     start: bool = Query(True),
     smooth: bool = Query(False),
     scan_mode: str | None = Query(None),
@@ -338,45 +300,82 @@ async def create_task_upload(
     component_result_top_k: int | None = Query(None, ge=1, le=100),
     validate_results: bool | None = Query(None),
 ):
-    """Create a task from DXF, source-polygons JSON, or three XLSX tables.
-
-    ``start=false`` persists the task only. The first task-level ``/n`` request
-    lazily prepares the selected raw/smooth + overlay analysis once and then starts solving.
-    """
-    try:
-        parameters = _parameters_from_upload_config(config, start=bool(start))
-        parameters = _apply_upload_overrides(
-            parameters,
-            scan_mode=scan_mode,
-            whole=whole,
-            component_result_top_k=component_result_top_k,
-            validate_results=validate_results,
-        )
-    except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=exc.errors()) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    input_obj = await _read_task_upload_source(
-        file=file,
-        nodes_file=nodes_file,
-        elements_file=elements_file,
-        loads_file=loads_file,
-        load_column=load_column,
+    """Create a task from one DXF file. Parsing is deferred to a worker."""
+    input_obj = await _read_upload_input(file, dxf_only=True)
+    return await _finish_source_upload(
+        config=config, input_obj=input_obj, start=start, smooth=smooth, scan_mode=scan_mode, whole=whole,
+        component_result_top_k=component_result_top_k, validate_results=validate_results,
     )
 
-    try:
-        return await run_in_threadpool(
-            lambda: _build_task(
-                parameters,
-                input_obj,
-                start_pipeline=bool(start),
-                manual_mode=not bool(start),
-                smooth=bool(smooth),
-            )
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+@app.post("/v1/tasks/tables_upload", response_model=TaskCreated)
+async def create_task_tables_upload(
+    config: Annotated[str | None, Form()] = None,
+    nodes_file: Annotated[UploadFile, File()] = ...,
+    elements_file: Annotated[UploadFile, File()] = ...,
+    loads_file: Annotated[UploadFile, File()] = ...,
+    load_column: Annotated[int, Form(ge=1, le=4)] = 1,
+    start: bool = Query(True),
+    smooth: bool = Query(False),
+    scan_mode: str | None = Query(None),
+    whole: bool | None = Query(None),
+    component_result_top_k: int | None = Query(None, ge=1, le=100),
+    validate_results: bool | None = Query(None),
+):
+    """Create a task from three XLSX exports; workbook parsing runs in a worker."""
+    nodes_content, elements_content, loads_content = await asyncio.gather(
+        _read_xlsx_file(nodes_file, label="nodes_file"),
+        _read_xlsx_file(elements_file, label="elements_file"),
+        _read_xlsx_file(loads_file, label="loads_file"),
+    )
+    bundle = await run_in_threadpool(pack_xlsx_tables_bundle, nodes_content, elements_content, loads_content)
+    input_obj = {
+        "kind": "xlsx_tables", "filename": "tables.zip", "content": bundle, "load_column": int(load_column),
+        "nodes_filename": nodes_file.filename or "nodes.xlsx",
+        "elements_filename": elements_file.filename or "elements.xlsx",
+        "loads_filename": loads_file.filename or "loads.xlsx",
+    }
+    return await _finish_source_upload(
+        config=config, input_obj=input_obj, start=start, smooth=smooth, scan_mode=scan_mode, whole=whole,
+        component_result_top_k=component_result_top_k, validate_results=validate_results,
+    )
+
+
+@app.post("/v1/tasks/json_upload", response_model=TaskCreated)
+async def create_task_json_upload(
+    config: Annotated[str | None, Form()] = None,
+    file: Annotated[UploadFile, File()] = ...,
+    start: bool = Query(True), smooth: bool = Query(False), scan_mode: str | None = Query(None),
+    whole: bool | None = Query(None), component_result_top_k: int | None = Query(None, ge=1, le=100),
+    validate_results: bool | None = Query(None),
+):
+    if not (file.filename or "").lower().endswith(".json"):
+        raise HTTPException(status_code=415, detail="file must be a .json file")
+    content = await _read_upload_bytes(file)
+    input_obj = {"kind": "json", "filename": file.filename or "polygons.json", "content": content}
+    return await _finish_source_upload(
+        config=config, input_obj=input_obj, start=start, smooth=smooth, scan_mode=scan_mode, whole=whole,
+        component_result_top_k=component_result_top_k, validate_results=validate_results,
+    )
+
+
+@app.post("/v1/tasks/pickle_upload", response_model=TaskCreated)
+async def create_task_pickle_upload(
+    config: Annotated[str | None, Form()] = None,
+    file: Annotated[UploadFile, File()] = ...,
+    start: bool = Query(True), smooth: bool = Query(False), scan_mode: str | None = Query(None),
+    whole: bool | None = Query(None), component_result_top_k: int | None = Query(None, ge=1, le=100),
+    validate_results: bool | None = Query(None),
+):
+    suffix = (file.filename or "").lower()
+    if not suffix.endswith((".pickle", ".pkl")):
+        raise HTTPException(status_code=415, detail="file must be a .pickle or .pkl file")
+    content = await _read_upload_bytes(file)
+    input_obj = {"kind": "pickle", "filename": file.filename or "polygons.pickle", "content": content}
+    return await _finish_source_upload(
+        config=config, input_obj=input_obj, start=start, smooth=smooth, scan_mode=scan_mode, whole=whole,
+        component_result_top_k=component_result_top_k, validate_results=validate_results,
+    )
 
 
 @app.post("/v1/source-polygons/upload")
@@ -552,7 +551,7 @@ async def list_solutions(
     if await run_in_threadpool(store.get_meta, task_id) is None:
         raise HTTPException(status_code=404, detail="Task not found")
     variant = None if smooth is None else analysis_variant(smooth)
-    rows = await run_in_threadpool(lambda: store.solutions(task_id, total_n=total_n, source=source, variant=variant, overlay_id=overlay))
+    rows = await run_in_threadpool(lambda: store.solution_summaries(task_id, total_n=total_n, source=source, variant=variant, overlay_id=overlay))
     if status is not None:
         rows = [row for row in rows if str(row.get("status")) == status]
     return {

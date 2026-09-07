@@ -24,9 +24,13 @@ def test_analysis_routes_accept_overlay_and_source_polygons_accepts_smooth_overl
         assert marker in source
 
 
-def test_upload_load_column_default_remains_empty():
+def test_load_column_exists_only_on_tables_upload():
     source = (Path(__file__).resolve().parents[1] / "rebar_service/api.py").read_text(encoding="utf-8")
-    assert "load_column: Annotated[int | None, Form(ge=1, le=4)] = None" in source
+    upload_start = source.index("async def create_task_upload(")
+    tables_start = source.index("async def create_task_tables_upload(")
+    json_start = source.index("async def create_task_json_upload(")
+    assert "load_column" not in source[upload_start:tables_start]
+    assert "load_column: Annotated[int, Form(ge=1, le=4)]" in source[tables_start:json_start]
 
 
 def test_cancel_and_websocket_commands_can_scope_n_to_overlay_analysis():

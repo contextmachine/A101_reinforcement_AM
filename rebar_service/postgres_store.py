@@ -156,7 +156,7 @@ class PostgresStore:
         requested = list(dict.fromkeys(int(n) for n in plan.get("order", meta.get("requested_n", []))))
         kind = str(input_obj.get("kind", "polygons"))
         filename = str(input_obj.get("filename")) if input_obj.get("filename") else None
-        content = input_obj.get("content") if kind == "dxf" else None
+        content = input_obj.get("content") if deferred_source else None
         source_bytes = bytes(content) if isinstance(content, (bytes, bytearray, memoryview)) else None
         source_sha256 = sha256(source_bytes if source_bytes is not None else _json_param(variants["raw"]).encode("utf-8"))
         source_meta = {
@@ -290,11 +290,16 @@ class PostgresStore:
                 raise KeyError(f"source input for task={task_id} not found")
             kind = str(row["kind"])
             metadata = dict(_json_value(row["metadata"], {}) or {})
-            if kind == "dxf":
+            if kind in {"dxf", "xlsx_tables", "json", "pickle"}:
                 content = bytes(row["content"] or b"")
                 if sha256(content) != str(row["sha256"]):
                     raise IOError(f"source input for task={task_id} повреждён")
-                return {"kind": "dxf", "filename": row["filename"] or "input.dxf", "content": content}
+                return {
+                    "kind": kind,
+                    "filename": row["filename"] or f"input.{kind}",
+                    "content": content,
+                    **metadata,
+                }
             return {
                 "kind": "polygons",
                 "units": str(metadata.get("units", "mm")),
@@ -1382,7 +1387,7 @@ class PostgresStore:
         input_obj: Mapping[str, Any],
     ) -> None:
         kind = str(input_obj.get("kind", "polygons"))
-        deferred_source = kind == "dxf"
+        deferred_source = kind in {"dxf", "xlsx_tables", "json", "pickle"}
         variants = {"raw": [], "smooth": []} if deferred_source else build_polygon_variants(input_obj)
         initial_variant = self._variant(str(meta.get("initial_variant", "raw")))
         requested = list(dict.fromkeys(int(n) for n in plan.get("order", meta.get("requested_n", []))))
@@ -1530,24 +1535,32 @@ class PostgresStore:
 
             source = conn.execute(
                 text(
-                    "SELECT kind, filename, content, sha256 FROM task_sources "
+                    "SELECT kind, filename, content, sha256, metadata FROM task_sources "
                     "WHERE task_id=:task_id"
                 ),
                 {"task_id": task_id},
             ).mappings().first()
             if source is None:
                 raise KeyError(f"source input for task={task_id} not found")
-            if str(source["kind"]) != "dxf":
-                raise ValueError(f"source_pending is supported only for DXF tasks: {task_id}")
+            kind = str(source["kind"])
+            if kind not in {"dxf", "xlsx_tables", "json", "pickle"}:
+                raise ValueError(f"source_pending is not supported for source kind={kind}: {task_id}")
 
             content = bytes(source["content"] or b"")
             if sha256(content) != str(source["sha256"]):
                 raise IOError(f"source input for task={task_id} повреждён")
-            input_obj = {
-                "kind": "dxf",
-                "filename": source["filename"] or "input.dxf",
-                "content": content,
-            }
+            metadata = dict(_json_value(source["metadata"], {}) or {})
+            if kind == "dxf":
+                input_obj = {"kind": "dxf", "filename": source["filename"] or "input.dxf", "content": content}
+            elif kind == "xlsx_tables":
+                from .source_polygons import source_polygons_from_xlsx_bundle
+                input_obj = source_polygons_from_xlsx_bundle(content, load_column=int(metadata["load_column"]))
+            elif kind == "json":
+                from .source_polygons import source_polygons_from_json_bytes
+                input_obj = source_polygons_from_json_bytes(content)
+            else:
+                from .safe_pickle import load_source_polygons_pickle
+                input_obj = load_source_polygons_pickle(content, max_polygons=int(self.settings.max_source_polygons))
             variants = build_polygon_variants(input_obj)
             for variant, polygons in variants.items():
                 smoothing = (
@@ -2365,7 +2378,14 @@ class PostgresStore:
                 ),
                 {"task_id": task_id, "variant": selected, "overlay_id": selected_overlay},
             )
-        self._delete_artifact(task_id, selected, f"solver:{cid}:{int(n)}", overlay_id=selected_overlay)
+
+    def delete_solver_result(
+        self, task_id: str, component_id: Any, n: int, *, variant: str = "raw", overlay_id: int | None = 0
+    ) -> None:
+        cid = self.component_db_id(component_id)
+        self._delete_artifact(
+            task_id, self._variant(variant), f"solver:{cid}:{int(n)}", overlay_id=normalize_overlay_id(overlay_id)
+        )
 
     def frontier_version(self, task_id: str, *, variant: str = "raw", overlay_id: int | None = 0) -> int:
         with self.database.connect() as conn:
@@ -2513,11 +2533,73 @@ class PostgresStore:
             values = conn.execute(text(sql), params).scalars().all()
         return [dict(_json_value(value, {}) or {}) for value in values]
 
+    def solution_summaries(
+        self, task_id: str, total_n: int | None = None, source: str | None = None,
+        variant: str | None = None, overlay_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return lightweight solution rows without materializing the heavy result JSONB."""
+        clauses = ["task_id=:task_id"]
+        params: dict[str, Any] = {"task_id": task_id}
+        if total_n is not None:
+            clauses.append("total_n=:total_n")
+            params["total_n"] = int(total_n)
+        if source is not None:
+            clauses.append("source=:source")
+            params["source"] = str(source)
+        if variant is not None:
+            clauses.append("variant=:variant")
+            params["variant"] = self._variant(variant)
+        if overlay_id is not None:
+            clauses.append("overlay_id=:overlay_id")
+            params["overlay_id"] = normalize_overlay_id(overlay_id)
+        sql = f"""
+            SELECT solution_id, variant, overlay_id, source, total_n, component_ns, proxy_mass,
+                   actual_mass_kg, is_feasible, is_optimal, status, created_at
+            FROM solutions WHERE {' AND '.join(clauses)}
+            ORDER BY is_feasible DESC, is_optimal DESC, actual_mass_kg ASC NULLS LAST,
+                     proxy_mass ASC NULLS LAST, created_at ASC
+        """
+        with self.database.connect() as conn:
+            rows = conn.execute(text(sql), params).mappings().all()
+        return [
+            {
+                "solution_id": str(row["solution_id"]),
+                "variant": str(row["variant"]),
+                "smooth": str(row["variant"]) == "smooth",
+                "overlay_id": int(row["overlay_id"]),
+                "source": str(row["source"]),
+                "total_N": int(row["total_n"]),
+                "component_ns": dict(_json_value(row["component_ns"], {}) or {}),
+                "proxy_mass": None if row["proxy_mass"] is None else float(row["proxy_mass"]),
+                "actual_mass_kg": None if row["actual_mass_kg"] is None else float(row["actual_mass_kg"]),
+                "is_feasible": bool(row["is_feasible"]),
+                "is_optimal": bool(row["is_optimal"]),
+                "status": str(row["status"]),
+                "created_at": _epoch(row["created_at"]),
+            }
+            for row in rows
+        ]
+
     def best_solution(
         self, task_id: str, total_n: int, *, variant: str | None = None, overlay_id: int | None = 0
     ) -> dict[str, Any] | None:
-        rows = self.solutions(task_id, total_n=total_n, variant=variant, overlay_id=normalize_overlay_id(overlay_id))
-        return rows[0] if rows else None
+        clauses = ["task_id=:task_id", "total_n=:total_n"]
+        params: dict[str, Any] = {"task_id": task_id, "total_n": int(total_n)}
+        if variant is not None:
+            clauses.append("variant=:variant")
+            params["variant"] = self._variant(variant)
+        if overlay_id is not None:
+            clauses.append("overlay_id=:overlay_id")
+            params["overlay_id"] = normalize_overlay_id(overlay_id)
+        sql = f"""
+            SELECT result FROM solutions WHERE {' AND '.join(clauses)}
+            ORDER BY is_feasible DESC, is_optimal DESC, actual_mass_kg ASC NULLS LAST,
+                     proxy_mass ASC NULLS LAST, created_at ASC
+            LIMIT 1
+        """
+        with self.database.connect() as conn:
+            value = conn.execute(text(sql), params).scalar_one_or_none()
+        return None if value is None else dict(_json_value(value, {}) or {})
 
     def get_result(self, task_id: str, n: int, *, variant: str | None = None, overlay_id: int | None = 0) -> dict[str, Any] | None:
         selected_variant = variant or str((self.get_meta(task_id) or {}).get("initial_variant", "raw"))
@@ -2546,7 +2628,7 @@ class PostgresStore:
         self, task_id: str, *, variant: str | None = None, overlay_id: int | None = 0
     ) -> dict[str, dict[str, Any]]:
         selected_variant = variant or str((self.get_meta(task_id) or {}).get("initial_variant", "raw"))
-        rows = self.solutions(task_id, variant=selected_variant, overlay_id=normalize_overlay_id(overlay_id))
+        rows = self.solution_summaries(task_id, variant=selected_variant, overlay_id=normalize_overlay_id(overlay_id))
         best: dict[int, dict[str, Any]] = {}
         for row in rows:
             n = int(row.get("total_N", row.get("total_n", -1)))
@@ -2560,6 +2642,25 @@ class PostgresStore:
                 "variant": selected_variant, "overlay_id": normalize_overlay_id(overlay_id),
             }
         return {str(n): value for n, value in sorted(best.items())}
+
+    def mark_analysis_infeasible(
+        self, task_id: str, *, variant: str = "raw", overlay_id: int | None = 0, detail: Mapping[str, Any] | None = None
+    ) -> None:
+        with self.database.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE task_analyses
+                    SET preparation_state='infeasible', updated_at=now()
+                    WHERE task_id=:task_id AND variant=:variant AND overlay_id=:overlay_id
+                    """
+                ),
+                {
+                    "task_id": task_id,
+                    "variant": self._variant(variant),
+                    "overlay_id": normalize_overlay_id(overlay_id),
+                },
+            )
 
     def mark_analysis_failed(
         self, task_id: str, *, variant: str = "raw", overlay_id: int | None = 0
@@ -2581,6 +2682,21 @@ class PostgresStore:
                 },
             )
 
+
+    def has_infeasible_analysis(self, task_id: str) -> bool:
+        with self.database.connect() as conn:
+            value = conn.execute(
+                text(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM task_analyses
+                        WHERE task_id=:task_id AND preparation_state='infeasible'
+                    )
+                    """
+                ),
+                {"task_id": task_id},
+            ).scalar_one()
+        return bool(value)
 
     def has_prepared_analysis(self, task_id: str) -> bool:
         with self.database.connect() as conn:
@@ -2618,7 +2734,9 @@ class PostgresStore:
                     prepared = bool(self.load_field(task_id))
             state = "ready" if prepared else "uploaded"
         else:
-            state = "completed" if self.solutions(task_id) else "completed_with_errors"
+            infeasible_check = getattr(self, "has_infeasible_analysis", None)
+            has_infeasible = bool(infeasible_check(task_id)) if callable(infeasible_check) else False
+            state = "completed" if (self.solution_summaries(task_id) or has_infeasible) else "completed_with_errors"
         if state != meta.get("state"):
             meta = self.patch_meta(task_id, state=state)
             self.publish_event(task_id, "task_state", {"state": state})

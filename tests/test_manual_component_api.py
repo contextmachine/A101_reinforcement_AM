@@ -525,18 +525,22 @@ def test_upload_config_parser_requires_config_only_when_starting():
     assert automatic.axis == "x"
 
 
-def test_upload_source_mode_validation_is_exactly_one_mode():
+def test_upload_source_formats_use_separate_endpoints():
+    import inspect
+
     api_module = _import_api_without_redis()
 
-    selector = getattr(api_module, "_upload_source_mode", None)
-    assert callable(selector), "_upload_source_mode() must exist"
+    dxf_params = inspect.signature(api_module.create_task_upload).parameters
+    assert "file" in dxf_params
+    assert "nodes_file" not in dxf_params
+    assert "elements_file" not in dxf_params
+    assert "loads_file" not in dxf_params
+    assert "load_column" not in dxf_params
 
-    assert selector(file_present=True, nodes_present=False, elements_present=False, loads_present=False) == "file"
-    assert selector(file_present=False, nodes_present=True, elements_present=True, loads_present=True) == "xlsx"
+    tables_params = inspect.signature(api_module.create_task_tables_upload).parameters
+    assert {"nodes_file", "elements_file", "loads_file", "load_column"}.issubset(tables_params)
 
-    with pytest.raises(ValueError, match="source"):
-        selector(file_present=False, nodes_present=False, elements_present=False, loads_present=False)
-    with pytest.raises(ValueError, match="source"):
-        selector(file_present=True, nodes_present=True, elements_present=True, loads_present=True)
-    with pytest.raises(ValueError, match="all three XLSX"):
-        selector(file_present=False, nodes_present=True, elements_present=False, loads_present=True)
+    json_params = inspect.signature(api_module.create_task_json_upload).parameters
+    pickle_params = inspect.signature(api_module.create_task_pickle_upload).parameters
+    assert "file" in json_params
+    assert "file" in pickle_params

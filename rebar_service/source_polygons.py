@@ -302,3 +302,57 @@ def source_polygons_from_input(source_input: Mapping[str, Any]) -> list[dict[str
         }
         for poly in mosaic
     ]
+
+
+def pack_xlsx_tables_bundle(nodes_content: bytes, elements_content: bytes, loads_content: bytes) -> bytes:
+    """Pack the three source workbooks into one opaque task-source payload."""
+    import zipfile
+
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("nodes.xlsx", nodes_content)
+        archive.writestr("elements.xlsx", elements_content)
+        archive.writestr("loads.xlsx", loads_content)
+    return buffer.getvalue()
+
+
+def source_polygons_from_xlsx_bundle(content: bytes, *, load_column: int) -> dict[str, Any]:
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(BytesIO(content), "r") as archive:
+            nodes = archive.read("nodes.xlsx")
+            elements = archive.read("elements.xlsx")
+            loads = archive.read("loads.xlsx")
+    except Exception as exc:
+        raise SourcePolygonsError(f"Invalid XLSX source bundle: {exc}") from exc
+    return source_polygons_from_xlsx(nodes, elements, loads, int(load_column))
+
+
+def source_polygons_from_json_bytes(content: bytes) -> dict[str, Any]:
+    import json
+
+    try:
+        payload = json.loads(content.decode("utf-8-sig"))
+    except Exception as exc:
+        raise SourcePolygonsError(f"Invalid source-polygons JSON: {exc}") from exc
+    if isinstance(payload, list):
+        payload = {"kind": "polygons", "units": "mm", "polygons": payload}
+    if not isinstance(payload, Mapping):
+        raise SourcePolygonsError("JSON top level must be a polygon list or object with 'polygons'")
+    if "polygons" not in payload:
+        raise SourcePolygonsError("JSON object must contain 'polygons'")
+    units = str(payload.get("units", "mm"))
+    rows = source_polygons_from_input({"kind": "polygons", "units": units, "polygons": payload.get("polygons")})
+    return {
+        "kind": "polygons",
+        "units": "mm",
+        "polygons": [
+            {
+                "points": [[float(x), float(y)] for x, y in row["points"]],
+                "load": float(row["load"]),
+                **({"color": int(row["color"])} if row.get("color") is not None else {}),
+            }
+            for row in rows
+        ],
+    }

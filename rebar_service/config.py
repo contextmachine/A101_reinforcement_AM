@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     event_poll_interval_seconds: float = 0.5
 
     max_upload_bytes: int = 64 * 1024 * 1024
+    max_source_polygons: int = 100_000
     max_planned_n_values: int = 10_000
     max_n_value: int = 100_000
 

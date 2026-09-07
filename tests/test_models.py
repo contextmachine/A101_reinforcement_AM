@@ -53,7 +53,8 @@ def test_current_solution_is_exposed_in_historical_result_shape():
     assert result["component_ns"] == {"0": 1, "1": 2}
     assert result["summary"]["N"] == 3
     assert result["summary"]["mass"] == 10.25
-    assert result["summary"]["zones"][0]["final rectangle"] == (0.0, 0.0, 1200.0, 2000.0)
+    assert result["summary"]["zones"][0]["final rectangle"] == (0.0, 0.0, 1000.0, 2000.0)
+    assert result["summary"]["zones"][0]["final rectangle with anchorage"] == (0.0, 0.0, 1200.0, 2000.0)
     assert result["fit_result"]["zones"][0]["class"] == 1
 
 

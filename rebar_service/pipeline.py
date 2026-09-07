@@ -115,6 +115,7 @@ def map_components_to_source_indices(
 
 
 class JobKind(str, Enum):
+    materialize_source = "materialize_source"
     prepare_field = "prepare_field"
     prepare_component = "prepare_component"
     solve_component = "solve_component"
@@ -273,38 +274,167 @@ def public_value(value: Any) -> Any:
     return value
 
 
+
+def _metric_bar_mass(bars: Sequence[Sequence[float]], diameter: float, density: float) -> float:
+    from math import hypot, pi
+
+    area_m2 = pi * (float(diameter) / 1000.0) ** 2 / 4.0
+    return float(sum(float(density) * area_m2 * (hypot(b[2] - b[0], b[3] - b[1]) / 1000.0) for b in bars))
+
+
+def _trim_metric_bars(bars: Sequence[Sequence[float]], bounds: Sequence[float], axis: str) -> list[tuple[float, float, float, float]]:
+    x0, y0, x1, y1 = map(float, bounds[:4])
+    out: list[tuple[float, float, float, float]] = []
+    for raw in bars or []:
+        bx0, by0, bx1, by1 = map(float, raw[:4])
+        if axis == "y":
+            lo, hi = max(min(by0, by1), y0), min(max(by0, by1), y1)
+            if hi > lo:
+                out.append((bx0, lo, bx1, hi))
+        else:
+            lo, hi = max(min(bx0, bx1), x0), min(max(bx0, bx1), x1)
+            if hi > lo:
+                out.append((lo, by0, hi, by1))
+    return out
+
+
+def augment_layout_mass_metrics(layout: Mapping[str, Any], *, steel_density_kg_m3: float = 7850.0) -> dict[str, Any]:
+    """Attach pre/post anchorage and clipped/unclipped bar/mass diagnostics.
+
+    Canonical physical layout remains the clipped layout returned by ``layout_rebars``.
+    Unclipped metrics extend only supplemental-zone tracks to rectangle bounds; background
+    reinforcement remains the same physical clipped background in every total.
+    """
+    from A101.reinforcement_components import bar_mass_kg
+
+    out = dict(layout or {})
+    axis = str(out.get("axis", "y")).lower()
+    zones = [dict(row) for row in out.get("zones", []) or []]
+    tracks = {int(row["id"]): dict(row) for row in out.get("tracks", []) or [] if row.get("id") is not None}
+    background_rows = [row for row in out.get("bars", []) or [] if isinstance(row, Mapping) and row.get("background")]
+    background_mass = bar_mass_kg(background_rows, steel_density_kg_m3) if background_rows else 0.0
+
+    totals = {
+        "without_anchorage_kg": float(background_mass),
+        "with_anchorage_kg": float(background_mass),
+        "without_anchorage_unclipped_kg": float(background_mass),
+        "with_anchorage_unclipped_kg": float(background_mass),
+    }
+    additional = {key: 0.0 for key in totals}
+
+    for zone in zones:
+        if zone.get("background") or zone.get("class") is None:
+            continue
+        diameter = float(zone.get("diameter") or 0.0)
+        if diameter <= 0:
+            continue
+        anchored_clipped = tuple(map(float, zone.get("bounds") or zone.get("primary_bounds") or ()))
+        fitted = tuple(map(float, zone.get("fitted_bounds") or zone.get("primary_bounds") or anchored_clipped))
+        anchored_unclipped = tuple(map(float, zone.get("anchored_bounds_unclipped") or anchored_clipped))
+        if len(fitted) != 4 or len(anchored_clipped) != 4 or len(anchored_unclipped) != 4:
+            continue
+
+        anchored_clipped_bars = [tuple(map(float, row[:4])) for row in zone.get("bars", []) or []]
+        no_anchor_clipped_bars = _trim_metric_bars(anchored_clipped_bars, fitted, axis)
+
+        coords: list[float] = []
+        for track_id in zone.get("track_ids", []) or []:
+            track = tracks.get(int(track_id))
+            if not track:
+                continue
+            value = track.get("x") if axis == "y" else track.get("y")
+            if value is not None:
+                coords.append(float(value))
+        if not coords:
+            coords = sorted({float(row[0] if axis == "y" else row[1]) for row in anchored_clipped_bars})
+        else:
+            coords = sorted(set(coords))
+
+        if axis == "y":
+            no_anchor_unclipped_bars = [(x, fitted[1], x, fitted[3]) for x in coords]
+            anchored_unclipped_bars = [(x, anchored_unclipped[1], x, anchored_unclipped[3]) for x in coords]
+        else:
+            no_anchor_unclipped_bars = [(fitted[0], y, fitted[2], y) for y in coords]
+            anchored_unclipped_bars = [(anchored_unclipped[0], y, anchored_unclipped[2], y) for y in coords]
+
+        masses = {
+            "without_anchorage_kg": _metric_bar_mass(no_anchor_clipped_bars, diameter, steel_density_kg_m3),
+            "with_anchorage_kg": _metric_bar_mass(anchored_clipped_bars, diameter, steel_density_kg_m3),
+            "without_anchorage_unclipped_kg": _metric_bar_mass(no_anchor_unclipped_bars, diameter, steel_density_kg_m3),
+            "with_anchorage_unclipped_kg": _metric_bar_mass(anchored_unclipped_bars, diameter, steel_density_kg_m3),
+        }
+        for key, value in masses.items():
+            totals[key] += value
+            additional[key] += value
+
+        zone.update({
+            "final_rectangle_without_anchorage": fitted,
+            "final_rectangle_with_anchorage": anchored_clipped,
+            "final_rectangle_without_anchorage_unclipped": fitted,
+            "final_rectangle_with_anchorage_unclipped": anchored_unclipped,
+            "bars_without_anchorage": no_anchor_clipped_bars,
+            "bars_with_anchorage": anchored_clipped_bars,
+            "bars_without_anchorage_unclipped": no_anchor_unclipped_bars,
+            "bars_with_anchorage_unclipped": anchored_unclipped_bars,
+            "zone_mass_without_anchorage_kg": masses["without_anchorage_kg"],
+            "zone_mass_with_anchorage_kg": masses["with_anchorage_kg"],
+            "zone_mass_without_anchorage_unclipped_kg": masses["without_anchorage_unclipped_kg"],
+            "zone_mass_with_anchorage_unclipped_kg": masses["with_anchorage_unclipped_kg"],
+        })
+
+    out["zones"] = zones
+    # Preserve exact canonical physical mass as a consistency guard.
+    canonical = bar_mass_kg(out.get("bars", []) or [], steel_density_kg_m3) if out.get("bars") else 0.0
+    totals["with_anchorage_kg"] = float(canonical)
+    out["mass_metrics"] = {
+        **{key: float(value) for key, value in totals.items()},
+        "anchorage_kg": float(totals["with_anchorage_kg"] - totals["without_anchorage_kg"]),
+        "anchorage_unclipped_kg": float(totals["with_anchorage_unclipped_kg"] - totals["without_anchorage_unclipped_kg"]),
+        "additional": {key: float(value) for key, value in additional.items()},
+        "background_clipped_kg": float(background_mass),
+    }
+    return out
+
+
 def _compatibility_zones(layout: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     fit_zones: list[dict[str, Any]] = []
     summary_zones: list[dict[str, Any]] = []
     for zone in layout.get("zones", []) or []:
         if zone.get("background") or zone.get("class") is None:
             continue
-        bounds = tuple(map(float, zone.get("bounds") or zone.get("primary_bounds") or ()))
-        if len(bounds) != 4:
+        anchored_bounds = tuple(map(float, zone.get("final_rectangle_with_anchorage") or zone.get("bounds") or zone.get("primary_bounds") or ()))
+        if len(anchored_bounds) != 4:
             continue
-        primary = tuple(map(float, zone.get("primary_bounds") or bounds))
+        no_anchor_bounds = tuple(map(float, zone.get("final_rectangle_without_anchorage") or zone.get("fitted_bounds") or zone.get("primary_bounds") or anchored_bounds))
+        no_anchor_unclipped = tuple(map(float, zone.get("final_rectangle_without_anchorage_unclipped") or no_anchor_bounds))
+        anchored_unclipped = tuple(map(float, zone.get("final_rectangle_with_anchorage_unclipped") or zone.get("anchored_bounds_unclipped") or anchored_bounds))
+        primary = tuple(map(float, zone.get("primary_bounds") or no_anchor_bounds))
         cls = int(zone["class"])
-        bars = [tuple(map(float, row[:4])) for row in zone.get("bars", []) or []]
+        bars = [tuple(map(float, row[:4])) for row in zone.get("bars_without_anchorage", zone.get("bars", [])) or []]
+        anchored_bars = [tuple(map(float, row[:4])) for row in zone.get("bars_with_anchorage", zone.get("bars", [])) or []]
+        bars_unclipped = [tuple(map(float, row[:4])) for row in zone.get("bars_without_anchorage_unclipped", bars) or []]
+        anchored_bars_unclipped = [tuple(map(float, row[:4])) for row in zone.get("bars_with_anchorage_unclipped", anchored_bars) or []]
         fit_zones.append({
-            "id": zone.get("id"),
-            "class": cls,
-            "bounds": bounds,
-            "diameter": zone.get("diameter"),
-            "step": zone.get("step"),
-            "bars": bars,
+            "id": zone.get("id"), "class": cls, "bounds": no_anchor_bounds,
+            "diameter": zone.get("diameter"), "step": zone.get("step"), "bars": bars,
         })
         summary_zones.append({
-            "class": cls,
-            "diameter": zone.get("diameter"),
-            "step": zone.get("step"),
+            "class": cls, "diameter": zone.get("diameter"), "step": zone.get("step"),
             "primary rectangle": primary,
-            "final rectangle": bounds,
-            # The physical global layout already contains the final anchored bar geometry.
-            "final rectangle with anchorage": bounds,
-            "bars": bars,
-            "bars with anchorage": bars,
-            "width": abs(bounds[2] - bounds[0]),
-            "length": abs(bounds[3] - bounds[1]),
+            "final rectangle": no_anchor_bounds,
+            "final rectangle with anchorage": anchored_bounds,
+            "final rectangle unclipped": no_anchor_unclipped,
+            "final rectangle with anchorage unclipped": anchored_unclipped,
+            "bars": bars, "bars with anchorage": anchored_bars,
+            "bars unclipped": bars_unclipped, "bars with anchorage unclipped": anchored_bars_unclipped,
+            "zone mass without anchorage": zone.get("zone_mass_without_anchorage_kg"),
+            "zone mass with anchorage": zone.get("zone_mass_with_anchorage_kg"),
+            "zone mass without anchorage unclipped": zone.get("zone_mass_without_anchorage_unclipped_kg"),
+            "zone mass with anchorage unclipped": zone.get("zone_mass_with_anchorage_unclipped_kg"),
+            "anchorage mass": None if zone.get("zone_mass_without_anchorage_kg") is None else float(zone.get("zone_mass_with_anchorage_kg", 0.0)) - float(zone.get("zone_mass_without_anchorage_kg", 0.0)),
+            "anchorage mass unclipped": None if zone.get("zone_mass_without_anchorage_unclipped_kg") is None else float(zone.get("zone_mass_with_anchorage_unclipped_kg", 0.0)) - float(zone.get("zone_mass_without_anchorage_unclipped_kg", 0.0)),
+            "width": abs(anchored_bounds[2] - anchored_bounds[0]),
+            "length": abs(anchored_bounds[3] - anchored_bounds[1]),
         })
     return fit_zones, summary_zones
 
@@ -318,6 +448,7 @@ def to_compat_result(solution: Mapping[str, Any]) -> dict[str, Any]:
     fit_zones, summary_zones = _compatibility_zones(layout)
     actual_mass = row.get("actual_mass_kg")
     proxy_mass = row.get("proxy_mass")
+    mass_metrics = dict(row.get("mass_metrics") or layout.get("mass_metrics") or {})
     feasible = bool(row.get("is_feasible"))
     total_n = int(row.get("total_N", 0))
     return {
@@ -342,7 +473,12 @@ def to_compat_result(solution: Mapping[str, Any]) -> dict[str, Any]:
         "summary": {
             "mass": actual_mass,
             "mass_kg": actual_mass,
-            "mass with anchorage": actual_mass,
+            "mass without anchorage": mass_metrics.get("without_anchorage_kg"),
+            "mass with anchorage": mass_metrics.get("with_anchorage_kg", actual_mass),
+            "mass without anchorage unclipped": mass_metrics.get("without_anchorage_unclipped_kg"),
+            "mass with anchorage unclipped": mass_metrics.get("with_anchorage_unclipped_kg"),
+            "anchorage mass": mass_metrics.get("anchorage_kg"),
+            "anchorage mass unclipped": mass_metrics.get("anchorage_unclipped_kg"),
             "proxy_mass": proxy_mass,
             "N": total_n,
             "zones": summary_zones,
@@ -398,10 +534,9 @@ class PipelineWorkflow:
     ) -> list[dict[str, Any]]:
         method = getattr(self.store, "load_variant_polygons", None)
         if callable(method):
-            if str(input_obj.get("kind", "")) == "dxf":
-                materialize = getattr(self.store, "ensure_polygon_variants", None)
-                if callable(materialize):
-                    materialize(task_id)
+            materialize = getattr(self.store, "ensure_polygon_variants", None)
+            if callable(materialize):
+                materialize(task_id)
             return list(method(task_id, variant=variant))
         # Compatibility path for small historical test doubles only. Production Store always persists variants.
         if variant != "raw":
@@ -436,6 +571,26 @@ class PipelineWorkflow:
             dedupe_key=dedupe_key,
         )
         return self.store.enqueue_pipeline_job(job.to_dict())
+
+    def materialize_task_source(self, task_id: str, *, continue_pipeline: bool, smooth: bool = False) -> bool:
+        return self.enqueue(
+            JobKind.materialize_source,
+            task_id,
+            {"continue_pipeline": bool(continue_pipeline), "smooth": bool(smooth), "variant": analysis_variant(smooth)},
+        )
+
+    def handle_materialize_source(self, job: PipelineJob) -> None:
+        materialize = getattr(self.store, "ensure_polygon_variants", None)
+        if not callable(materialize):
+            raise RuntimeError("store does not support source materialization")
+        changed = bool(materialize(job.task_id))
+        smooth = bool(job.payload.get("smooth", False))
+        variant = analysis_variant(smooth)
+        self._publish(job.task_id, {
+            "type": "source_materialized", "changed": changed, "variant": variant, "smooth": smooth,
+        })
+        if bool(job.payload.get("continue_pipeline", False)):
+            self.prepare_task(job.task_id, auto_solve=True, smooth=smooth)
 
     def prepare_task(
         self,
@@ -815,10 +970,35 @@ class PipelineWorkflow:
 
         task_id, cid, n = job.task_id, int(job.payload["component_id"]), int(job.payload["n"])
         variant = payload_variant(job.payload)
+        existing = self._variant_call(self.store.load_frontier, task_id, cid, variant=variant).get(n)
+        if existing is not None:
+            self._frontier_ready(task_id, cid, n, existing, variant=variant)
+            cleanup = getattr(self.store, "delete_solver_result", None)
+            if callable(cleanup):
+                self._variant_call(cleanup, task_id, cid, n, variant=variant)
+            return
         stored = self._variant_call(self.store.load_problem, task_id, cid, variant=variant)
+        if not stored:
+            self._publish(task_id, {
+                "type": "job_recovery", "stage": "fit_component", "reason": "problem_missing",
+                "component_id": cid, "n": n, "variant": variant, "smooth": variant_is_smooth(variant),
+            })
+            self.enqueue(JobKind.prepare_component, task_id, {
+                "component_id": cid, "auto_solve": True, "analysis_auto_solve": True,
+                "variant": variant, "smooth": variant_is_smooth(variant),
+            })
+            return
         solved = self._variant_call(self.store.load_solver_result, task_id, cid, n, variant=variant)
-        if not stored or not solved:
-            raise KeyError("problem/solver result missing")
+        if not solved:
+            self._publish(task_id, {
+                "type": "job_recovery", "stage": "fit_component", "reason": "solver_result_missing",
+                "component_id": cid, "n": n, "variant": variant, "smooth": variant_is_smooth(variant),
+            })
+            self.enqueue(JobKind.solve_component, task_id, {
+                "component_id": cid, "n": n, "force_single_box": False, "source": "components",
+                "variant": variant, "smooth": variant_is_smooth(variant),
+            })
+            return
         field = self._field(task_id, variant)
         cfg = field["cfg"]
         params = self._params(task_id)
@@ -834,6 +1014,9 @@ class PipelineWorkflow:
         result.update(variant=variant, smooth=variant_is_smooth(variant))
         self._variant_call(self.store.save_frontier_result, task_id, cid, n, result, variant=variant)
         self._frontier_ready(task_id, cid, n, result, variant=variant)
+        cleanup = getattr(self.store, "delete_solver_result", None)
+        if callable(cleanup):
+            self._variant_call(cleanup, task_id, cid, n, variant=variant)
 
     def _frontier_ready(
         self, task_id: str, cid: Any, n: int, result: Mapping[str, Any], *, variant: str = "raw"
@@ -1099,10 +1282,36 @@ class PipelineWorkflow:
 
         task_id, n = job.task_id, int(job.payload["n"])
         variant = payload_variant(job.payload)
+        existing = self._variant_call(self.store.load_frontier, task_id, "whole", variant=variant).get(n)
+        if existing is not None:
+            if existing.get("is_feasible"):
+                self._queue_whole_layout(task_id, existing, variant=variant)
+            cleanup = getattr(self.store, "delete_solver_result", None)
+            if callable(cleanup):
+                self._variant_call(cleanup, task_id, "whole", n, variant=variant)
+            return
         stored = self._variant_call(self.store.load_problem, task_id, "whole", variant=variant)
+        if not stored:
+            self._publish(task_id, {
+                "type": "job_recovery", "stage": "fit_whole", "reason": "problem_missing",
+                "component_id": "whole", "n": n, "variant": variant, "smooth": variant_is_smooth(variant),
+            })
+            self.enqueue(JobKind.prepare_whole, task_id, {
+                "auto_solve": True, "analysis_auto_solve": True, "variant": variant,
+                "smooth": variant_is_smooth(variant),
+            })
+            return
         solved = self._variant_call(self.store.load_solver_result, task_id, "whole", n, variant=variant)
-        if not stored or not solved:
-            raise KeyError("whole problem/solver result missing")
+        if not solved:
+            self._publish(task_id, {
+                "type": "job_recovery", "stage": "fit_whole", "reason": "solver_result_missing",
+                "component_id": "whole", "n": n, "variant": variant, "smooth": variant_is_smooth(variant),
+            })
+            self.enqueue(JobKind.solve_whole, task_id, {
+                "component_id": "whole", "n": n, "force_single_box": False, "source": "whole",
+                "variant": variant, "smooth": variant_is_smooth(variant),
+            })
+            return
         field = self._field(task_id, variant)
         cfg = field["cfg"]
         params = self._params(task_id)
@@ -1119,6 +1328,9 @@ class PipelineWorkflow:
         self._variant_call(self.store.save_frontier_result, task_id, "whole", n, result, variant=variant)
         if result.get("is_feasible"):
             self._queue_whole_layout(task_id, result, variant=variant)
+        cleanup = getattr(self.store, "delete_solver_result", None)
+        if callable(cleanup):
+            self._variant_call(cleanup, task_id, "whole", n, variant=variant)
 
     def _queue_whole_layout(
         self, task_id: str, result: Mapping[str, Any], *, variant: str = "raw"
@@ -1468,7 +1680,7 @@ class PipelineWorkflow:
 
     def handle_prepare_field(self, job: PipelineJob) -> None:
         from A101.axis_orientation import class_holds, normalize_axis
-        from A101.calculate_mass import resolve_rebar_config
+        from A101.calculate_mass import ReinforcementCapacityError, resolve_rebar_config
         from A101.grid_work import clean_poly
         from A101.poly_bbox import rect_polygons
         from A101.reinforcement_components import split_reinforcement_components
@@ -1489,10 +1701,38 @@ class PipelineWorkflow:
         all_polygons = polygons_from_input({"kind": "polygons", "units": "mm", "polygons": persisted_polygons})
 
         # Rebar configuration deliberately depends on the immutable source variant, not on overlay edits.
-        cfg = resolve_rebar_config(
-            all_polygons,
-            back_grid=params.get("back_grid"), stock=params.get("stock"), max_layers=params.get("max_layers"),
-        )
+        try:
+            cfg = resolve_rebar_config(
+                all_polygons,
+                back_grid=params.get("back_grid"), stock=params.get("stock"), max_layers=params.get("max_layers"),
+            )
+        except ReinforcementCapacityError as exc:
+            detail = {
+                "reason": "reinforcement_capacity",
+                "load": float(exc.load),
+                "max_supported_load": float(exc.max_supported_load),
+                "max_layers": exc.max_layers,
+                "back_grid": None if exc.back_grid is None else list(exc.back_grid),
+                "variant": variant,
+                "smooth": smooth,
+                "overlay_id": overlay_id,
+            }
+            mark = getattr(self.store, "mark_analysis_infeasible", None)
+            if callable(mark):
+                try:
+                    mark(task_id, variant=variant, overlay_id=overlay_id, detail=detail)
+                except TypeError:
+                    mark(task_id, variant=variant, overlay_id=overlay_id)
+            for requested_n in self._requested_ns(task_id, variant, overlay_id):
+                try:
+                    self.store.set_n_status(
+                        task_id, int(requested_n), "infeasible", variant=variant, overlay_id=overlay_id, **detail
+                    )
+                except TypeError:
+                    self.store.set_n_status(task_id, int(requested_n), "infeasible", **detail)
+            self.store.patch_meta(task_id, state="completed" if auto_solve else "ready")
+            self._publish(task_id, {"type": "analysis_infeasible", **detail})
+            return
         axis = normalize_axis(str(params.get("axis", "y")))
         cfg["axis"] = axis
         anchor_factor = float(params.get("anchor_factor", 32.0))
@@ -1725,10 +1965,12 @@ class PipelineWorkflow:
             min_step=float(self.settings.min_internal_step),
         ) or {})
         feasible = bool(layout.get("is_feasible"))
-        mass = (
-            bar_mass_kg(layout.get("bars", []), float(params.get("steel_density_kg_m3", 7850.0)))
-            if feasible else float("inf")
-        )
+        density = float(params.get("steel_density_kg_m3", 7850.0))
+        if feasible:
+            layout = augment_layout_mass_metrics(layout, steel_density_kg_m3=density)
+            mass = float(layout["mass_metrics"]["with_anchorage_kg"])
+        else:
+            mass = float("inf")
         component_ns = {str(k): int(v) for k, v in dict(candidate.get("component_ns", {})).items()}
         total_n = int(candidate.get("total_N", candidate.get("total_n", sum(component_ns.values()))))
         source = str(candidate.get("source", "components"))
@@ -1745,6 +1987,7 @@ class PipelineWorkflow:
             "smooth": variant_is_smooth(variant), "overlay_id": overlay_id, "total_N": total_n,
             "component_ns": component_ns, "actual_mass_kg": float(mass), "is_feasible": feasible,
             "is_optimal": is_optimal, "status": status, "bar_layout": layout,
+            "mass_metrics": dict(layout.get("mass_metrics", {}) or {}),
             "metadata": {
                 "threads": self.settings.effective_threads(self._solver(task_id).get("threads")),
                 "created_at": time.time(), "variant": variant, "smooth": variant_is_smooth(variant),
