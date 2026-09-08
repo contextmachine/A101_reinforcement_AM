@@ -19,6 +19,7 @@ from shapely.ops import unary_union
 from .config import Settings
 from .store import Store
 from .overlays import normalize_overlay_id
+from .layout_metrics import MASS_METRICS_VERSION, augment_layout_mass_metrics
 
 
 WHOLE_COMPONENT_ID = -1
@@ -155,7 +156,8 @@ class PipelineJob:
     def default_dedupe_key(self) -> str:
         coordinate = {
             key: self.payload.get(key)
-            for key in ("component_id", "n", "total_n", "solution_id", "source", "frontier_version", "offset", "variant", "overlay_id")
+            for key in ("component_id", "n", "total_n", "solution_id", "source", "frontier_version", "offset", "variant", "overlay_id",
+                        "candidate_id", "layout_refresh", "relayout_solution_id", "metrics_version")
             if key in self.payload
         }
         if not coordinate:
@@ -275,132 +277,11 @@ def public_value(value: Any) -> Any:
 
 
 
-def _metric_bar_mass(bars: Sequence[Sequence[float]], diameter: float, density: float) -> float:
-    from math import hypot, pi
-
-    area_m2 = pi * (float(diameter) / 1000.0) ** 2 / 4.0
-    return float(sum(float(density) * area_m2 * (hypot(b[2] - b[0], b[3] - b[1]) / 1000.0) for b in bars))
-
-
-def _trim_metric_bars(bars: Sequence[Sequence[float]], bounds: Sequence[float], axis: str) -> list[tuple[float, float, float, float]]:
-    x0, y0, x1, y1 = map(float, bounds[:4])
-    out: list[tuple[float, float, float, float]] = []
-    for raw in bars or []:
-        bx0, by0, bx1, by1 = map(float, raw[:4])
-        if axis == "y":
-            lo, hi = max(min(by0, by1), y0), min(max(by0, by1), y1)
-            if hi > lo:
-                out.append((bx0, lo, bx1, hi))
-        else:
-            lo, hi = max(min(bx0, bx1), x0), min(max(bx0, bx1), x1)
-            if hi > lo:
-                out.append((lo, by0, hi, by1))
-    return out
-
-
-def augment_layout_mass_metrics(layout: Mapping[str, Any], *, steel_density_kg_m3: float = 7850.0) -> dict[str, Any]:
-    """Attach pre/post anchorage and clipped/unclipped bar/mass diagnostics.
-
-    Canonical physical layout remains the clipped layout returned by ``layout_rebars``.
-    Unclipped metrics extend only supplemental-zone tracks to rectangle bounds; background
-    reinforcement remains the same physical clipped background in every total.
-    """
-    from A101.reinforcement_components import bar_mass_kg
-
-    out = dict(layout or {})
-    axis = str(out.get("axis", "y")).lower()
-    zones = [dict(row) for row in out.get("zones", []) or []]
-    tracks = {int(row["id"]): dict(row) for row in out.get("tracks", []) or [] if row.get("id") is not None}
-    background_rows = [row for row in out.get("bars", []) or [] if isinstance(row, Mapping) and row.get("background")]
-    background_mass = bar_mass_kg(background_rows, steel_density_kg_m3) if background_rows else 0.0
-
-    totals = {
-        "without_anchorage_kg": float(background_mass),
-        "with_anchorage_kg": float(background_mass),
-        "without_anchorage_unclipped_kg": float(background_mass),
-        "with_anchorage_unclipped_kg": float(background_mass),
-    }
-    additional = {key: 0.0 for key in totals}
-
-    for zone in zones:
-        if zone.get("background") or zone.get("class") is None:
-            continue
-        diameter = float(zone.get("diameter") or 0.0)
-        if diameter <= 0:
-            continue
-        anchored_clipped = tuple(map(float, zone.get("bounds") or zone.get("primary_bounds") or ()))
-        fitted = tuple(map(float, zone.get("fitted_bounds") or zone.get("primary_bounds") or anchored_clipped))
-        anchored_unclipped = tuple(map(float, zone.get("anchored_bounds_unclipped") or anchored_clipped))
-        if len(fitted) != 4 or len(anchored_clipped) != 4 or len(anchored_unclipped) != 4:
-            continue
-
-        anchored_clipped_bars = [tuple(map(float, row[:4])) for row in zone.get("bars", []) or []]
-        no_anchor_clipped_bars = _trim_metric_bars(anchored_clipped_bars, fitted, axis)
-
-        coords: list[float] = []
-        for track_id in zone.get("track_ids", []) or []:
-            track = tracks.get(int(track_id))
-            if not track:
-                continue
-            value = track.get("x") if axis == "y" else track.get("y")
-            if value is not None:
-                coords.append(float(value))
-        if not coords:
-            coords = sorted({float(row[0] if axis == "y" else row[1]) for row in anchored_clipped_bars})
-        else:
-            coords = sorted(set(coords))
-
-        if axis == "y":
-            no_anchor_unclipped_bars = [(x, fitted[1], x, fitted[3]) for x in coords]
-            anchored_unclipped_bars = [(x, anchored_unclipped[1], x, anchored_unclipped[3]) for x in coords]
-        else:
-            no_anchor_unclipped_bars = [(fitted[0], y, fitted[2], y) for y in coords]
-            anchored_unclipped_bars = [(anchored_unclipped[0], y, anchored_unclipped[2], y) for y in coords]
-
-        masses = {
-            "without_anchorage_kg": _metric_bar_mass(no_anchor_clipped_bars, diameter, steel_density_kg_m3),
-            "with_anchorage_kg": _metric_bar_mass(anchored_clipped_bars, diameter, steel_density_kg_m3),
-            "without_anchorage_unclipped_kg": _metric_bar_mass(no_anchor_unclipped_bars, diameter, steel_density_kg_m3),
-            "with_anchorage_unclipped_kg": _metric_bar_mass(anchored_unclipped_bars, diameter, steel_density_kg_m3),
-        }
-        for key, value in masses.items():
-            totals[key] += value
-            additional[key] += value
-
-        zone.update({
-            "final_rectangle_without_anchorage": fitted,
-            "final_rectangle_with_anchorage": anchored_clipped,
-            "final_rectangle_without_anchorage_unclipped": fitted,
-            "final_rectangle_with_anchorage_unclipped": anchored_unclipped,
-            "bars_without_anchorage": no_anchor_clipped_bars,
-            "bars_with_anchorage": anchored_clipped_bars,
-            "bars_without_anchorage_unclipped": no_anchor_unclipped_bars,
-            "bars_with_anchorage_unclipped": anchored_unclipped_bars,
-            "zone_mass_without_anchorage_kg": masses["without_anchorage_kg"],
-            "zone_mass_with_anchorage_kg": masses["with_anchorage_kg"],
-            "zone_mass_without_anchorage_unclipped_kg": masses["without_anchorage_unclipped_kg"],
-            "zone_mass_with_anchorage_unclipped_kg": masses["with_anchorage_unclipped_kg"],
-        })
-
-    out["zones"] = zones
-    # Preserve exact canonical physical mass as a consistency guard.
-    canonical = bar_mass_kg(out.get("bars", []) or [], steel_density_kg_m3) if out.get("bars") else 0.0
-    totals["with_anchorage_kg"] = float(canonical)
-    out["mass_metrics"] = {
-        **{key: float(value) for key, value in totals.items()},
-        "anchorage_kg": float(totals["with_anchorage_kg"] - totals["without_anchorage_kg"]),
-        "anchorage_unclipped_kg": float(totals["with_anchorage_unclipped_kg"] - totals["without_anchorage_unclipped_kg"]),
-        "additional": {key: float(value) for key, value in additional.items()},
-        "background_clipped_kg": float(background_mass),
-    }
-    return out
-
-
 def _compatibility_zones(layout: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     fit_zones: list[dict[str, Any]] = []
     summary_zones: list[dict[str, Any]] = []
     for zone in layout.get("zones", []) or []:
-        if zone.get("background") or zone.get("class") is None:
+        if zone.get("background"):
             continue
         anchored_bounds = tuple(map(float, zone.get("final_rectangle_with_anchorage") or zone.get("bounds") or zone.get("primary_bounds") or ()))
         if len(anchored_bounds) != 4:
@@ -409,7 +290,7 @@ def _compatibility_zones(layout: Mapping[str, Any]) -> tuple[list[dict[str, Any]
         no_anchor_unclipped = tuple(map(float, zone.get("final_rectangle_without_anchorage_unclipped") or no_anchor_bounds))
         anchored_unclipped = tuple(map(float, zone.get("final_rectangle_with_anchorage_unclipped") or zone.get("anchored_bounds_unclipped") or anchored_bounds))
         primary = tuple(map(float, zone.get("primary_bounds") or no_anchor_bounds))
-        cls = int(zone["class"])
+        cls = int(zone["class"]) if zone.get("class") is not None else None
         bars = [tuple(map(float, row[:4])) for row in zone.get("bars_without_anchorage", zone.get("bars", [])) or []]
         anchored_bars = [tuple(map(float, row[:4])) for row in zone.get("bars_with_anchorage", zone.get("bars", [])) or []]
         bars_unclipped = [tuple(map(float, row[:4])) for row in zone.get("bars_without_anchorage_unclipped", bars) or []]
@@ -473,6 +354,8 @@ def to_compat_result(solution: Mapping[str, Any]) -> dict[str, Any]:
         "summary": {
             "mass": actual_mass,
             "mass_kg": actual_mass,
+            "mass_metrics_version": mass_metrics.get("schema_version"),
+            "mass_metrics_scope": mass_metrics.get("unclipped_scope"),
             "mass without anchorage": mass_metrics.get("without_anchorage_kg"),
             "mass with anchorage": mass_metrics.get("with_anchorage_kg", actual_mass),
             "mass without anchorage unclipped": mass_metrics.get("without_anchorage_unclipped_kg"),
@@ -1967,7 +1850,10 @@ class PipelineWorkflow:
         feasible = bool(layout.get("is_feasible"))
         density = float(params.get("steel_density_kg_m3", 7850.0))
         if feasible:
-            layout = augment_layout_mass_metrics(layout, steel_density_kg_m3=density)
+            layout = augment_layout_mass_metrics(
+                layout, steel_density_kg_m3=density,
+                anchor_factor=float(params.get("anchor_factor", 32.0)),
+            )
             mass = float(layout["mass_metrics"]["with_anchorage_kg"])
         else:
             mass = float("inf")
@@ -1998,13 +1884,39 @@ class PipelineWorkflow:
     def handle_layout_solution(self, job: PipelineJob) -> None:
         task_id = job.task_id
         overlay_id = payload_overlay_id(job.payload)
-        try:
-            candidate = self.store.load_candidate(task_id, str(job.payload["candidate_id"]), overlay_id=overlay_id)
-        except TypeError:
-            candidate = self.store.load_candidate(task_id, str(job.payload["candidate_id"]))
-        if candidate is None:
-            raise KeyError("candidate missing")
+        refresh_solution_id = job.payload.get("relayout_solution_id")
+        if refresh_solution_id:
+            saved = self.store.load_solution(task_id, str(refresh_solution_id), overlay_id=overlay_id)
+            if saved is None:
+                raise KeyError(f"saved solution missing: {refresh_solution_id}")
+            if str(saved.get("variant", "raw")) != payload_variant(job.payload):
+                raise ValueError("Контекст варианта не совпадает с сохранённым решением")
+            if int(saved.get("overlay_id", 0)) != overlay_id:
+                raise ValueError("Контекст overlay не совпадает с сохранённым решением")
+            if "anchored_boxes" not in saved:
+                raise ValueError("В решении нет anchored_boxes для повторного layout")
+            candidate = {key: value for key, value in saved.items() if key not in {
+                "bar_layout", "mass_metrics", "validation", "metadata", "actual_mass_kg",
+            }}
+        else:
+            try:
+                candidate = self.store.load_candidate(task_id, str(job.payload["candidate_id"]), overlay_id=overlay_id)
+            except TypeError:
+                candidate = self.store.load_candidate(task_id, str(job.payload["candidate_id"]))
+            if candidate is None:
+                raise KeyError("candidate missing")
+        # Saved solutions contain JSONB/GeoJSON, unlike freshly generated candidates.
+        from .postgres_store import restore_json_geometries
+        candidate = dict(candidate)
+        candidate["anchored_boxes"] = restore_json_geometries(candidate.get("anchored_boxes", []))
         solution = self._layout_candidate(task_id, candidate)
+        if refresh_solution_id:
+            solution["solution_id"] = str(refresh_solution_id)
+            solution["metadata"] = {
+                **dict(solution.get("metadata", {})),
+                "layout_refresh_id": job.payload.get("layout_refresh"),
+                "layout_refreshed_at": time.time(),
+            }
         variant = str(solution.get("variant", "raw"))
         self.store.save_solution(task_id, solution)
         solution_url = f"/v1/tasks/{task_id}/solutions/{solution['solution_id']}?overlay={overlay_id}"

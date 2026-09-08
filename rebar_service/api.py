@@ -174,6 +174,13 @@ async def _read_upload_bytes(file: UploadFile, *, label: str = "Input file") -> 
     return content
 
 
+async def _read_xlsx_file(file: UploadFile, *, label: str) -> bytes:
+    """Read and size-check an XLSX source; workbook parsing stays in the worker."""
+    if not (file.filename or "").lower().endswith(".xlsx"):
+        raise HTTPException(status_code=415, detail=f"{label} must be a .xlsx file")
+    return await _read_upload_bytes(file, label=label)
+
+
 async def _read_upload_input(file: UploadFile, *, dxf_only: bool = False) -> dict:
     content = await _read_upload_bytes(file)
     filename = file.filename or "input.dxf"
@@ -292,7 +299,7 @@ async def _finish_source_upload(
 @app.post("/v1/tasks/upload", response_model=TaskCreated)
 async def create_task_upload(
     config: Annotated[str | None, Form()] = None,
-    file: Annotated[UploadFile, File()] = ...,
+    file: UploadFile = File(...),
     start: bool = Query(True),
     smooth: bool = Query(False),
     scan_mode: str | None = Query(None),
@@ -311,9 +318,9 @@ async def create_task_upload(
 @app.post("/v1/tasks/tables_upload", response_model=TaskCreated)
 async def create_task_tables_upload(
     config: Annotated[str | None, Form()] = None,
-    nodes_file: Annotated[UploadFile, File()] = ...,
-    elements_file: Annotated[UploadFile, File()] = ...,
-    loads_file: Annotated[UploadFile, File()] = ...,
+    nodes_file: UploadFile = File(...),
+    elements_file: UploadFile = File(...),
+    loads_file: UploadFile = File(...),
     load_column: Annotated[int, Form(ge=1, le=4)] = 1,
     start: bool = Query(True),
     smooth: bool = Query(False),
@@ -344,7 +351,7 @@ async def create_task_tables_upload(
 @app.post("/v1/tasks/json_upload", response_model=TaskCreated)
 async def create_task_json_upload(
     config: Annotated[str | None, Form()] = None,
-    file: Annotated[UploadFile, File()] = ...,
+    file: UploadFile = File(...),
     start: bool = Query(True), smooth: bool = Query(False), scan_mode: str | None = Query(None),
     whole: bool | None = Query(None), component_result_top_k: int | None = Query(None, ge=1, le=100),
     validate_results: bool | None = Query(None),
@@ -362,7 +369,7 @@ async def create_task_json_upload(
 @app.post("/v1/tasks/pickle_upload", response_model=TaskCreated)
 async def create_task_pickle_upload(
     config: Annotated[str | None, Form()] = None,
-    file: Annotated[UploadFile, File()] = ...,
+    file: UploadFile = File(...),
     start: bool = Query(True), smooth: bool = Query(False), scan_mode: str | None = Query(None),
     whole: bool | None = Query(None), component_result_top_k: int | None = Query(None, ge=1, le=100),
     validate_results: bool | None = Query(None),
@@ -789,3 +796,9 @@ async def task_websocket(websocket: WebSocket, task_id: str, after: str = "0-0",
     finally:
         for task in tasks:
             task.cancel()
+
+
+# Documentation only: request/response contracts and runtime validation stay unchanged.
+from .api_docs_ru import install_russian_docs
+
+install_russian_docs(app)
