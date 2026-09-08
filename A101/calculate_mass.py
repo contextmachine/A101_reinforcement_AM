@@ -695,7 +695,8 @@ def resolve_rebar_config(
         effective_stock = [tuple(map(int, row)) for row in catalog_stock]
         source = "catalog_background"
     else:
-        effective_stock, effective_max = normalize_rebar_stock(stock)
+        effective_stock, inferred_max = normalize_rebar_stock(stock)
+        effective_max = max(effective_max, inferred_max)
         source = "user"
 
     loads = sorted({
