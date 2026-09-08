@@ -9,6 +9,8 @@ from .codec import sha256
 from .config import Settings
 from .jsonutil import dumps, loads
 
+class RedisLockBusy(TimeoutError):
+    """Redis lock уже удерживается другим процессом."""
 
 class RedisQueue:
     """Redis is intentionally limited to queue and worker-coordination state."""
@@ -63,7 +65,7 @@ class RedisQueue:
         deadline = time.monotonic() + timeout
         while not self.redis.set(key, token, nx=True, px=max(1000, int(timeout * 2000))):
             if time.monotonic() >= deadline:
-                raise TimeoutError(f"Не удалось получить Redis lock {name}")
+                raise RedisLockBusy(f"Не удалось получить Redis lock {name}")
             time.sleep(0.02)
         try:
             yield
@@ -171,33 +173,110 @@ class RedisQueue:
 
     def requeue_stale_jobs(self, grace_seconds: float = 10.0) -> int:
         recovered = 0
-        with self.lock("queue-reaper", timeout=2.0):
-            now = time.time()
-            for raw in self.redis.lrange(self.settings.processing_queue, 0, -1):
-                text_value = raw.decode() if isinstance(raw, bytes) else str(raw)
-                job = loads(text_value, None)
-                if not isinstance(job, dict):
-                    self.redis.lrem(self.settings.processing_queue, 1, raw)
-                    continue
-                job_id = str(job["job_id"])
-                if self.redis.exists(self.job_key(job_id) + ":lease"):
-                    continue
-                state = loads(self.redis.get(self.job_key(job_id)), {})
-                claimed_at = float(state.get("claimed_at", job.get("created_at", 0)))
-                if now - claimed_at < self.settings.job_lease_seconds + grace_seconds:
-                    continue
-                if state.get("state") in {"done", "cancelled", "discarded", "failed"}:
-                    self.redis.lrem(self.settings.processing_queue, 1, raw)
-                    self.redis.lrem(self.settings.workload_queue, 1, job_id)
-                    continue
-                self.redis.lrem(self.settings.processing_queue, 1, raw)
-                self.redis.rpush(self.settings.ready_queue, raw)
-                self.redis.set(
-                    self.job_key(job_id),
-                    dumps({**job, "state": "pending", "recovered_at": now}),
-                    ex=self.settings.queue_state_ttl_seconds,
-                )
-                recovered += 1
+
+        try:
+            with self.lock("queue-reaper", timeout=2.0):
+                now = time.time()
+
+                for raw in self.redis.lrange(
+                        self.settings.processing_queue,
+                        0,
+                        -1,
+                ):
+                    text_value = (
+                        raw.decode()
+                        if isinstance(raw, bytes)
+                        else str(raw)
+                    )
+
+                    job = loads(text_value, None)
+
+                    if not isinstance(job, dict):
+                        self.redis.lrem(
+                            self.settings.processing_queue,
+                            1,
+                            raw,
+                        )
+                        continue
+
+                    job_id = str(job["job_id"])
+
+                    # Job ещё обслуживается живым worker.
+                    if self.redis.exists(
+                            self.job_key(job_id) + ":lease"
+                    ):
+                        continue
+
+                    state = loads(
+                        self.redis.get(self.job_key(job_id)),
+                        {},
+                    )
+
+                    claimed_at = float(
+                        state.get(
+                            "claimed_at",
+                            job.get("created_at", 0),
+                        )
+                    )
+
+                    if (
+                            now - claimed_at
+                            < self.settings.job_lease_seconds
+                            + grace_seconds
+                    ):
+                        continue
+
+                    # Job уже имеет терминальное состояние.
+                    if state.get("state") in {
+                        "done",
+                        "cancelled",
+                        "discarded",
+                        "failed",
+                    }:
+                        self.redis.lrem(
+                            self.settings.processing_queue,
+                            1,
+                            raw,
+                        )
+                        self.redis.lrem(
+                            self.settings.workload_queue,
+                            1,
+                            job_id,
+                        )
+                        continue
+
+                    # Worker, который забрал job, исчез.
+                    # Возвращаем job в ready.
+                    self.redis.lrem(
+                        self.settings.processing_queue,
+                        1,
+                        raw,
+                    )
+
+                    self.redis.rpush(
+                        self.settings.ready_queue,
+                        raw,
+                    )
+
+                    self.redis.set(
+                        self.job_key(job_id),
+                        dumps(
+                            {
+                                **job,
+                                "state": "pending",
+                                "recovered_at": now,
+                            }
+                        ),
+                        ex=self.settings.queue_state_ttl_seconds,
+                    )
+
+                    recovered += 1
+
+        except RedisLockBusy:
+            # Другой worker уже выполняет queue reaper.
+            # Это нормальная ситуация при нескольких replicas.
+            return 0
+
         return recovered
 
     def acquire_task_slot(self, task_id: str, job_id: str, limit: int) -> bool:
