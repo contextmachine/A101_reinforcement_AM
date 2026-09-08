@@ -61,36 +61,72 @@ def test_resolve_rebar_config_uses_select_rebar_config_when_background_and_stock
     assert cfg["rebar_config_source"] == "catalog_auto"
 
 
-def test_resolve_rebar_config_normalizes_user_stock_and_overrides_max_layers(monkeypatch):
+def test_resolve_rebar_config_preserves_explicit_max_layers(monkeypatch):
     captured = {}
 
     def fake_make(loads, back_grid, stock, *, max_lay=2, **kwargs):
-        captured.update(back_grid=tuple(back_grid), stock=list(stock), max_lay=max_lay)
+        captured["max_lay"] = max_lay
         return {
             "load2cls": {float(x): 1 for x in loads},
             "recipes": {},
             "densities": {1: 10.0},
-            "diameters": {1: 18},
-            "steps": {1: 400},
+            "diameters": {1: 16},
+            "steps": {1: 300},
             "back_arm": 1.0,
         }
 
-    monkeypatch.setattr(cm, "make_rebar_classes", fake_make)
-
-    cfg = cm.resolve_rebar_config(
-        [{"load": 4.0}],
-        back_grid=(18, 300),
-        stock=[(18, 400), (18, 300), (18, 200), (18, 150), (18, 100)],
-        max_layers=99,
+    monkeypatch.setattr(
+        cm,
+        "make_rebar_classes",
+        fake_make,
     )
 
-    assert captured == {
-        "back_grid": (18, 300),
-        "stock": [(18, 400), (18, 300)],
-        "max_lay": 4,
-    }
-    assert cfg["max_layers"] == 4
-    assert cfg["rebar_config_source"] == "user"
+    cfg = cm.resolve_rebar_config(
+        [{"load": 19.0}],
+        back_grid=(16, 300),
+        stock=[
+            (16, 300),
+            (20, 150),
+            (20, 100),
+        ],
+        max_layers=2,
+    )
+
+    assert captured["max_lay"] == 2
+    assert cfg["max_layers"] == 2
+
+
+def test_two_16_300_layers_are_used_for_load_19():
+    cfg = cm.resolve_rebar_config(
+        [
+            {"load": 5.7},
+            {"load": 12.0},
+            {"load": 19.0},
+            {"load": 27.0},
+            {"load": 37.0},
+        ],
+        back_grid=(16, 300),
+        stock=[
+            (16, 300),
+            (20, 150),
+            (20, 100),
+        ],
+        max_layers=2,
+    )
+
+    cls_19 = cfg["load2cls"][19.0]
+    recipe = cfg["recipes"][cls_19]
+
+    assert len(recipe) == 2
+
+    assert [
+        (cfg["diameters"][cls], cfg["steps"][cls])
+        for cls in recipe
+    ] == [
+        (16, 300),
+        (16, 300),
+    ]
+
 
 
 def test_resolve_rebar_config_rejects_stock_without_background():
