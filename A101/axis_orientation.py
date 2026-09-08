@@ -153,14 +153,15 @@ def _orient_rectangle_item(item: Any, axis: str):
     if isinstance(item, Mapping):
         q = dict(item)
         for key in (
-            "bounds",
-            "original_bounds",
-            "fitted_bounds",
-            "anchored_bounds",
-            "primary_bounds",
-            "structural_bounds",
-            "final rectangle",
-            "final_rectangle",
+                "bounds",
+                "original_bounds",
+                "fitted_bounds",
+                "anchored_bounds",
+                "anchored_bounds_unclipped",
+                "primary_bounds",
+                "structural_bounds",
+                "final rectangle",
+                "final_rectangle",
         ):
             if q.get(key) is not None:
                 q[key] = _swap_bounds(q[key])
