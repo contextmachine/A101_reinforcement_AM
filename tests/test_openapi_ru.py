@@ -23,8 +23,8 @@ def test_swagger_documents_actual_smooth_defaults_and_no_prepare_endpoint():
     assert "/v1/tasks/{task_id}/components/prepare" not in paths
     def description(path):
         return next(p for p in paths[path]["get"]["parameters"] if p["name"] == "smooth")["description"]
-    assert "оба" in description("/v1/tasks/{task_id}/solutions")
-    assert "initial_variant" in description("/v1/tasks/{task_id}/results")
+    assert "сохранённый контекст" in description("/v1/tasks/{task_id}/solutions")
+    assert "Legacy-task" in description("/v1/tasks/{task_id}/results")
     assert "raw" in description("/v1/tasks/{task_id}/source-polygons")
 
 
@@ -68,3 +68,29 @@ def test_openapi_and_swagger_are_served_and_local_references_resolve():
             for value in node:
                 walk(value)
     walk(schema)
+
+
+def test_swagger_documents_scene_snapshot_overlay_selectors_and_new_solver_contract():
+    description = app.openapi()["info"]["description"]
+    assert "scene_id" in description
+    assert "PUT /v1/tasks" in description
+    assert "overlay=-1" in description
+    assert "[-3]" in description
+    assert "100" in description
+    assert "compact_zones" in description
+    assert "background_only" in description
+    assert "immutable" in description.lower() or "неизмен" in description.lower()
+
+
+def test_new_put_documentation_example_uses_real_nested_config():
+    from rebar_service.models import AnalysisTaskStart
+    example = app.openapi()["components"]["schemas"]["AnalysisTaskStart"]["examples"][0]
+    model = AnalysisTaskStart.model_validate(example)
+    assert model.axis == "x" and model.anchor_factor == 40
+    assert example["config"]["max_layers"] == 2
+
+
+def test_docs_do_not_claim_component_ids_change_with_overlay():
+    op = app.openapi()["paths"]["/v1/tasks/{task_id}/components"]["get"]
+    assert "Стабильные" in op["description"]
+    assert "может измениться" not in op["description"]
