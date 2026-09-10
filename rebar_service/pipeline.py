@@ -310,62 +310,6 @@ def choose_component_ns(requested: Sequence[int], max_useful_n: int, hard: bool 
     return (values, False) if values else ([1], True)
 
 
-def aggregate_local_n_requirements(
-    maxima: Mapping[int, int], totals: Sequence[int]
-) -> tuple[dict[int, list[int]], list[int]]:
-    """Return local N values that can participate in requested aggregate totals."""
-    normalized = {int(cid): int(max_n) for cid, max_n in maxima.items() if int(max_n) > 0}
-    requested = list(dict.fromkeys(int(total) for total in totals))
-    if not normalized:
-        return {}, requested
-
-    component_ids = sorted(normalized)
-    minimum_total = len(component_ids)
-    maximum_total = sum(normalized.values())
-    required: dict[int, set[int]] = {cid: set() for cid in component_ids}
-    unreachable: list[int] = []
-
-    for total in requested:
-        if total < minimum_total or total > maximum_total:
-            unreachable.append(total)
-            continue
-        for cid in component_ids:
-            others_max = maximum_total - normalized[cid]
-            others_min = minimum_total - 1
-            low = max(1, total - others_max)
-            high = min(normalized[cid], total - others_min)
-            if low > high:
-                unreachable.append(total)
-                break
-            required[cid].update(range(low, high + 1))
-
-    unreachable_set = set(unreachable)
-    if unreachable_set:
-        # Remove requirements contributed only by totals that were later classified unreachable.
-        required = {cid: set() for cid in component_ids}
-        for total in requested:
-            if total in unreachable_set:
-                continue
-            for cid in component_ids:
-                others_max = maximum_total - normalized[cid]
-                others_min = minimum_total - 1
-                low = max(1, total - others_max)
-                high = min(normalized[cid], total - others_min)
-                required[cid].update(range(low, high + 1))
-
-    return (
-        {cid: edge_to_middle_order(sorted(values)) for cid, values in required.items()},
-        [total for total in requested if total in unreachable_set],
-    )
-
-
-def aggregate_local_n_requirements_for_total(
-    maxima: Mapping[int, int], total: int
-) -> tuple[dict[int, list[int]], bool]:
-    plans, unreachable = aggregate_local_n_requirements(maxima, [int(total)])
-    return plans, bool(unreachable)
-
-
 def component_public_info(component: Mapping[str, Any], max_useful_n: int | None = None, state: str = "created") -> dict[str, Any]:
     return {
         "id": int(component.get("id", 0)),
@@ -527,7 +471,9 @@ class PipelineWorkflow:
         return [int(n) for n in meta.get("requested_n", [1])]
 
     def _is_n_cancelled(self, task_id: str, n: int, variant: str) -> bool:
-        method = self.store.is_n_cancelled
+        method = getattr(self.store, "is_n_cancelled", None)
+        if not callable(method):
+            return False
         try:
             return bool(method(task_id, int(n), variant=variant))
         except TypeError:
@@ -987,9 +933,40 @@ class PipelineWorkflow:
             "feasible": feasible, "planned_n": plan, "variant": variant,
             "smooth": variant_is_smooth(variant),
         })
-        self._maybe_complete_analysis(
-            task_id, variant, bool(job.payload.get("analysis_auto_solve", True))
-        )
+        analysis_auto_solve = bool(job.payload.get("analysis_auto_solve", True))
+        if feasible and analysis_auto_solve and plan:
+            self._schedule_plan(task_id, cid, plan, False, whole=False, variant=variant)
+
+        # Direct whole-field max-N for scene tasks is the sum of real-component
+        # maxima. If the whole problem was prepared before this component bound
+        # became ready, let the last arriving component wake/finalize it.
+        meta = self.store.get_meta(task_id) or {}
+        scene_task = bool(meta.get("scene_id") and str(meta.get("scene_id")) != str(task_id))
+        selection = [int(x) for x in (meta.get("component_selection") or ([-2] if meta.get("whole") else [-3]))]
+        if scene_task and selection in ([-1], [-2]):
+            all_real = self.real_component_ids(
+                task_id, variant=variant, overlay_id=self._current_overlay_id()
+            )
+            if len(all_real) > 1:
+                whole_record = self._variant_call(
+                    self.store.load_component, task_id, WHOLE_COMPONENT_KEY,
+                    variant=variant, overlay_id=self._current_overlay_id(),
+                ) or {}
+                if str(whole_record.get("max_n_state", "")) in {"queued", "waiting_components"}:
+                    whole_auto_solve = bool(whole_record.get("analysis_auto_solve", not bool(meta.get("manual_mode", False))))
+                    self.handle_compute_max_n_whole(PipelineJob(
+                        JobKind.compute_max_n_whole.value,
+                        task_id,
+                        {
+                            "component_id": WHOLE_COMPONENT_KEY,
+                            "variant": variant,
+                            "smooth": variant_is_smooth(variant),
+                            "analysis_auto_solve": whole_auto_solve,
+                            "overlay_id": self._current_overlay_id(),
+                        },
+                        generation=self.store.generation(task_id),
+                    ))
+        self._maybe_complete_analysis(task_id, variant, analysis_auto_solve)
 
     def _single_component_frontier(
         self, task_id: str, component_id: Any, source: str = "components", *, variant: str = "raw"
@@ -1418,6 +1395,7 @@ class PipelineWorkflow:
             "component": component, "state": "max_n_queued", "plan": [], "force_single_box": False,
             "max_useful_n": None, "max_n_state": "queued", "bounds": prepared["bounds"],
             "info": component_public_info(component, None, "max_n_queued"),
+            "analysis_auto_solve": bool(job.payload.get("analysis_auto_solve", True)),
             "variant": variant, "smooth": variant_is_smooth(variant),
         }
         self._variant_call(self.store.save_component, task_id, "whole", record, variant=variant)
@@ -1432,28 +1410,116 @@ class PipelineWorkflow:
     def handle_compute_max_n_whole(self, job: PipelineJob) -> None:
         task_id = job.task_id
         variant = payload_variant(job.payload)
-        result = self._compute_exact_max_n(task_id, "whole", variant=variant)
-        record = self._variant_call(self.store.load_component, task_id, "whole", variant=variant) or {}
-        feasible = bool(result.get("feasible"))
-        max_n = int(result.get("max_useful_n", 0) or 0) if feasible else 0
-        requested = self._requested_ns(task_id, variant, self._current_overlay_id())
-        plan = edge_to_middle_order(n for n in requested if 1 <= int(n) <= min(max_n, SOLVER_HARD_MAX_N))
+        overlay_id = self._current_overlay_id()
+        record = self._variant_call(
+            self.store.load_component, task_id, "whole", variant=variant, overlay_id=overlay_id
+        ) or {}
+        get_meta = getattr(self.store, "get_meta", None)
+        meta = (get_meta(task_id) or {}) if callable(get_meta) else {}
+        scene_task = (
+            bool(meta.get("scene_id") and str(meta.get("scene_id")) != str(task_id))
+            and callable(getattr(self.store, "component_ids", None))
+        )
+
+        if scene_task:
+            # For immutable scene-backed tasks, direct whole-field N is not bounded
+            # by the number of disconnected components and is not estimated from
+            # a separate whole mask-cover MILP. Its useful upper bound is the sum
+            # of real-component maxima. Therefore N=1 is always eligible to be
+            # attempted whenever there is positive demand, even with 30+ components.
+            if str(record.get("max_n_state")) == "ready" and record.get("max_n_source") == "component_sum":
+                return
+            component_ids = self.real_component_ids(task_id, variant=variant, overlay_id=overlay_id)
+            component_maxima: dict[int, int] = {}
+            waiting = False
+            structural_failure = False
+            for cid in component_ids:
+                component_record = self._variant_call(
+                    self.store.load_component, task_id, cid, variant=variant, overlay_id=overlay_id
+                ) or {}
+                state = str(component_record.get("max_n_state", ""))
+                raw_max = component_record.get("max_useful_n")
+                if state == "infeasible":
+                    structural_failure = True
+                    break
+                if state != "ready" or raw_max is None:
+                    waiting = True
+                    break
+                value = int(raw_max)
+                if value <= 0:
+                    structural_failure = True
+                    break
+                component_maxima[int(cid)] = value
+
+            if waiting:
+                record.update(
+                    state="max_n_waiting", max_n_state="waiting_components",
+                    max_useful_n=None, max_n_source="component_sum",
+                    component_maxima=component_maxima,
+                )
+                self._variant_call(
+                    self.store.save_component, task_id, "whole", record,
+                    variant=variant, overlay_id=overlay_id,
+                )
+                return
+
+            if not component_ids:
+                feasible = False
+                max_n = None
+                result = {
+                    "feasible": False, "max_useful_n": None,
+                    "reason": "no_real_components", "component_maxima": {},
+                }
+            elif structural_failure or len(component_maxima) != len(component_ids):
+                feasible = False
+                max_n = None
+                result = {
+                    "feasible": False, "max_useful_n": None,
+                    "reason": "component_max_n_unavailable",
+                    "component_maxima": component_maxima,
+                }
+            else:
+                max_n = sum(component_maxima.values())
+                feasible = max_n > 0
+                result = {
+                    "feasible": feasible,
+                    "max_useful_n": max_n if feasible else None,
+                    "matrix_max_useful_n": max_n if feasible else None,
+                    "reason": "sum_component_maxima",
+                    "component_maxima": component_maxima,
+                }
+        else:
+            result = self._compute_exact_max_n(task_id, "whole", variant=variant)
+            feasible = bool(result.get("feasible")) and int(result.get("max_useful_n", 0) or 0) > 0
+            max_n = int(result.get("max_useful_n")) if feasible else None
+
+        requested = self._requested_ns(task_id, variant, overlay_id)
+        plan = edge_to_middle_order(
+            n for n in requested if max_n is not None and 1 <= int(n) <= min(max_n, SOLVER_HARD_MAX_N)
+        )
+        result = {**dict(result), "max_useful_n": max_n}
         record.update(
             state="prepared" if feasible else "max_n_infeasible",
             max_n_state="ready" if feasible else "infeasible",
             max_useful_n=max_n, max_n_milp=result, plan=plan, force_single_box=False,
+            max_n_source="component_sum" if scene_task else "whole_matrix",
+            component_maxima=result.get("component_maxima"),
             info=component_public_info(record.get("component", {}), max_n, "prepared" if feasible else "infeasible"),
             variant=variant, smooth=variant_is_smooth(variant),
         )
-        self._variant_call(self.store.save_component, task_id, "whole", record, variant=variant)
+        self._variant_call(
+            self.store.save_component, task_id, "whole", record, variant=variant, overlay_id=overlay_id
+        )
         self._publish(task_id, {
             "type": "whole_max_n_ready", "component_id": "whole", "max_useful_n": max_n,
             "feasible": feasible, "planned_n": plan, "variant": variant,
-            "smooth": variant_is_smooth(variant),
+            "smooth": variant_is_smooth(variant), "overlay_id": overlay_id,
+            "max_n_source": record.get("max_n_source"),
         })
-        self._maybe_complete_analysis(
-            task_id, variant, bool(job.payload.get("analysis_auto_solve", True))
-        )
+        analysis_auto_solve = bool(record.get("analysis_auto_solve", job.payload.get("analysis_auto_solve", True)))
+        if feasible and analysis_auto_solve and plan:
+            self._schedule_plan(task_id, WHOLE_COMPONENT_KEY, plan, False, whole=True, variant=variant)
+        self._maybe_complete_analysis(task_id, variant, analysis_auto_solve)
 
     def handle_solve_whole(self, job: PipelineJob) -> None:
         from A101.reinforcement_components import solve_component_frontier
@@ -1675,7 +1741,9 @@ class PipelineWorkflow:
 
     def _is_n_cancelled(self, task_id: str, n: int, variant: str, overlay_id: int | None = None) -> bool:
         selected_overlay = self._current_overlay_id() if overlay_id is None else normalize_overlay_id(overlay_id)
-        method = self.store.is_n_cancelled
+        method = getattr(self.store, "is_n_cancelled", None)
+        if not callable(method):
+            return False
         try:
             return bool(method(task_id, int(n), variant=variant, overlay_id=selected_overlay))
         except TypeError:
@@ -1816,6 +1884,23 @@ class PipelineWorkflow:
             if str(cid) not in {WHOLE_COMPONENT_KEY, str(WHOLE_COMPONENT_ID)}
         )
 
+    def selected_real_component_ids(
+        self, task_id: str, *, variant: str = "raw", overlay_id: int | None = 0
+    ) -> list[int]:
+        """Return real component ids selected for solver work in this immutable task."""
+        all_real = self.real_component_ids(task_id, variant=variant, overlay_id=overlay_id)
+        meta = self.store.get_meta(task_id) or {}
+        selection = [int(x) for x in (meta.get("component_selection") or ([-2] if meta.get("whole") else [-3]))]
+        if selection in ([-2], [-3]):
+            return all_real
+        if selection == [-1]:
+            # With a single real component, whole-field solve is exactly the
+            # same computational object. Reuse component 0 instead of
+            # preparing/solving a duplicate stored ``whole`` problem.
+            return all_real if len(all_real) == 1 else []
+        wanted = {value for value in selection if value >= 0}
+        return [cid for cid in all_real if cid in wanted]
+
     def aggregate_component_info(
         self, task_id: str, *, variant: str = "raw", overlay_id: int | None = 0
     ) -> dict[str, Any]:
@@ -1907,7 +1992,9 @@ class PipelineWorkflow:
             for total, rows in combined.items() if rows
         }
 
-    def aggregate_requested(self, task_id: str) -> bool:
+    def aggregate_requested(
+        self, task_id: str, *, variant: str = "raw", overlay_id: int | None = 0
+    ) -> bool:
         get_meta = getattr(self.store, "get_meta", None)
         if not callable(get_meta):
             # Pre-scene/legacy stores always combined component frontiers downstream.
@@ -1917,12 +2004,16 @@ class PipelineWorkflow:
         if not scene_task:
             return True
         selection = [int(x) for x in (meta.get("component_selection") or ([-2] if meta.get("whole") else [-3]))]
-        return selection in ([-1], [-2])
+        if selection == [-1]:
+            return len(self.real_component_ids(task_id, variant=variant, overlay_id=overlay_id)) == 1
+        if selection in ([-2], [-3]):
+            return True
+        return len([value for value in selection if value >= 0]) > 1
 
     def schedule_requested_for_all(
         self, task_id: str, values: Sequence[int], *, smooth: bool = False, overlay_id: int | None = 0, register_request: bool = True
     ) -> dict[str, list[int]]:
-        """Schedule real-component solves; virtual aggregate totals expand into local N ranges."""
+        """Schedule user-supplied N as local N for each selected solver unit."""
         variant = analysis_variant(smooth)
         selected_overlay = normalize_overlay_id(overlay_id)
         requested = list(dict.fromkeys(int(n) for n in values))
@@ -1949,101 +2040,90 @@ class PipelineWorkflow:
                 ensure(task_id, variant=variant, overlay_id=selected_overlay)
             state = state_method(task_id, variant=variant, overlay_id=selected_overlay) or {}
             if str(state.get("preparation_state", "stored")) != "prepared":
-                # New scene-backed tasks already build components synchronously; while max-N jobs
-                # finish we only register the request and wait instead of enqueueing legacy prepare_field.
                 scene_task = bool(meta.get("scene_id") and str(meta.get("scene_id")) != str(task_id))
                 load_field = getattr(self.store, "load_field", None)
                 field = (
                     self._variant_call(load_field, task_id, variant=variant, overlay_id=selected_overlay)
                     if callable(load_field) else None
                 )
-                if not field and scene_task:
-                    self.prepare_task_components(
-                        task_id, auto_solve=True, smooth=smooth, overlay_id=selected_overlay
-                    )
-                elif not field:
-                    self.prepare_task(task_id, auto_solve=True, smooth=smooth, overlay_id=selected_overlay)
-                return {"preparing": requested}
+                if not field:
+                    if scene_task:
+                        self.prepare_task_components(
+                            task_id, auto_solve=True, smooth=smooth, overlay_id=selected_overlay
+                        )
+                    else:
+                        self.prepare_task(task_id, auto_solve=True, smooth=smooth, overlay_id=selected_overlay)
+                    return {"preparing": requested}
+                if not scene_task:
+                    # Historical tasks keep their old all-at-once preparation gate.
+                    return {"preparing": requested}
+                # Scene-backed tasks may already have some max-N bounds while
+                # other selected units are still preparing. Schedule every
+                # ready unit now; late units will read the accumulated local-N
+                # request when their max-N calculation finishes.
 
         context = getattr(self, "_overlay_context", None)
         token = context.set(selected_overlay) if context is not None else None
         try:
-            component_ids = self.real_component_ids(
+            selection = [int(x) for x in (meta.get("component_selection") or ([-2] if meta.get("whole") else [-3]))]
+            all_real = self.real_component_ids(
                 task_id, variant=variant, overlay_id=selected_overlay
             )
-            maxima: dict[int, int] = {}
-            for cid in component_ids:
+            selected_real = self.selected_real_component_ids(
+                task_id, variant=variant, overlay_id=selected_overlay
+            )
+            # A single component aliases whole and must never be solved twice.
+            whole_requested = selection in ([-1], [-2]) and len(all_real) != 1
+            hard_scan = str(meta.get("scan_mode", "requested")) == "hard"
+
+            unit_plans: dict[Any, list[int]] = {}
+            unit_kinds: dict[Any, JobKind] = {}
+            for cid in selected_real:
                 record = self._variant_call(
                     self.store.load_component, task_id, cid, variant=variant, overlay_id=selected_overlay
                 ) or {}
                 raw_max = record.get("max_useful_n")
                 if raw_max is None or int(raw_max) <= 0 or str(record.get("max_n_state", "ready")) != "ready":
                     continue
-                maxima[cid] = min(int(raw_max), SOLVER_HARD_MAX_N)
+                max_n = min(int(raw_max), hard_max_n)
+                plan = list(range(1, max_n + 1)) if hard_scan else [n for n in requested if n <= max_n]
+                if plan:
+                    unit_plans[cid] = edge_to_middle_order(plan)
+                    unit_kinds[cid] = JobKind.solve_component
 
-            selection = [int(x) for x in (meta.get("component_selection") or ([-2] if meta.get("whole") else [-3]))]
-            aggregate_requested = selection in ([-1], [-2])
-            direct_component_results = selection != [-1]
-            unit_sets: dict[int, set[int]] = {cid: set() for cid in component_ids}
+            if whole_requested:
+                whole = self._variant_call(
+                    self.store.load_component, task_id, WHOLE_COMPONENT_KEY, variant=variant, overlay_id=selected_overlay
+                ) or {}
+                raw_max = whole.get("max_useful_n")
+                if raw_max is not None and int(raw_max) > 0 and str(whole.get("max_n_state", "ready")) == "ready":
+                    max_n = min(int(raw_max), hard_max_n)
+                    plan = list(range(1, max_n + 1)) if hard_scan else [n for n in requested if n <= max_n]
+                    if plan:
+                        unit_plans[WHOLE_COMPONENT_KEY] = edge_to_middle_order(plan)
+                        unit_kinds[WHOLE_COMPONENT_KEY] = JobKind.solve_whole
 
-            if direct_component_results:
-                for cid, max_n in maxima.items():
-                    unit_sets[cid].update(n for n in requested if 1 <= n <= max_n)
-
-            unreachable: list[int] = []
-            if aggregate_requested and component_ids:
-                if len(maxima) == len(component_ids):
-                    aggregate_plans, unreachable = aggregate_local_n_requirements(maxima, requested)
-                    for cid, plan in aggregate_plans.items():
-                        unit_sets[cid].update(plan)
-                else:
-                    return {"preparing": requested}
-            elif aggregate_requested and not component_ids:
-                unreachable = list(requested)
-
-            if unreachable:
-                for total in unreachable:
-                    detail = {
-                        "reason": "aggregate_bounds",
-                        "detail": "Requested aggregate N cannot be composed from real component bounds",
-                        "component_maxima": maxima,
-                    }
-                    try:
-                        self.store.set_n_status(
-                            task_id, total, "infeasible", variant=variant, overlay_id=selected_overlay, **detail
-                        )
-                    except TypeError:
-                        self.store.set_n_status(task_id, total, "infeasible", **detail)
-                    self._publish(task_id, {
-                        "type": "n_finished", "n": total, "status": "infeasible",
-                        "variant": variant, "smooth": smooth, "overlay_id": selected_overlay, **detail,
-                    })
-
-            unit_plans = {
-                cid: edge_to_middle_order(sorted(values))
-                for cid, values in unit_sets.items() if values
-            }
-            completed: dict[int, set[int]] = {}
+            completed: dict[Any, set[int]] = {}
             read_done = getattr(self.store, "completed_frontier_ns", None)
             if callable(read_done):
-                completed = {
-                    cid: self._variant_call(
-                        read_done, task_id, cid, variant=variant, overlay_id=selected_overlay
+                for unit in unit_plans:
+                    completed[unit] = self._variant_call(
+                        read_done, task_id, unit, variant=variant, overlay_id=selected_overlay
                     )
-                    for cid in unit_plans
-                }
+
             for unit, n in round_robin_unit_plans(unit_plans):
-                cid = int(unit)
-                if n in completed.get(cid, set()):
+                if n in completed.get(unit, set()):
                     continue
                 if self._is_n_cancelled(task_id, n, variant, selected_overlay):
                     continue
+                whole = unit == WHOLE_COMPONENT_KEY
                 self.enqueue(
-                    JobKind.solve_component,
-                    task_id,
+                    unit_kinds[unit], task_id,
                     {
-                        "component_id": cid, "n": int(n), "force_single_box": False,
-                        "source": "components", "variant": variant, "smooth": smooth,
+                        "component_id": WHOLE_COMPONENT_KEY if whole else int(unit),
+                        "n": int(n), "force_single_box": False,
+                        "source": "whole" if whole else "components",
+                        "variant": variant, "smooth": smooth,
                     },
                 )
             return {str(unit): list(plan) for unit, plan in unit_plans.items()}
@@ -2080,7 +2160,8 @@ class PipelineWorkflow:
 
             # Historical tasks persisted a real ``whole`` component and may still
             # have old clients/jobs addressing component -1. Keep that contract
-            # intact. Scene-backed tasks below use -1 only as a virtual aggregate.
+            # intact. For scene-backed tasks, scheduling -1 means direct whole-field
+            # local N; reading -1 metadata remains the virtual aggregate summary.
             if not immutable:
                 storage_id = component_storage_id(component_id)
                 record = self._variant_call(
@@ -2125,43 +2206,64 @@ class PipelineWorkflow:
             component_ids = self.real_component_ids(task_id, variant=variant, overlay_id=selected_overlay)
 
             if int(component_id) == WHOLE_COMPONENT_ID:
-                if immutable and selection not in ([-1], [-2]):
-                    raise ValueError("Aggregate -1 не входит в неизменяемый набор задачи; создайте новый task")
+                if selection not in ([-1], [-2]):
+                    raise ValueError("Whole -1 не входит в неизменяемый набор задачи; создайте новый task")
                 if not component_ids:
                     raise ValueError("Расчетные компоненты отсутствуют")
-                maxima: dict[int, int] = {}
-                for cid in component_ids:
+
+                # One real component is the whole field already; never solve it twice.
+                if len(component_ids) == 1:
+                    cid = int(component_ids[0])
                     record = self._variant_call(
                         self.store.load_component, task_id, cid, variant=variant, overlay_id=selected_overlay
                     ) or {}
                     raw_max = record.get("max_useful_n")
                     if raw_max is None or int(raw_max) <= 0 or str(record.get("max_n_state", "ready")) != "ready":
                         raise ValueError(f"Компонента {cid} не имеет подготовленного допустимого max N")
-                    maxima[cid] = min(int(raw_max), SOLVER_HARD_MAX_N)
-
-                plans, unreachable = aggregate_local_n_requirements(maxima, requested)
-                if unreachable:
-                    aggregate_max = sum(maxima.values())
-                    aggregate_min = len(maxima)
-                    raise ValueError(
-                        f"aggregate n вне допустимого диапазона {aggregate_min}..{aggregate_max}: {unreachable}"
-                    )
-                completed = {}
-                read_done = getattr(self.store, "completed_frontier_ns", None)
-                if callable(read_done):
-                    completed = {
-                        cid: self._variant_call(
+                    max_n = min(int(raw_max), hard_max_n)
+                    invalid = [n for n in requested if n > max_n]
+                    if invalid:
+                        raise ValueError(f"n вне допустимого диапазона 1..{max_n}: {invalid}")
+                    completed = set()
+                    read_done = getattr(self.store, "completed_frontier_ns", None)
+                    if callable(read_done):
+                        completed = self._variant_call(
                             read_done, task_id, cid, variant=variant, overlay_id=selected_overlay
                         )
-                        for cid in plans
-                    }
-                for unit, n in round_robin_unit_plans(plans):
-                    cid = int(unit)
-                    if n in completed.get(cid, set()):
+                    for n in requested:
+                        if n in completed or self._is_n_cancelled(task_id, n, variant, selected_overlay):
+                            continue
+                        self.enqueue(JobKind.solve_component, task_id, {
+                            "component_id": cid, "n": int(n), "force_single_box": False,
+                            "source": "components", "variant": variant, "smooth": smooth,
+                        })
+                    return requested
+
+                # With multiple real components, -1 is a separate direct whole-field
+                # solver unit. User-supplied N remains local N for that unit.
+                whole = self._variant_call(
+                    self.store.load_component, task_id, WHOLE_COMPONENT_KEY,
+                    variant=variant, overlay_id=selected_overlay
+                ) or {}
+                raw_max = whole.get("max_useful_n")
+                if raw_max is None or int(raw_max) <= 0 or str(whole.get("max_n_state", "ready")) != "ready":
+                    raise ValueError("Whole-поле не имеет подготовленного допустимого max N")
+                max_n = min(int(raw_max), hard_max_n)
+                invalid = [n for n in requested if n > max_n]
+                if invalid:
+                    raise ValueError(f"n вне допустимого диапазона 1..{max_n}: {invalid}")
+                completed = set()
+                read_done = getattr(self.store, "completed_frontier_ns", None)
+                if callable(read_done):
+                    completed = self._variant_call(
+                        read_done, task_id, WHOLE_COMPONENT_KEY, variant=variant, overlay_id=selected_overlay
+                    )
+                for n in requested:
+                    if n in completed or self._is_n_cancelled(task_id, n, variant, selected_overlay):
                         continue
-                    self.enqueue(JobKind.solve_component, task_id, {
-                        "component_id": cid, "n": int(n), "force_single_box": False,
-                        "source": "components", "variant": variant, "smooth": smooth,
+                    self.enqueue(JobKind.solve_whole, task_id, {
+                        "component_id": WHOLE_COMPONENT_KEY, "n": int(n), "force_single_box": False,
+                        "source": "whole", "variant": variant, "smooth": smooth,
                     })
                 return requested
 
@@ -2350,51 +2452,96 @@ class PipelineWorkflow:
             "decomposition": split, "field_geometry": field_geometry,
             "variant": variant, "smooth": smooth, "overlay_id": overlay_id,
         }
-        components = list(split.get("components", []))
+        all_components = list(split.get("components", []))
         selection = [int(x) for x in (meta_context.get("component_selection") or ([-2] if meta_context.get("whole") else [-3]))]
+        available = {int(component["id"]) for component in all_components}
+        if task_scoped_components and selection and selection[0] >= 0:
+            missing = sorted(set(selection) - available)
+            if missing:
+                raise ValueError(f"Unknown component ids: {missing}")
+
         if task_scoped_components:
-            available = {int(component["id"]) for component in components}
-            if selection and selection[0] >= 0:
-                missing = sorted(set(selection) - available)
-                if missing:
-                    raise ValueError(f"Unknown component ids: {missing}")
-                allowed = set(selection)
-                components = [component for component in components if int(component["id"]) in allowed]
-            # -1 is a virtual aggregate: it needs the real components, not a separate whole geometry.
-            # -2/-3 likewise keep all real components; publication/aggregation is decided later.
-            prepare_whole = False
-            field["aggregate_requested"] = selection in ([-1], [-2])
-            field["expected_solver_units"] = [int(c["id"]) for c in components]
+            single_whole_alias = len(available) == 1 and selection in ([-1], [-2])
+            if selection in ([-2], [-3]) or single_whole_alias:
+                selected_ids = set(available)
+            elif selection == [-1]:
+                selected_ids = set()
+            else:
+                selected_ids = {value for value in selection if value >= 0}
+            prepare_whole = selection in ([-1], [-2]) and bool(available) and not single_whole_alias
+            if single_whole_alias:
+                field["whole_alias_component_id"] = next(iter(available))
         else:
             if selection == [-1]:
-                components = []
+                selected_ids = set()
             elif selection and selection[0] >= 0:
-                allowed = set(selection)
-                components = [component for component in components if int(component["id"]) in allowed]
+                selected_ids = {value for value in selection if value >= 0}
+            else:
+                selected_ids = set(available)
             prepare_whole = selection in ([-1], [-2])
-            field["expected_solver_units"] = [int(c["id"]) for c in components] + (["whole"] if prepare_whole else [])
-        split["components"] = components
+
+        field["aggregate_requested"] = task_scoped_components and (
+            selection in ([-2], [-3]) or len(selected_ids) > 1
+            or (selection == [-1] and len(selected_ids) == 1)
+        )
+        # Direct whole-field solve uses the sum of real-component max-N values as
+        # its upper bound. For [-1] with multiple components we therefore prepare
+        # component problems/max-N as bound-only helpers, but never schedule their
+        # solve_component jobs.
+        bound_only_ids = (
+            set(available)
+            if task_scoped_components and selection == [-1] and prepare_whole
+            else set()
+        )
+        field["whole_bound_component_ids"] = sorted(bound_only_ids)
+        field["expected_solver_units"] = sorted(selected_ids) + ([WHOLE_COMPONENT_KEY] if prepare_whole else [])
+        # Preserve the full task decomposition for inspection even when only whole or a subset is solved.
+        split["components"] = all_components
         self._variant_call(self.store.save_field, task_id, field, variant=variant)
-        for component in components:
+
+        for component in all_components:
             cid = int(component["id"])
+            selected = cid in selected_ids
+            bound_only = cid in bound_only_ids
+            needs_max_n = selected or bound_only
             self._variant_call(
                 self.store.save_component, task_id, cid,
-                {"component": component, "info": component_public_info(component), "state": "queued", "variant": variant,
-                 "overlay_id": overlay_id},
+                {
+                    "component": component,
+                    "info": component_public_info(component, None, "queued" if needs_max_n else "available"),
+                    "state": "queued" if needs_max_n else "available",
+                    "max_n_state": "queued" if needs_max_n else "not_requested",
+                    "max_useful_n": None,
+                    "variant": variant,
+                    "overlay_id": overlay_id,
+                },
                 variant=variant,
             )
-            payload = {"component_id": cid, "auto_solve": False, "analysis_auto_solve": auto_solve, "variant": variant, "smooth": smooth}
-            self.enqueue(JobKind.prepare_component, task_id, payload)
+            if needs_max_n:
+                payload = {
+                    "component_id": cid, "auto_solve": False,
+                    # Bound-only component preparation for [-1] must never create
+                    # local component solutions; it exists solely to determine the
+                    # whole-field upper N bound.
+                    "analysis_auto_solve": auto_solve if selected else False,
+                    "variant": variant, "smooth": smooth,
+                }
+                if bound_only:
+                    payload["whole_bound_only"] = True
+                self.enqueue(JobKind.prepare_component, task_id, payload)
 
-        meta = self.store.get_meta(task_id) or {}
-        selection = [int(x) for x in (meta.get("component_selection") or ([-2] if meta.get("whole") else [-3]))]
-        prepare_whole = (selection in ([-1], [-2])) and not task_scoped_components
         if prepare_whole:
-            self.enqueue(JobKind.prepare_whole, task_id, {"auto_solve": False, "analysis_auto_solve": auto_solve, "variant": variant, "smooth": smooth})
+            self.enqueue(
+                JobKind.prepare_whole, task_id,
+                {
+                    "auto_solve": False, "analysis_auto_solve": auto_solve,
+                    "variant": variant, "smooth": smooth,
+                },
+            )
 
         self.store.patch_meta(task_id, state="components_ready")
         self._publish(task_id, {
-            "type": "components_ready", "components": [component_public_info(c) for c in components],
+            "type": "components_ready", "components": [component_public_info(c) for c in all_components],
             "active_indices": split.get("active_indices", []),
             "background_only_indices": split.get("background_only_indices", []),
             "removed_indices": split.get("removed_indices", []),
@@ -2403,7 +2550,7 @@ class PipelineWorkflow:
         })
 
         # Empty analyses have no component prepare jobs that could close preparation.
-        if not components and not prepare_whole:
+        if not all_components and not prepare_whole:
             if str(meta_context.get("scene_id") or task_id) != task_id:
                 self._maybe_complete_analysis(task_id, variant, auto_solve)
             else:
@@ -2457,7 +2604,7 @@ class PipelineWorkflow:
         })
         # Local infeasible is a normal frontier outcome. Aggregate recomputation is needed
         # only when the immutable task actually requested the virtual whole view.
-        if not self.aggregate_requested(task_id):
+        if not self.aggregate_requested(task_id, variant=variant, overlay_id=overlay_id):
             return
         version = self._variant_call(self.store.frontier_version, task_id, variant=variant)
         self.enqueue(
@@ -2466,40 +2613,13 @@ class PipelineWorkflow:
             dedupe_key=f"combine:{task_id}:{variant}:{overlay_id}:{self.store.generation(task_id)}:{version}",
         )
 
-    def _set_aggregate_n_infeasible(
-        self, task_id: str, total_n: int, *, variant: str, overlay_id: int, reason: str, detail: str
-    ) -> None:
-        statuses_method = getattr(self.store, "get_n_statuses", None)
-        if callable(statuses_method):
-            try:
-                statuses = statuses_method(task_id, variant=variant, overlay_id=overlay_id)
-            except TypeError:
-                try:
-                    statuses = statuses_method(task_id, variant=variant)
-                except TypeError:
-                    statuses = statuses_method(task_id)
-            row = (statuses or {}).get(str(int(total_n))) or (statuses or {}).get(int(total_n))
-            if row and str(row.get("status")) in {"infeasible", "feasible", "optimal"}:
-                return
-        payload = {"reason": reason, "detail": detail}
-        try:
-            self.store.set_n_status(
-                task_id, int(total_n), "infeasible", variant=variant, overlay_id=overlay_id, **payload
-            )
-        except TypeError:
-            self.store.set_n_status(task_id, int(total_n), "infeasible", **payload)
-        self._publish(task_id, {
-            "type": "n_finished", "n": int(total_n), "status": "infeasible",
-            "variant": variant, "smooth": variant_is_smooth(variant), "overlay_id": overlay_id, **payload,
-        })
-
     def handle_combine_frontiers(self, job: PipelineJob) -> None:
         from A101.reinforcement_components import combine_component_frontiers
 
         task_id = job.task_id
         variant = payload_variant(job.payload)
         overlay_id = payload_overlay_id(job.payload)
-        if not self.aggregate_requested(task_id):
+        if not self.aggregate_requested(task_id, variant=variant, overlay_id=overlay_id):
             return
         current_version = self._variant_call(self.store.frontier_version, task_id, variant=variant)
         requested_version = int(job.payload.get("frontier_version", current_version))
@@ -2512,7 +2632,7 @@ class PipelineWorkflow:
             )
             return
 
-        component_ids = self.real_component_ids(task_id, variant=variant, overlay_id=overlay_id)
+        component_ids = self.selected_real_component_ids(task_id, variant=variant, overlay_id=overlay_id)
         if not component_ids:
             return
         maxima: dict[int, int] = {}
@@ -2531,13 +2651,8 @@ class PipelineWorkflow:
 
         meta = self.store.get_meta(task_id) or {}
         top_k = int(meta.get("component_result_top_k", self.settings.frontier_top_k))
-        requested_totals = self._requested_ns(task_id, variant, overlay_id)
-        requested_set = set(map(int, requested_totals))
         all_combined = combine_component_frontiers(frontiers, top_k=top_k)
-        combined = {
-            int(total): rows for total, rows in all_combined.items()
-            if int(total) in requested_set and rows
-        }
+        combined = {int(total): rows for total, rows in all_combined.items() if rows}
         flat = [
             (int(total_n), rank, candidate)
             for total_n, rows in sorted(combined.items())
@@ -2568,31 +2683,6 @@ class PipelineWorkflow:
                     f"combine:{task_id}:{variant}:{overlay_id}:{self.store.generation(task_id)}:{current_version}:{end}"
                 ),
             )
-
-        # When every local N capable of building T has finished and no feasible
-        # combination exists, mark only that aggregate T infeasible. Other totals continue.
-        for total_n in requested_totals:
-            total_n = int(total_n)
-            if total_n in combined:
-                continue
-            requirements, unreachable = aggregate_local_n_requirements_for_total(maxima, total_n)
-            if unreachable:
-                self._set_aggregate_n_infeasible(
-                    task_id, total_n, variant=variant, overlay_id=overlay_id,
-                    reason="aggregate_bounds",
-                    detail="Requested aggregate N cannot be composed from real component bounds",
-                )
-                continue
-            finished = all(
-                set(plan).issubset(set(frontiers.get(cid, {})))
-                for cid, plan in requirements.items()
-            )
-            if finished:
-                self._set_aggregate_n_infeasible(
-                    task_id, total_n, variant=variant, overlay_id=overlay_id,
-                    reason="no_feasible_component_combination",
-                    detail="All required local N values finished, but no feasible component combination sums to this total",
-                )
 
         self._publish(task_id, {
             "type": "frontier_updated", "frontier_version": current_version,
@@ -2693,7 +2783,7 @@ class PipelineWorkflow:
                 candidate = self.store.load_candidate(task_id, str(job.payload["candidate_id"]))
             if candidate is None:
                 raise KeyError("candidate missing")
-        # Saved solutions contain JSONB/GeoJSON, unlike freshly generated candidates.
+
         from .postgres_store import restore_json_geometries
         candidate = dict(candidate)
         candidate["anchored_boxes"] = restore_json_geometries(candidate.get("anchored_boxes", []))
@@ -2705,42 +2795,81 @@ class PipelineWorkflow:
                 "layout_refresh_id": job.payload.get("layout_refresh"),
                 "layout_refreshed_at": time.time(),
             }
+
         variant = str(solution.get("variant", "raw"))
+        total_n = int(solution["total_N"])
+        try:
+            previous_best = self.store.best_solution(task_id, total_n, variant=variant, overlay_id=overlay_id)
+        except TypeError:
+            previous_best = self.store.best_solution(task_id, total_n, variant=variant)
+
         self.store.save_solution(task_id, solution)
         solution_url = f"/v1/tasks/{task_id}/solutions/{solution['solution_id']}?overlay={overlay_id}"
         self._publish(task_id, {
             "type": "solution_available", "solution_id": solution["solution_id"], "source": solution["source"],
-            "total_N": solution["total_N"], "is_feasible": solution["is_feasible"],
+            "total_N": total_n, "is_feasible": solution["is_feasible"],
             "is_optimal": solution.get("is_optimal", False), "status": solution.get("status"),
             "actual_mass_kg": solution["actual_mass_kg"], "result_url": solution_url,
             "variant": variant, "smooth": variant_is_smooth(variant), "overlay_id": overlay_id,
         })
+
         try:
-            best = self.store.best_solution(task_id, solution["total_N"], variant=variant, overlay_id=overlay_id)
+            best = self.store.best_solution(task_id, total_n, variant=variant, overlay_id=overlay_id)
         except TypeError:
-            best = self.store.best_solution(task_id, solution["total_N"], variant=variant)
-        if best and best.get("solution_id") == solution["solution_id"]:
+            best = self.store.best_solution(task_id, total_n, variant=variant)
+
+        def _mass(row: Mapping[str, Any] | None) -> float | None:
+            if not row or row.get("actual_mass_kg") is None:
+                return None
+            try:
+                return float(row["actual_mass_kg"])
+            except (TypeError, ValueError):
+                return None
+
+        previous_mass = _mass(previous_best)
+        best_mass = _mass(best)
+        best_changed = bool(best) and (
+            previous_best is None
+            or str(best.get("solution_id")) != str(previous_best.get("solution_id"))
+            or best_mass != previous_mass
+            or bool(best.get("is_optimal")) != bool(previous_best.get("is_optimal"))
+        )
+        current_is_best = bool(best) and str(best.get("solution_id")) == str(solution.get("solution_id"))
+
+        if current_is_best and best_changed:
             status = (
-                "optimal" if solution.get("is_optimal") else
-                "feasible" if solution.get("is_feasible") else "infeasible"
+                "optimal" if best.get("is_optimal") else
+                "feasible" if best.get("is_feasible") else "infeasible"
             )
             query = f"smooth={'true' if variant_is_smooth(variant) else 'false'}&overlay={overlay_id}"
-            result_url = f"/v1/tasks/{task_id}/results/{solution['total_N']}?{query}"
-            try:
-                self.store.set_n_status(
-                    task_id, solution["total_N"], status, variant=variant, overlay_id=overlay_id,
-                    solution_id=solution["solution_id"], source=solution["source"], result_url=result_url,
-                )
-            except TypeError:
-                self.store.set_n_status(
-                    task_id, solution["total_N"], status, variant=variant,
-                    solution_id=solution["solution_id"], source=solution["source"], result_url=result_url,
-                )
+            result_url = f"/v1/tasks/{task_id}/results/{total_n}?{query}"
+            # Only direct whole N is the same semantic quantity as a user-requested local N.
+            # Aggregate component totals are outputs and must never enter task_n_requests.
+            if str(best.get("source", solution.get("source", "components"))) == "whole":
+                try:
+                    self.store.set_n_status(
+                        task_id, total_n, status, variant=variant, overlay_id=overlay_id,
+                        solution_id=best["solution_id"], source=best["source"], result_url=result_url,
+                    )
+                except TypeError:
+                    self.store.set_n_status(
+                        task_id, total_n, status, variant=variant,
+                        solution_id=best["solution_id"], source=best["source"], result_url=result_url,
+                    )
             self._publish(task_id, {
-                "type": "n_finished", "n": solution["total_N"], "status": status,
-                "result_url": result_url, "solution_id": solution["solution_id"], "source": solution["source"],
+                "type": "n_finished", "n": total_n, "status": status,
+                "result_url": result_url, "solution_id": best["solution_id"], "source": best["source"],
+                "actual_mass_kg": best_mass,
                 "variant": variant, "smooth": variant_is_smooth(variant), "overlay_id": overlay_id,
             })
+            self._publish(task_id, {
+                "type": "result_updated", "n": total_n, "status": status,
+                "solution_id": best["solution_id"], "source": best["source"],
+                "actual_mass_kg": best_mass, "previous_mass_kg": previous_mass,
+                "result_url": result_url, "variant": variant,
+                "smooth": variant_is_smooth(variant), "overlay_id": overlay_id,
+            })
+
         if (self.store.get_meta(task_id) or {}).get("validate_results") and solution.get("is_feasible"):
             self.enqueue(JobKind.validate_solution, task_id, {
                 "solution_id": solution["solution_id"], "variant": variant, "smooth": variant_is_smooth(variant),
@@ -2756,57 +2885,68 @@ class PipelineWorkflow:
         already_prepared = bool(state and str(state.get("preparation_state")) == "prepared")
         field = self._field(task_id, variant)
         component_ids = self._variant_call(self.store.component_ids, task_id, variant=variant)
-        expected = field.get("expected_solver_units", [cid for cid in component_ids if str(cid) != "whole"])
-        expected = [cid for cid in expected if str(cid) not in {"whole", "-1"}]
-        if not {str(cid) for cid in expected}.issubset({str(cid) for cid in component_ids}):
+        available_units = {str(cid) for cid in component_ids}
+        expected = list(field.get("expected_solver_units", [cid for cid in component_ids if str(cid) != "whole"]))
+        if not {str(cid) for cid in expected}.issubset(available_units):
             return False
+
         unit_records = []
-        for cid in expected:
-            record = self._variant_call(self.store.load_component, task_id, cid, variant=variant)
+        for unit in expected:
+            record = self._variant_call(self.store.load_component, task_id, unit, variant=variant)
             if not record or str(record.get("max_n_state", "")) not in {"ready", "infeasible"}:
                 return False
             unit_records.append(record)
-        meta = self.store.get_meta(task_id) or {}
-        selection = [int(x) for x in (meta.get("component_selection") or ([-2] if meta.get("whole") else [-3]))]
-        scene_task = bool(meta.get("scene_id") and str(meta.get("scene_id")) != str(task_id))
-        # Stored whole/-1 is legacy-only. New scene-backed tasks aggregate real components virtually.
-        if selection in ([-1], [-2]) and not scene_task:
-            whole = self._variant_call(self.store.load_component, task_id, "whole", variant=variant)
-            if not whole or str(whole.get("max_n_state", "")) not in {"ready", "infeasible"}:
-                return False
-            unit_records.append(whole)
-        failed_units = [r for r in unit_records if str(r.get("max_n_state")) == "infeasible"]
-        no_demand = not unit_records or (
-            not scene_task and all(
-                r.get("max_n_state") == "ready" and int(r.get("max_useful_n") or 0) == 0
-                for r in unit_records
+
+        failed_units = [record for record in unit_records if str(record.get("max_n_state")) == "infeasible"]
+        no_demand = not expected or (
+            bool(unit_records) and all(
+                str(record.get("max_n_state")) == "ready" and int(record.get("max_useful_n") or 0) == 0
+                for record in unit_records
             )
         )
         if failed_units or no_demand:
             detail = (
-                {"reason": "no_positive_n_required", "detail": "Additional demand is empty; no positive solver N is required", "max_useful_n": 0}
+                {
+                    "reason": "no_positive_n_required",
+                    "detail": "Additional demand is empty; no positive solver N is required",
+                    "max_useful_n": 0,
+                }
                 if no_demand else
-                {"reason": "component_preparation_infeasible", "detail": "At least one real component has no valid preparation/max-N bound", "max_useful_n": None}
+                {
+                    "reason": "component_preparation_infeasible",
+                    "detail": "At least one selected solver unit has no valid preparation/max-N bound",
+                    "max_useful_n": None,
+                }
             )
             mark_infeasible = getattr(self.store, "mark_analysis_infeasible", None)
             if callable(mark_infeasible):
                 mark_infeasible(task_id, variant=variant, overlay_id=overlay_id, detail=detail)
-            for n in self._requested_ns(task_id, variant, overlay_id):
-                self.store.set_n_status(task_id, n, "infeasible", variant=variant, overlay_id=overlay_id, **detail)
-            self._publish(task_id, {"type": "analysis_infeasible", "variant": variant,
-                                   "overlay_id": overlay_id, **detail})
+            set_status = getattr(self.store, "set_n_status", None)
+            if callable(set_status):
+                for n in self._requested_ns(task_id, variant, overlay_id):
+                    set_status(task_id, n, "infeasible", variant=variant, overlay_id=overlay_id, **detail)
+            self._publish(task_id, {
+                "type": "analysis_infeasible", "variant": variant, "overlay_id": overlay_id, **detail,
+            })
             return True
+
         if not already_prepared:
             mark_method(task_id, variant=variant, overlay_id=overlay_id)
-        self._publish(task_id, {
-            "type": "analysis_prepared", "variant": variant, "smooth": variant_is_smooth(variant),
-            "overlay_id": overlay_id,
-        })
-        if auto_solve:
+            self._publish(task_id, {
+                "type": "analysis_prepared", "variant": variant,
+                "smooth": variant_is_smooth(variant), "overlay_id": overlay_id,
+            })
+
+        meta = self.store.get_meta(task_id) or {}
+        scene_task = bool(meta.get("scene_id") and str(meta.get("scene_id")) != str(task_id))
+        # New scene tasks schedule each unit immediately when its max-N becomes ready.
+        # Historical tasks keep the old final scheduling transition.
+        if auto_solve and not scene_task and not already_prepared:
             values = self._requested_ns(task_id, variant, overlay_id)
             if values:
                 self.schedule_requested_for_all(
-                    task_id, values, smooth=variant_is_smooth(variant), overlay_id=overlay_id, register_request=False
+                    task_id, values, smooth=variant_is_smooth(variant),
+                    overlay_id=overlay_id, register_request=False,
                 )
         return True
 

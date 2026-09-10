@@ -242,3 +242,91 @@ def test_all_infeasible_components_finish_as_domain_infeasibility():
     assert wf._maybe_complete_analysis('task', 'raw', True)
     assert observed[0][0] == 'infeasible'
     assert observed[1][1][2] == 'infeasible'
+
+
+def test_solution_upsert_never_overwrites_same_identity_with_worse_mass():
+    statements = []
+
+    class DB:
+        @contextmanager
+        def begin(self):
+            yield self
+
+        def execute(self, sql, params):
+            statements.append(str(sql))
+            return Rows()
+
+    store = PostgresStore(Settings(), database=DB())
+    store.save_solution("task", {
+        "solution_id": "stable", "variant": "raw", "overlay_id": 0,
+        "source": "components", "total_N": 30, "component_ns": {"0": 1},
+        "actual_mass_kg": 100.0, "proxy_mass": 90.0,
+        "is_feasible": True, "is_optimal": False, "status": "feasible",
+    })
+
+    sql = next(statement for statement in statements if "INSERT INTO solutions" in statement)
+    assert "EXCLUDED.actual_mass_kg < solutions.actual_mass_kg" in sql
+    assert "EXCLUDED.is_feasible AND NOT solutions.is_feasible" in sql
+
+
+def test_normal_local_infeasible_outcomes_do_not_turn_task_into_completed_with_errors():
+    class StoreLike:
+        def __init__(self):
+            self.meta = {"task_id": "t", "state": "running", "manual_mode": False, "cancelled": False, "paused": False}
+            self.events = []
+
+        def get_meta(self, task_id):
+            return dict(self.meta)
+
+        def pending_jobs(self, task_id):
+            return 0
+
+        def solution_summaries(self, task_id):
+            return []
+
+        def has_infeasible_analysis(self, task_id):
+            return False
+
+        def has_job_failures(self, task_id):
+            return False
+
+        def patch_meta(self, task_id, **changes):
+            self.meta.update(changes)
+            return dict(self.meta)
+
+        def publish_event(self, task_id, event_type, payload):
+            self.events.append((event_type, dict(payload)))
+
+    store = StoreLike()
+    result = PostgresStore.refresh_pipeline_state(store, "t")
+    assert result["state"] == "completed"
+
+
+def test_real_job_failure_still_turns_task_into_completed_with_errors():
+    class StoreLike:
+        def __init__(self):
+            self.meta = {"task_id": "t", "state": "running", "manual_mode": False, "cancelled": False, "paused": False}
+
+        def get_meta(self, task_id):
+            return dict(self.meta)
+
+        def pending_jobs(self, task_id):
+            return 0
+
+        def solution_summaries(self, task_id):
+            return []
+
+        def has_infeasible_analysis(self, task_id):
+            return False
+
+        def has_job_failures(self, task_id):
+            return True
+
+        def patch_meta(self, task_id, **changes):
+            self.meta.update(changes)
+            return dict(self.meta)
+
+        def publish_event(self, *args, **kwargs):
+            pass
+
+    assert PostgresStore.refresh_pipeline_state(StoreLike(), "t")["state"] == "completed_with_errors"

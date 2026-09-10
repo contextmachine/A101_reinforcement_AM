@@ -3097,6 +3097,18 @@ class PostgresStore:
                         is_feasible=EXCLUDED.is_feasible, is_optimal=EXCLUDED.is_optimal,
                         status=EXCLUDED.status, result=EXCLUDED.result, validation=EXCLUDED.validation,
                         updated_at=now()
+                    WHERE
+                        (EXCLUDED.is_feasible AND NOT solutions.is_feasible)
+                        OR (
+                            EXCLUDED.is_feasible AND solutions.is_feasible AND (
+                                solutions.actual_mass_kg IS NULL
+                                OR (EXCLUDED.actual_mass_kg IS NOT NULL AND EXCLUDED.actual_mass_kg < solutions.actual_mass_kg)
+                                OR (
+                                    EXCLUDED.actual_mass_kg = solutions.actual_mass_kg
+                                    AND EXCLUDED.is_optimal AND NOT solutions.is_optimal
+                                )
+                            )
+                        )
                     """
                 ),
                 {
@@ -3304,6 +3316,26 @@ class PostgresStore:
             )
 
 
+    def has_job_failures(self, task_id: str) -> bool:
+        with self.database.connect() as conn:
+            value = conn.execute(
+                text(
+                    """
+                    SELECT
+                        EXISTS (
+                            SELECT 1 FROM task_events
+                            WHERE task_id=:task_id AND event_type='job_failed'
+                        )
+                        OR EXISTS (
+                            SELECT 1 FROM task_analyses
+                            WHERE task_id=:task_id AND preparation_state='failed'
+                        )
+                    """
+                ),
+                {"task_id": task_id},
+            ).scalar_one()
+        return bool(value)
+
     def has_infeasible_analysis(self, task_id: str) -> bool:
         with self.database.connect() as conn:
             value = conn.execute(
@@ -3355,9 +3387,9 @@ class PostgresStore:
                     prepared = bool(self.load_field(task_id))
             state = "ready" if prepared else "uploaded"
         else:
-            infeasible_check = getattr(self, "has_infeasible_analysis", None)
-            has_infeasible = bool(infeasible_check(task_id)) if callable(infeasible_check) else False
-            state = "completed" if (self.solution_summaries(task_id) or has_infeasible) else "completed_with_errors"
+            failure_check = getattr(self, "has_job_failures", None)
+            has_failures = bool(failure_check(task_id)) if callable(failure_check) else False
+            state = "completed_with_errors" if has_failures else "completed"
         if state != meta.get("state"):
             meta = self.patch_meta(task_id, state=state)
             self.publish_event(task_id, "task_state", {"state": state})

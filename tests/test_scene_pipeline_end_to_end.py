@@ -19,8 +19,14 @@ def test_scene_prepare_max_n_solve_fit_combine_layout_end_to_end(axis):
     first_solve=next(i for i,k in enumerate(kinds) if k.startswith('solve_'))
     assert all(i < first_solve for i,k in enumerate(kinds) if k.startswith('compute_max_n'))
     assert any(s['source']=='components' and s['is_feasible'] for s in store.solutions.values())
-    assert not any(s['source']=='whole' for s in store.solutions.values())
-    assert not any(j['kind'] in {'prepare_whole','compute_max_n_whole','solve_whole','fit_whole'} for j in store.enqueued)
+    real_components = [cid for cid in store.components if cid != 'whole']
+    if len(real_components) == 1:
+        assert not any(s['source']=='whole' for s in store.solutions.values())
+        assert not any(j['kind'] in {'prepare_whole','compute_max_n_whole','solve_whole','fit_whole'} for j in store.enqueued)
+    else:
+        assert any(s['source']=='whole' and s['is_feasible'] for s in store.solutions.values())
+        assert any(j['kind'] == 'prepare_whole' for j in store.enqueued)
+        assert any(j['kind'] == 'solve_whole' for j in store.enqueued)
     for result in store.solutions.values():
         if not result['is_feasible']:continue
         assert result['compact_zones']
