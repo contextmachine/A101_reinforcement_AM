@@ -71,6 +71,23 @@ def run_worker() -> None:
         task_id = str(job_data.get("task_id", ""))
         job_id = str(job_data.get("job_id", ""))
 
+        # Scene materialization is intentionally task-independent: a scene-only
+        # upload has no row in tasks yet, but still needs the same Redis/KEDA workers.
+        if str(job_data.get("kind")) == "materialize_scene":
+            scene_id = str((job_data.get("payload") or {}).get("scene_id") or task_id)
+            try:
+                with LeaseHeartbeat(store, job_data, worker_id):
+                    workflow.dispatch(PipelineJob.from_value(job_data))
+            except Exception as exc:
+                traceback.print_exc()
+                try:
+                    store.set_scene_state(scene_id, "failed", error=f"{type(exc).__name__}: {exc}")
+                finally:
+                    store.ack_job(raw, job_data, "failed")
+            else:
+                store.ack_job(raw, job_data, "done")
+            continue
+
         meta = store.get_meta(task_id)
         if meta is None:
             store.ack_job(raw, job_data, "discarded")
@@ -98,7 +115,7 @@ def run_worker() -> None:
             overlay_id = int((job_data.get("payload") or {}).get("overlay_id", 0))
             variant = str((job_data.get("payload") or {}).get("variant", "raw"))
             try:
-                if str(job_data.get("kind")) in {"prepare_field", "prepare_component", "prepare_whole"}:
+                if str(job_data.get("kind")) in {"prepare_field", "prepare_component", "prepare_whole", "compute_max_n_component", "compute_max_n_whole"}:
                     store.mark_analysis_failed(task_id, variant=variant, overlay_id=overlay_id)
                 store.publish_event(
                     task_id,
