@@ -150,8 +150,8 @@ def test_uploaded_task_starts_compute_directly_without_materialize_source_job(mo
     )
     monkeypatch.setattr(
         api.workflow,
-        "prepare_task",
-        lambda task_id, **kwargs: calls.append(("prepare", task_id, dict(kwargs))) or True,
+        "prepare_task_components",
+        lambda task_id, **kwargs: calls.append(("prepare", task_id, dict(kwargs))) or {"components": []},
     )
 
     created = api._build_task(
@@ -183,3 +183,46 @@ def test_scene_upload_parse_error_is_422(monkeypatch):
 
     assert response.status_code == 422
     assert response.json()["detail"] == "bad source"
+
+
+def test_new_task_prepares_components_synchronously_in_api(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        api.store,
+        "create_scene",
+        lambda scene_id, meta, input_obj: calls.append(("scene", scene_id)),
+    )
+    monkeypatch.setattr(
+        api.store,
+        "create_task",
+        lambda task_id, meta, plan, input_obj: calls.append(("task", task_id)),
+    )
+    monkeypatch.setattr(api.store, "publish_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        api.workflow,
+        "prepare_task",
+        lambda *args, **kwargs: pytest.fail("new task must not enqueue prepare_field"),
+    )
+    prepare = getattr(api.workflow, "prepare_task_components", None)
+    assert callable(prepare), "PipelineWorkflow.prepare_task_components must exist"
+    monkeypatch.setattr(
+        api.workflow,
+        "prepare_task_components",
+        lambda task_id, **kwargs: calls.append(("components", task_id, dict(kwargs))) or {"components": []},
+    )
+
+    created = api._build_task(
+        api.TaskParameters(n=[1], whole=True),
+        {
+            "kind": "polygons",
+            "units": "mm",
+            "polygons": [{"points": [[0, 0], [1000, 0], [1000, 1000]], "load": 10.0}],
+        },
+        start_pipeline=True,
+    )
+
+    assert ("task", created.task_id) in calls
+    prepared = next(row for row in calls if row[0] == "components")
+    assert prepared[1] == created.task_id
+    assert prepared[2]["auto_solve"] is True

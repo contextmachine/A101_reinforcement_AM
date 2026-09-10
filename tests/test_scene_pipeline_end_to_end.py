@@ -7,7 +7,7 @@ from support.memory_scene_store import MemoryStore
 def test_scene_prepare_max_n_solve_fit_combine_layout_end_to_end(axis):
     store=MemoryStore(axis)
     wf=PipelineWorkflow(store,store.settings)
-    wf.prepare_task('task', auto_solve=True)
+    wf.prepare_task_components('task', auto_solve=True)
     count=0
     while store.jobs:
         job=store.jobs.popleft();count+=1
@@ -19,7 +19,8 @@ def test_scene_prepare_max_n_solve_fit_combine_layout_end_to_end(axis):
     first_solve=next(i for i,k in enumerate(kinds) if k.startswith('solve_'))
     assert all(i < first_solve for i,k in enumerate(kinds) if k.startswith('compute_max_n'))
     assert any(s['source']=='components' and s['is_feasible'] for s in store.solutions.values())
-    assert any(s['source']=='whole' and s['is_feasible'] for s in store.solutions.values())
+    assert not any(s['source']=='whole' for s in store.solutions.values())
+    assert not any(j['kind'] in {'prepare_whole','compute_max_n_whole','solve_whole','fit_whole'} for j in store.enqueued)
     for result in store.solutions.values():
         if not result['is_feasible']:continue
         assert result['compact_zones']
@@ -34,11 +35,13 @@ def test_background_only_scene_does_not_crash_whole_preparation():
         row['load'] = 5.7
     store.mark_analysis_infeasible = lambda *a, **kw: store.analysis.update(preparation_state='infeasible')
     wf = PipelineWorkflow(store, store.settings)
-    wf.prepare_task('task', auto_solve=True)
+    wf.prepare_task_components('task', auto_solve=True)
     while store.jobs:
         job = store.jobs.popleft()
         wf.dispatch(PipelineJob.from_value(job))
         store.dedupe.discard(job['dedupe_key'])
     assert store.analysis['preparation_state'] == 'infeasible'
+    assert store.components == {}
+    assert wf.aggregate_component_info('task')['max_useful_n'] == 0
     assert not any(j['kind'].startswith('solve_') for j in store.enqueued)
     assert any(event == 'analysis_infeasible' and p['reason'] == 'no_positive_n_required' for event, p in store.events)

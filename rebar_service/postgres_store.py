@@ -1765,10 +1765,6 @@ class PostgresStore:
         now = _utc_from_epoch(meta.get("created_at", time.time()))
         state = str(meta.get("state") or "ready")
 
-        from .scene_geometry import build_stable_scene_components
-
-        components = build_stable_scene_components(variants["raw"])
-
         try:
             with self.database.begin() as conn:
                 conn.execute(
@@ -1824,21 +1820,6 @@ class PostgresStore:
                             "polygons": _json_param(variants[variant]),
                             "smoothing": None if smoothing is None else _json_param(smoothing),
                             "created_at": now,
-                        },
-                    )
-                for component in components:
-                    conn.execute(
-                        text(
-                            """
-                            INSERT INTO scene_components (scene_id, component_id, polygon_indices, bounds)
-                            VALUES (:scene_id, :component_id, :polygon_indices, :bounds)
-                            """
-                        ),
-                        {
-                            "scene_id": scene_id,
-                            "component_id": int(component["id"]),
-                            "polygon_indices": [int(x) for x in component.get("polygon_indices", [])],
-                            "bounds": component.get("bounds"),
                         },
                     )
         except Exception as exc:

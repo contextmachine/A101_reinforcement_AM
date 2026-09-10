@@ -189,7 +189,7 @@ def _build_task(
         },
     )
     if start_pipeline:
-        workflow.prepare_task(task_id, auto_solve=True, smooth=smooth, overlay_id=int(overlay_id))
+        workflow.prepare_task_components(task_id, auto_solve=True, smooth=smooth, overlay_id=int(overlay_id))
     return TaskCreated(
         task_id=task_id,
         state=meta["state"],
@@ -493,12 +493,7 @@ async def start_analysis(request: AnalysisTaskStart):
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    available = {int(row["id"]) for row in (scene.get("components") or [])}
     selection = [int(x) for x in request.components]
-    if selection[0] >= 0:
-        missing = sorted(set(selection) - available)
-        if missing:
-            raise HTTPException(status_code=422, detail=f"Unknown component ids: {missing}")
 
     include_whole = selection in ([-1], [-2])
     parameter_payload = request.model_dump(
@@ -860,6 +855,21 @@ async def get_component(task_id: str, component_id: int, smooth: bool | None = Q
     meta, variant, selected_smooth, selected_overlay = await _read_task_context(
         task_id, smooth=smooth, overlay=overlay
     )
+    immutable = str(meta.get("scene_id") or task_id) != str(task_id)
+    if component_id == -1 and immutable:
+        info = await run_in_threadpool(
+            lambda: workflow.aggregate_component_info(task_id, variant=variant, overlay_id=selected_overlay)
+        )
+        if info.get("state") == "empty":
+            return JSONResponse(to_jsonable({
+                "task_id": task_id, "scene_id": meta.get("scene_id"), "variant": variant,
+                "smooth": selected_smooth, "overlay_id": selected_overlay, **info,
+            }))
+        return JSONResponse(to_jsonable({
+            "task_id": task_id, "scene_id": meta.get("scene_id"), "variant": variant,
+            "smooth": selected_smooth, "overlay_id": selected_overlay, **info,
+        }))
+
     storage_id = component_storage_id(component_id)
     row = await run_in_threadpool(
         lambda: store.load_component(task_id, storage_id, variant=variant, overlay_id=selected_overlay)
@@ -913,11 +923,17 @@ async def list_component_results(task_id: str, component_id: int, smooth: bool |
     meta, variant, selected_smooth, selected_overlay = await _read_task_context(
         task_id, smooth=smooth, overlay=overlay
     )
-    frontier = await run_in_threadpool(
-        lambda: store.load_frontier(
-            task_id, component_storage_id(component_id), variant=variant, overlay_id=selected_overlay
+    immutable = str(meta.get("scene_id") or task_id) != str(task_id)
+    if component_id == -1 and immutable:
+        frontier = await run_in_threadpool(
+            lambda: workflow.aggregate_frontier(task_id, variant=variant, overlay_id=selected_overlay)
         )
-    )
+    else:
+        frontier = await run_in_threadpool(
+            lambda: store.load_frontier(
+                task_id, component_storage_id(component_id), variant=variant, overlay_id=selected_overlay
+            )
+        )
     return {
         "task_id": task_id, "scene_id": meta.get("scene_id"), "component_id": component_id,
         "variant": variant, "smooth": selected_smooth, "overlay_id": selected_overlay,
@@ -938,11 +954,18 @@ async def get_component_result(task_id: str, component_id: int, n: int, smooth: 
     meta, variant, selected_smooth, selected_overlay = await _read_task_context(
         task_id, smooth=smooth, overlay=overlay
     )
-    row = (await run_in_threadpool(
-        lambda: store.load_frontier(
-            task_id, component_storage_id(component_id), variant=variant, overlay_id=selected_overlay
+    immutable = str(meta.get("scene_id") or task_id) != str(task_id)
+    if component_id == -1 and immutable:
+        frontier = await run_in_threadpool(
+            lambda: workflow.aggregate_frontier(task_id, variant=variant, overlay_id=selected_overlay)
         )
-    )).get(int(n))
+    else:
+        frontier = await run_in_threadpool(
+            lambda: store.load_frontier(
+                task_id, component_storage_id(component_id), variant=variant, overlay_id=selected_overlay
+            )
+        )
+    row = frontier.get(int(n))
     if row is None:
         raise HTTPException(status_code=404, detail="Component result not found")
     body = dict(row)

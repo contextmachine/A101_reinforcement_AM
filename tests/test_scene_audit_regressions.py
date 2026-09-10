@@ -135,7 +135,7 @@ def test_prepare_infeasible_cover_is_domain_state_not_unhandled_error():
     wf._maybe_complete_analysis = lambda *a, **kw: False
     wf.handle_prepare_component(PipelineJob('prepare_component', 'task', {'component_id': 0, 'analysis_auto_solve': True}))
     assert saved[-1]['max_n_state'] == 'infeasible'
-    assert saved[-1]['max_useful_n'] == 0
+    assert saved[-1]['max_useful_n'] is None
 
 def test_put_ready_scene_does_not_reparse_or_resmooth_it(monkeypatch):
     seen = {}

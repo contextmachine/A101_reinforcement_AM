@@ -92,7 +92,12 @@ def test_new_put_documentation_example_uses_real_nested_config():
     assert example["config"]["max_layers"] == 2
 
 
-def test_docs_do_not_claim_component_ids_change_with_overlay():
-    op = app.openapi()["paths"]["/v1/tasks/{task_id}/components"]["get"]
-    assert "Стабильные" in op["description"]
-    assert "может измениться" not in op["description"]
+def test_docs_define_components_as_task_scoped_and_minus_one_as_virtual_aggregate():
+    schema = app.openapi()
+    op = schema["paths"]["/v1/tasks/{task_id}/components"]["get"]
+    assert "task-scoped" in op["description"]
+    assert "отдельной строки -1 нет" in op["description"]
+    aggregate = schema["paths"]["/v1/tasks/{task_id}/components/{component_id}"]["get"]["description"]
+    assert "виртуальный агрегат" in aggregate
+    assert "max_useful_n=0" in aggregate
+    assert "нет" in aggregate.lower() or "отсутств" in aggregate.lower()
