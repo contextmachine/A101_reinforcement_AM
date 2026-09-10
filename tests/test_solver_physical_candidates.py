@@ -2,22 +2,18 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from shapely.geometry import box
-
-from A101.reinforcement_components import filter_candidates_by_physical_geometry
+from A101.reinforcement_components import filter_candidates_by_matrix_barriers
 from A101.select_min_density_rectangles_recipes import _rectangle_area_with_hold
 
 
-def test_candidate_crossing_physical_void_is_rejected():
-    # Two physical islands with a 1-unit void between them.
-    material = box(0, 0, 1, 1).union(box(2, 0, 3, 1))
-    edges_x = np.array([0.0, 1.0, 2.0, 3.0])
-    edges_y = np.array([0.0, 1.0])
-    rectangles = [(0, 0, 0, 0, 1), (0, 0, 2, 0, 1), (2, 0, 2, 0, 1)]
-    kept, rejected = filter_candidates_by_physical_geometry(
-        rectangles, work_x_edges=edges_x, work_y_edges=edges_y,
-        axis="y", physical_geometry=material,
-    )
+def test_candidate_crossing_matrix_void_is_rejected_but_background_is_allowed():
+    matrix = np.array([[1, 0, -1, 1]], dtype=int)
+    rectangles = [
+        (0, 0, 1, 0, 1),  # background 0 is traversable
+        (0, 0, 3, 0, 1),  # crosses -1 void
+        (3, 0, 3, 0, 1),
+    ]
+    kept, rejected = filter_candidates_by_matrix_barriers(rectangles, matrix)
     assert kept == [rectangles[0], rectangles[2]]
     assert rejected == 1
 

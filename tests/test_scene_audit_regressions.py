@@ -80,11 +80,11 @@ def test_new_task_n1_does_not_bypass_prepared_solver(monkeypatch):
     calls = []
     class Store:
         def get_meta(self, tid): return {'scene_id': 'scene', 'parameters': {'solver': {}}}
-        def load_problem(self, *a, **kw): return {'problem': {'strict_physical_candidates': True}}
+        def load_problem(self, *a, **kw): return {'problem': {'strict_matrix_barriers': True}}
         def is_n_cancelled(self, *a, **kw): return False
         def save_solver_result(self, *a, **kw): pass
     wf = PipelineWorkflow(Store(), Settings())
-    wf._single_component_frontier = lambda *a, **kw: pytest.fail('N=1 cannot bypass physical candidate constraints')
+    wf._single_component_frontier = lambda *a, **kw: pytest.fail('N=1 cannot bypass prepared matrix candidate constraints')
     wf.enqueue = lambda *a, **kw: True
     wf._publish = lambda *a, **kw: None
     monkeypatch.setattr(rc, 'solve_component_frontier', lambda *a, **kw: (calls.append(a[1]) or ({}, {})))
@@ -96,11 +96,14 @@ def test_max_n_uses_complete_matrix_cover_not_pruned_main_candidates():
     result = estimate_max_useful_n(problem, hard_cap=100)
     assert result['max_useful_n'] == 1
 
-def test_max_n_does_not_skip_infeasible_later_mask_after_reaching_cap():
+def test_max_n_ignores_legacy_physical_mask_and_still_solves_all_recipe_layers():
     problem = {'work_matrix': np.array([[1, 2]]), 'work_physical_mask': np.array([[True, False]]),
                'selectable_rectangles': [(0, 0, 0, 0, 1)]}
     result = estimate_max_useful_n(problem, hard_cap=1)
-    assert result['feasible'] is False
+    assert result['feasible'] is True
+    assert result['matrix_max_useful_n'] == 2
+    assert result['max_useful_n'] == 1
+    assert result['capped'] is True
 
 def test_preparation_barrier_waits_for_expected_but_not_yet_inserted_component():
     class Store:
@@ -129,7 +132,7 @@ def test_prepare_infeasible_cover_is_domain_state_not_unhandled_error():
         def load_component(self, *a, **kw): return {'component': {'id': 0}, 'state': 'queued'}
         def save_component(self, *a, **kw): saved.append(a[2])
     wf = PipelineWorkflow(Store(), Settings())
-    def impossible(*a, **kw): raise rc.CandidateCoverInfeasible('no physical cover')
+    def impossible(*a, **kw): raise rc.CandidateCoverInfeasible('no candidate cover')
     wf._prepare_problem = impossible
     wf._publish = lambda *a, **kw: None
     wf._maybe_complete_analysis = lambda *a, **kw: False

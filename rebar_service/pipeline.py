@@ -864,12 +864,12 @@ class PipelineWorkflow:
     def _record_cover_infeasible(self, job: PipelineJob, cid: Any, record: Mapping[str, Any], error: Exception) -> None:
         variant = payload_variant(job.payload)
         row = dict(record)
-        result = {"feasible": False, "reason": "physical_candidate_cover", "detail": str(error), "max_useful_n": None}
+        result = {"feasible": False, "reason": "candidate_cover", "detail": str(error), "max_useful_n": None}
         row.update(state="max_n_infeasible", max_n_state="infeasible", max_n_milp=result,
                    max_useful_n=None, plan=[], force_single_box=False)
         self._variant_call(self.store.save_component, job.task_id, cid, row, variant=variant)
         self._publish(job.task_id, {"type": "component_infeasible", "component_id": cid,
-                      "variant": variant, "reason": "physical_candidate_cover", "detail": str(error)})
+                      "variant": variant, "reason": "candidate_cover", "detail": str(error)})
         self._maybe_complete_analysis(job.task_id, variant, bool(job.payload.get("analysis_auto_solve", True)))
 
     def handle_prepare_component(self, job: PipelineJob) -> None:
@@ -960,7 +960,7 @@ class PipelineWorkflow:
         configured = self._solver(task_id).get("prepared_max_n")
         if configured is not None:
             cap = min(cap, int(configured))
-        return estimate_max_useful_n(problem, recipes=cfg.get("recipes"), hard_cap=cap)
+        return estimate_max_useful_n(problem["work_matrix"], recipes=cfg.get("recipes"), hard_cap=cap)
 
     def handle_compute_max_n_component(self, job: PipelineJob) -> None:
         task_id, cid = job.task_id, int(job.payload["component_id"])

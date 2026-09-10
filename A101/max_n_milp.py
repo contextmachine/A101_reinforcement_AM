@@ -120,37 +120,88 @@ def minimum_rectangle_cover(
     return {"feasible": True, "optimal": True, "count": len(chosen), "chosen_indices": chosen}
 
 
+def _coerce_class_matrix(value: Any) -> np.ndarray:
+    """Return the only max-N input that matters: a 2-D class matrix.
+
+    Historical callers may still pass the prepared-problem mapping.  For
+    compatibility we extract only ``work_matrix`` and intentionally ignore
+    every other field (physical masks, candidate lists, geometry metadata).
+    """
+    if isinstance(value, Mapping):
+        value = value.get("work_matrix")
+    matrix = np.asarray(value, dtype=np.int32)
+    if matrix.ndim != 2:
+        raise ValueError("max-N requires a two-dimensional class matrix")
+    return matrix
+
+
 def estimate_max_useful_n(
-    component_problem: Mapping[str, Any], *,
+    matrix: Any, *,
     recipes: Mapping[Any, Sequence[Any]] | None = None, hard_cap: int = 100,
 ) -> dict[str, Any]:
-    matrix = np.asarray(component_problem.get("work_matrix"), dtype=np.int32)
-    if matrix.ndim != 2:
-        raise ValueError("component problem has no two-dimensional work_matrix")
-    physical = np.asarray(component_problem.get("work_physical_mask", np.ones(matrix.shape)), dtype=bool)
-    if physical.shape != matrix.shape:
-        raise ValueError("work_physical_mask shape does not match work_matrix")
+    """Compute the exact rectangle-count policy bound from matrix + recipes.
+
+    Matrix semantics are intentionally sufficient:
+      * -1 (or any negative value): physical void;
+      *  0: background reinforcement;
+      * >0: additional-demand class.
+
+    For a primitive recipe occurrence we build an exact boolean mask of cells
+    whose positive class requires that occurrence.  Minimum rectangle cover is
+    solved *inside that mask*, so max-N rectangles cannot pass through void,
+    background zero, or an unrelated positive class.
+    """
+    values = _coerce_class_matrix(matrix)
     cap = max(0, int(hard_cap))
-    if np.any((matrix > 0) & ~physical):
-        return {"feasible": False, "max_useful_n": 0, "layers": [], "capped": False,
-                "reason": "required_cells_intersect_physical_void"}
     normalized = _normalized_recipes(recipes)
-    cache = {}
-    counts = {int(c): Counter(_expand_leaves(int(c), normalized, cache)) for c in np.unique(matrix) if c > 0}
+    cache: dict[int, tuple[int, ...]] = {}
+    counts = {
+        int(c): Counter(_expand_leaves(int(c), normalized, cache))
+        for c in np.unique(values)
+        if int(c) > 0
+    }
     primitives = sorted({leaf for value in counts.values() for leaf in value})
-    layers, total, solved_masks = [], 0, {}
+    layers: list[dict[str, Any]] = []
+    total = 0
+    solved_masks: dict[tuple[tuple[int, int], bytes], dict[str, Any]] = {}
     for primitive in primitives:
-        for occurrence in range(1, max(v.get(primitive, 0) for v in counts.values()) + 1):
-            mask = np.isin(matrix, [c for c, value in counts.items() if value.get(primitive, 0) >= occurrence])
-            key = np.packbits(mask).tobytes()
+        multiplicity = max((v.get(primitive, 0) for v in counts.values()), default=0)
+        for occurrence in range(1, multiplicity + 1):
+            allowed_classes = [
+                c for c, value in counts.items()
+                if value.get(primitive, 0) >= occurrence
+            ]
+            # np.isin against strictly positive compatible classes makes both
+            # 0 and -1 hard barriers for max-N, as well as unrelated classes.
+            mask = np.isin(values, allowed_classes)
+            packed = np.packbits(mask, axis=None).tobytes()
+            key = (tuple(map(int, mask.shape)), packed)
             if key not in solved_masks:
                 solved_masks[key] = minimum_rectangle_cover(mask)
             cover = solved_masks[key]
-            layers.append({"primitive_class": primitive, "occurrence": occurrence,
-                           "cells": int(mask.sum()), **cover})
+            layers.append({
+                "primitive_class": int(primitive),
+                "occurrence": int(occurrence),
+                "classes": sorted(map(int, allowed_classes)),
+                "cells": int(mask.sum()),
+                **cover,
+            })
             if not cover["feasible"]:
-                return {"feasible": False, "max_useful_n": 0, "layers": layers,
-                        "capped": False, "reason": cover.get("reason", "infeasible")}
+                # This is defensive: every True cell is itself a valid 1x1
+                # rectangle, so a non-empty boolean mask must be coverable.
+                return {
+                    "feasible": False,
+                    "max_useful_n": None,
+                    "layers": layers,
+                    "capped": False,
+                    "reason": cover.get("reason", "infeasible"),
+                }
             total += int(cover["count"])
-    return {"feasible": True, "max_useful_n": min(total, cap), "matrix_max_useful_n": total,
-            "layers": layers, "capped": total > cap, "optimal": True}
+    return {
+        "feasible": True,
+        "max_useful_n": min(total, cap),
+        "matrix_max_useful_n": total,
+        "layers": layers,
+        "capped": total > cap,
+        "optimal": True,
+    }

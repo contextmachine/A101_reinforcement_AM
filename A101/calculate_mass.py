@@ -1,3 +1,4 @@
+from __future__ import annotations
 from itertools import combinations_with_replacement
 from bisect import bisect_right
 from collections import defaultdict

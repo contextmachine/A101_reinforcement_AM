@@ -556,42 +556,75 @@ def split_reinforcement_components(
 
 
 class CandidateCoverInfeasible(ValueError):
-    """Demand has no candidate cover under the physical geometry constraints."""
+    """Demand has no candidate cover under the prepared matrix/solver constraints."""
 
 
-def filter_candidates_by_physical_geometry(
+def filter_candidates_by_matrix_barriers(
     rectangles: Sequence[Sequence[int]],
+    matrix: Any,
+) -> tuple[list[Any], int]:
+    """Reject rectangles containing a negative (physical-void) matrix cell.
+
+    This is the authoritative downstream void check. Zero is background
+    concrete and remains traversable; positive cells are demand classes.
+    """
+    values = np.asarray(matrix)
+    if values.ndim != 2:
+        raise ValueError("matrix must be two-dimensional")
+    ny, nx = values.shape
+    kept: list[Any] = []
+    rejected = 0
+    for raw in rectangles:
+        rect = tuple(raw)
+        if len(rect) < 4:
+            raise ValueError("rectangle must contain x0,y0,x1,y1")
+        x0, y0, x1, y1 = map(int, rect[:4])
+        if not (0 <= x0 <= x1 < nx and 0 <= y0 <= y1 < ny):
+            rejected += 1
+            continue
+        if np.any(values[y0:y1 + 1, x0:x1 + 1] < 0):
+            rejected += 1
+            continue
+        kept.append(raw)
+    return kept, rejected
+
+
+def _mark_matrix_voids(
+    matrix: Any,
     *,
     work_x_edges: Sequence[float],
     work_y_edges: Sequence[float],
     axis: str,
     physical_geometry: Any,
     area_eps: float = 1e-6,
-) -> tuple[list[Any], int]:
-    """Remove candidate coverage rectangles that cross physical void.
+) -> np.ndarray:
+    """Encode pure physical void as ``-1`` directly in the class matrix.
 
-    ``active`` and ``background_only`` geometry are merged upstream into
-    ``physical_geometry``.  Anchorage is intentionally *not* included in this
-    containment test; this tests the candidate's calculation/coverage rectangle.
+    Geometry is consulted only while the dense matrix is materialized. A cell
+    with any material area remains its existing class (positive demand or zero
+    background); a cell with no material area becomes the hard ``-1`` barrier.
+    Downstream candidate generation and max-N use only the resulting matrix.
     """
+    out = np.asarray(matrix, dtype=np.int32).copy()
+    if out.ndim != 2:
+        raise ValueError("matrix must be two-dimensional")
     if physical_geometry is None:
-        return list(rectangles), 0
-    geometry = _clean_geometry(_geom(physical_geometry))
-    if geometry is None or geometry.is_empty:
-        return [], len(rectangles)
-    kept: list[Any] = []
-    rejected = 0
+        return out
+    material = _clean_geometry(_geom(physical_geometry))
+    if material is None or material.is_empty:
+        out.fill(-1)
+        return out
     tolerance = max(0.0, float(area_eps))
-    for raw in rectangles:
-        rect = tuple(raw)
-        world = grid_rectangles_to_world([rect], work_x_edges, work_y_edges, axis)[0]
-        candidate = box(*world[:4])
-        outside = candidate.difference(geometry)
-        if outside.is_empty or float(outside.area) <= tolerance:
-            kept.append(raw)
-        else:
-            rejected += 1
-    return kept, rejected
+    ny, nx = out.shape
+    for y in range(ny):
+        for x in range(nx):
+            world = grid_rectangles_to_world(
+                [(x, y, x, y, 1)], work_x_edges, work_y_edges, axis
+            )[0]
+            cell = box(*world[:4])
+            if float(cell.intersection(material).area) <= tolerance:
+                out[y, x] = -1
+    return out
 
 
 def prepare_component_problem(
@@ -720,21 +753,22 @@ def prepare_component_problem(
     started = perf_counter()
     xs, ys, load_matrix, int_matrix = _grid_to_matrices(grid, load2cls, preserve_area_eps)
     work_matrix, work_x_edges, work_y_edges, work_x_steps, work_y_steps = orient_grid(int_matrix, xs, ys, axis)
-    physical_mask = np.ones(work_matrix.shape, dtype=bool)
-    if physical_geometry is not None:
-        ys_idx, xs_idx = np.nonzero(work_matrix > 0)
-        cell_rects = [(int(x), int(y), int(x), int(y), 1) for y, x in zip(ys_idx, xs_idx)]
-        physical_cells, _ = filter_candidates_by_physical_geometry(
-            cell_rects, work_x_edges=work_x_edges, work_y_edges=work_y_edges,
-            axis=axis, physical_geometry=physical_geometry, area_eps=physical_area_eps,
-        )
-        physical_mask[ys_idx, xs_idx] = False
-        for x, y, _, _, _ in physical_cells:
-            physical_mask[y, x] = True
-        if np.any((work_matrix > 0) & ~physical_mask):
-            raise CandidateCoverInfeasible(f"component {component_id}: required cells cross physical void")
+    work_matrix = _mark_matrix_voids(
+        work_matrix,
+        work_x_edges=work_x_edges,
+        work_y_edges=work_y_edges,
+        axis=axis,
+        physical_geometry=physical_geometry,
+        area_eps=physical_area_eps,
+    )
     base_holds, holds, recipe_leaves = class_holds(diameters, recipes, anchor_factor)
-    mark("dense_matrix", started, shape=tuple(map(int, work_matrix.shape)), nonzero=int(np.count_nonzero(work_matrix)))
+    mark(
+        "dense_matrix", started,
+        shape=tuple(map(int, work_matrix.shape)),
+        demand=int(np.count_nonzero(work_matrix > 0)),
+        background=int(np.count_nonzero(work_matrix == 0)),
+        void=int(np.count_nonzero(work_matrix < 0)),
+    )
 
     requested_min_width = max(0.0, float(min_width))
     cross_span = float(work_x_edges[-1] - work_x_edges[0]) if len(work_x_edges) >= 2 else 0.0
@@ -756,14 +790,12 @@ def prepare_component_problem(
 
     started = perf_counter()
     selectable = relabel_rectangle_candidates(requirement_rectangles, dict(recipes or {}))
-    physical_rejected = 0
-    if physical_geometry is not None:
-        selectable, physical_rejected = filter_candidates_by_physical_geometry(
-            selectable, work_x_edges=work_x_edges, work_y_edges=work_y_edges, axis=axis,
-            physical_geometry=physical_geometry, area_eps=physical_area_eps,
-        )
-    mark("relabel_rectangles", started, selectable=len(selectable), physical_rejected=physical_rejected)
-    if np.any(work_matrix != 0) and not selectable:
+    selectable, barrier_rejected = filter_candidates_by_matrix_barriers(selectable, work_matrix)
+    mark(
+        "relabel_rectangles", started,
+        selectable=len(selectable), barrier_rejected=barrier_rejected,
+    )
+    if np.any(work_matrix > 0) and not selectable:
         raise CandidateCoverInfeasible(
             f"component {component_id}: ненулевое требование, но нет допустимых кандидатов; "
             f"cross_span={cross_span:.3f}, requested_min_width={requested_min_width:.3f}, "
@@ -779,7 +811,7 @@ def prepare_component_problem(
     else:
         work_rectangles, mosaic, mosaic_stats = selectable, None, None
     mark("reduce_mosaic", started, candidates=len(work_rectangles))
-    if np.any(work_matrix != 0) and not work_rectangles:
+    if np.any(work_matrix > 0) and not work_rectangles:
         raise CandidateCoverInfeasible(f"component {component_id}: ненулевое требование, но после mosaic нет кандидатов")
 
     source_classes = {_load_class(load2cls, row["load"]) for row in polygons}
@@ -800,8 +832,9 @@ def prepare_component_problem(
         )
 
     started = perf_counter()
+    solver_matrix = np.where(work_matrix < 0, 0, work_matrix)
     prepared = prepare_rectangle_problem(
-        value_matrix=work_matrix,
+        value_matrix=solver_matrix,
         xs=work_x_steps,
         ys=work_y_steps,
         rectangles=work_rectangles,
@@ -832,8 +865,7 @@ def prepare_component_problem(
         "load_matrix": load_matrix,
         "int_matrix": int_matrix,
         "work_matrix": work_matrix,
-        "work_physical_mask": physical_mask,
-        "strict_physical_candidates": physical_geometry is not None,
+        "strict_matrix_barriers": True,
         "work_x_edges": np.asarray(work_x_edges),
         "work_y_edges": np.asarray(work_y_edges),
         "work_x_steps": np.asarray(work_x_steps),
@@ -856,7 +888,7 @@ def prepare_component_problem(
             "discarded_refined_shape": None if discarded_refined_shape is None else tuple(map(int, discarded_refined_shape)),
             "prepare_times_s": stage_times,
             "candidate_rectangles": len(work_rectangles),
-            "physical_rejected_candidates": int(physical_rejected),
+            "matrix_barrier_rejected_candidates": int(barrier_rejected),
             "requested_min_width": requested_min_width,
             "candidate_min_width": candidate_min_width,
             "cross_span": cross_span,

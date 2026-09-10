@@ -4,6 +4,7 @@ A rectangle of class ``c`` directly covers every demand class ``d <= c``.
 Recipes remain valid alternative realisations: e.g. class 2 may also be covered
 by two class-1 rectangles. Spatial demands are never added together.
 """
+from __future__ import annotations
 from collections import Counter, defaultdict
 
 VERSION = "v9-ranked-or-recipe-py39-2026-09-03"

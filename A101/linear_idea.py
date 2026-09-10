@@ -161,11 +161,17 @@ def generate_all_rectangles(
     A = np.asarray(int_matrix)
     ny, nx = A.shape
 
-    active_col = np.any(A != 0, axis=0)
+    # Matrix semantics after grid materialization:
+    #   -1 (and any negative value) = physical void, a hard barrier;
+    #    0 = background concrete, traversable by solver rectangles;
+    #   >0 = reinforcement demand class.
+    positive = np.where(A > 0, A, 0)
+    barrier = A < 0
+    active_col = np.any(positive > 0, axis=0)
 
     nz = np.vstack([
         np.zeros((1, nx), dtype=np.int32),
-        np.cumsum(A != 0, axis=0),
+        np.cumsum(positive > 0, axis=0),
     ])
 
     cache = {}
@@ -187,29 +193,31 @@ def generate_all_rectangles(
         if x2_start >= nx:
             continue
 
-        profile = A[:, x1:x2_start + 1].max(axis=1)
+        profile = positive[:, x1:x2_start + 1].max(axis=1)
 
         for x2 in range(x2_start, nx):
             if x2 > x2_start:
                 np.maximum(
                     profile,
-                    A[:, x2],
+                    positive[:, x2],
                     out=profile,
                 )
 
             if not active_col[x2] or not profile.any():
                 continue
 
-            key = profile.tobytes()
-
+            # Negative matrix cells are hard barriers, unlike zero-demand
+            # background concrete. Split the row profile before grouping so a
+            # candidate can never span a physical void.
+            valid = ~np.any(barrier[:, x1:x2 + 1], axis=1)
+            key = (profile.tobytes(), valid.tobytes())
             groups = cache.get(key)
-
             if groups is None:
-                groups = groups_fast(
-                    profile,
-                    y_steps,
-                    holds,
-                )
+                groups = []
+                edges = np.diff(np.r_[False, valid, False].astype(np.int8))
+                for start, stop in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
+                    groups.extend((y1+int(start), y2+int(start), cls)
+                                  for y1,y2,cls in groups_fast(profile[start:stop], y_steps[start:stop], holds))
                 cache[key] = groups
 
             for y1, y2, w in groups:
@@ -246,10 +254,10 @@ def generate_recipe_rectangles(
             reverse=True,
         ))
 
-    classes = set(map(int, np.unique(A))) | set(recipes)
-    classes |= {x for r in recipes.values() for x in r}
+    classes = {int(c) for c in np.unique(A) if int(c) > 0} | {int(c) for c in recipes if int(c) > 0}
+    classes |= {int(x) for r in recipes.values() for x in r if int(x) > 0}
 
-    base = sorted(c for c in classes if c and c not in recipes)
+    base = sorted(c for c in classes if c > 0 and c not in recipes)
     req = {c: expand(c) for c in classes}
 
     out = set()
@@ -272,7 +280,7 @@ def generate_recipe_rectangles(
 
             # 1. Detailed:
             # сохраняем исходные composite-классы.
-            detailed = np.zeros_like(A)
+            detailed = np.where(A < 0, -1, 0)
             for c in active:
                 detailed[A == c] = c
 
@@ -284,7 +292,7 @@ def generate_recipe_rectangles(
                 v = need[c][layer]
                 groups[v] = max(groups.get(v, 0), c)
 
-            promoted = np.zeros_like(A)
+            promoted = np.where(A < 0, -1, 0)
             for c in active:
                 promoted[A == c] = groups[need[c][layer]]
 
