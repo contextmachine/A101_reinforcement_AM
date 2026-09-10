@@ -1,21 +1,14 @@
-import importlib.util
-import sqlite3
 from pathlib import Path
-import pytest
 
-spec=importlib.util.spec_from_file_location('scene_audit_migration',Path(__file__).resolve().parents[1]/'migrations/versions/0004_scene_audit_repairs.py')
-m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+ROOT = Path(__file__).resolve().parents[1]
+AUDIT = ROOT / "migrations/versions/0004_scene_audit_repairs.py"
 
-@pytest.mark.parametrize('rows, expected', [
-    ([('raw',0,0,0,1),('smooth',0,1,0,2)],('smooth',0)),
-    ([('raw',0,1,0,1),('smooth',0,1,0,2)],('raw',0)),
-    ([('raw',0,0,0,1),('smooth',90,1,2,2),('smooth',1000,1,1,3)],('smooth',90)),
-    ([('raw',300,1,1,9),('raw',200,1,2,10)],('raw',200)),
-])
-def test_canonical_ranking_distinguishes_placeholder_and_opaque_overlay_order(rows,expected):
-    db=sqlite3.connect(':memory:')
-    db.execute('CREATE TABLE c (variant TEXT, overlay_id INTEGER, populated INTEGER, overlay_seq INTEGER, updated_at INTEGER, original_initial_variant TEXT)')
-    db.executemany("INSERT INTO c VALUES (?,?,?,?,?,'smooth')",rows)
-    actual=db.execute('SELECT variant,overlay_id FROM c ORDER BY '+m.RANK_ORDER+' LIMIT 1').fetchone()
-    assert actual==expected
-    db.close()
+
+def test_0004_is_intentionally_noop_for_non_destructive_cutover():
+    text = AUDIT.read_text(encoding="utf-8")
+    assert 'revision = "0004_scene_audit_repairs"' in text
+    assert 'down_revision = "0003_scenes_immutable_tasks"' in text
+    assert "op.execute(" not in text
+    assert "INSERT INTO" not in text
+    assert "UPDATE " not in text
+    assert "DELETE FROM" not in text
