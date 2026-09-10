@@ -18,7 +18,7 @@ def test_upload_routes_are_split_by_source_format():
     assert "dxf_only=True" in dxf_upload
 
 
-def test_tables_upload_does_not_parse_xlsx_inside_api_process():
+def test_tables_upload_keeps_xlsx_parsing_out_of_async_route_body():
     source = (Path(__file__).resolve().parents[1] / "rebar_service/api.py").read_text(encoding="utf-8")
     start = source.index('async def create_task_tables_upload(')
     end = source.index('@app.post("/v1/tasks/json_upload"', start)

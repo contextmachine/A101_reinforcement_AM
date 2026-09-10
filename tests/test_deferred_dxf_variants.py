@@ -108,3 +108,61 @@ def test_pipeline_materializes_deferred_variants_before_loading_them():
 
     assert workflow.store.materialized is True
     assert rows[0]["load"] == 2.0
+
+
+def test_scene_creation_materializes_deferred_source_before_insert(monkeypatch):
+    database = _CaptureDatabase()
+    store = PostgresStore(Settings(), database=database)
+    built = []
+    variants = {
+        "raw": [{"points": [[0, 0], [100, 0], [0, 100]], "load": 1.0}],
+        "smooth": [{"points": [[0, 0], [100, 0], [0, 100]], "load": 1.0}],
+    }
+
+    def _build(input_obj):
+        built.append(dict(input_obj))
+        return variants
+
+    monkeypatch.setattr(postgres_store_module, "build_polygon_variants", _build)
+
+    store.create_scene(
+        "scene-dxf",
+        {"state": "ready"},
+        {"kind": "dxf", "filename": "drawing.dxf", "content": b"DXF bytes"},
+    )
+
+    assert built and built[0]["kind"] == "dxf"
+    scene_insert = next(params for sql, params in database.calls if "INSERT INTO scenes" in sql)
+    variant_inserts = [params for sql, params in database.calls if "INSERT INTO scene_variants" in sql]
+    assert scene_insert["state"] == "ready"
+    assert {params["polygons"] for params in variant_inserts} != {"[]"}
+
+
+@pytest.mark.parametrize("kind", ["json", "pickle", "xlsx_tables"])
+def test_scene_creation_materializes_all_supported_uploaded_sources(kind):
+    import json
+    import pickle
+    from rebar_service.source_polygons import pack_xlsx_tables_bundle
+    from test_xlsx_source_polygons import _sample_tables
+
+    database = _CaptureDatabase()
+    store = PostgresStore(Settings(), database=database)
+    polygons = [{"points": [[0, 0], [100, 0], [0, 100]], "load": 1.0}]
+    if kind == "json":
+        input_obj = {"kind": "json", "filename": "scene.json", "content": json.dumps({"polygons": polygons}).encode()}
+    elif kind == "pickle":
+        input_obj = {"kind": "pickle", "filename": "scene.pkl", "content": pickle.dumps(polygons)}
+    else:
+        nodes, elements, loads = _sample_tables()
+        input_obj = {
+            "kind": "xlsx_tables",
+            "filename": "tables.zip",
+            "content": pack_xlsx_tables_bundle(nodes, elements, loads),
+            "load_column": 2,
+        }
+
+    store.create_scene("scene-" + kind, {"state": "ready"}, input_obj)
+
+    variant_inserts = [params for sql, params in database.calls if "INSERT INTO scene_variants" in sql]
+    assert len(variant_inserts) == 2
+    assert all(params["polygons"] != "[]" for params in variant_inserts)

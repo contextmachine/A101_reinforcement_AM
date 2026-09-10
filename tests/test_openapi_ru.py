@@ -42,7 +42,9 @@ def test_multipart_config_has_valid_json_example_not_a_python_dict():
 def test_mass_and_async_rules_are_in_openapi_and_schema_is_cached():
     s = app.openapi()
     assert "with_anchorage_unclipped_kg" in s["info"]["description"]
-    assert "materialize_source" in s["paths"]["/v1/tasks/upload"]["post"]["description"]
+    upload_description = s["paths"]["/v1/tasks/upload"]["post"]["description"]
+    assert "API" in upload_description
+    assert "materialize_source" not in upload_description
     assert "OFFSET" in s["paths"]["/v1/tasks/{task_id}/component-events"]["get"]["description"]
     assert "WebSocket" in s["info"]["description"]
     assert s is app.openapi()

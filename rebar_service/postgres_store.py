@@ -1727,12 +1727,31 @@ class PostgresStore:
         """Persist reusable source data independently from any analysis task."""
 
         kind = str(input_obj.get("kind", "polygons"))
-        deferred_source = kind in {"dxf", "xlsx_tables", "json", "pickle"}
-        variants = {"raw": [], "smooth": []} if deferred_source else build_polygon_variants(input_obj)
+        source_requires_content = kind in {"dxf", "xlsx_tables", "json", "pickle"}
+        materialized_input: Mapping[str, Any] = input_obj
+        if kind == "xlsx_tables":
+            from .source_polygons import source_polygons_from_xlsx_bundle
+
+            materialized_input = source_polygons_from_xlsx_bundle(
+                bytes(input_obj.get("content") or b""),
+                load_column=int(input_obj.get("load_column", 1)),
+            )
+        elif kind == "json":
+            from .source_polygons import source_polygons_from_json_bytes
+
+            materialized_input = source_polygons_from_json_bytes(bytes(input_obj.get("content") or b""))
+        elif kind == "pickle":
+            from .safe_pickle import load_source_polygons_pickle
+
+            materialized_input = load_source_polygons_pickle(
+                bytes(input_obj.get("content") or b""),
+                max_polygons=int(self.settings.max_source_polygons),
+            )
+        variants = build_polygon_variants(materialized_input)
         content = input_obj.get("content")
         source_bytes = bytes(content) if isinstance(content, (bytes, bytearray, memoryview)) else None
-        if deferred_source and source_bytes is None:
-            raise ValueError(f"source content is required for deferred scene kind={kind}")
+        if source_requires_content and source_bytes is None:
+            raise ValueError(f"source content is required for uploaded scene kind={kind}")
 
         source_sha256 = sha256(
             source_bytes if source_bytes is not None else _json_param(variants["raw"]).encode("utf-8")
@@ -1744,13 +1763,11 @@ class PostgresStore:
         }
         metadata = dict(meta.get("metadata", {}) or {})
         now = _utc_from_epoch(meta.get("created_at", time.time()))
-        state = str(meta.get("state") or ("preparing" if deferred_source else "ready"))
+        state = str(meta.get("state") or "ready")
 
-        components: list[dict[str, Any]] = []
-        if not deferred_source:
-            from .scene_geometry import build_stable_scene_components
+        from .scene_geometry import build_stable_scene_components
 
-            components = build_stable_scene_components(variants["raw"])
+        components = build_stable_scene_components(variants["raw"])
 
         try:
             with self.database.begin() as conn:
@@ -1787,7 +1804,7 @@ class PostgresStore:
                 for variant in ("raw", "smooth"):
                     smoothing = (
                         {"algorithm": "smooth_load", "version": 1, "threshold": 0.6}
-                        if variant == "smooth" and not deferred_source
+                        if variant == "smooth"
                         else None
                     )
                     conn.execute(

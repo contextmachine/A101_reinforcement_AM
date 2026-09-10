@@ -124,19 +124,20 @@ def _build_task(
     limit = int(requested_limit or settings.max_jobs_per_task)
     initial_state = "queued_preparation" if start_pipeline else "uploaded"
 
-    # Historical upload routes create a reusable scene transparently.  A scene
-    # created as part of a task is materialized by the task's materialize_source
-    # job, so we deliberately do not enqueue a second scene-only job here.
+    # Upload routes materialize source polygons in the API process.  Tasks then
+    # reference the immutable ready scene, while workers only handle the heavier
+    # analysis pipeline (prepare_field / solve / result assembly).
     selected_scene_id = str(scene_id or uuid.uuid4().hex)
+    task_input_obj = input_obj
     if scene_id is None:
-        deferred_scene = str(input_obj.get("kind", "")) in {"dxf", "xlsx_tables", "json", "pickle"}
         create_scene = getattr(store, "create_scene", None)
         if callable(create_scene):
             create_scene(
                 selected_scene_id,
-                {"state": "preparing" if deferred_scene else "ready", "created_at": now},
+                {"state": "ready", "created_at": now},
                 input_obj,
             )
+        task_input_obj = {"kind": "scene_ref", "scene_id": selected_scene_id}
 
     selected_variant = analysis_variant(smooth)
     selected_components = list(component_selection or ([-2] if bool(parameters.whole) else [-3]))
@@ -172,7 +173,7 @@ def _build_task(
         "exhausted": False,
         "window": max(1, limit * settings.schedule_window_factor),
     }
-    store.create_task(task_id, meta, plan, input_obj)
+    store.create_task(task_id, meta, plan, task_input_obj)
     store.publish_event(
         task_id,
         "task_created",
@@ -187,10 +188,7 @@ def _build_task(
             "overlay_id": int(overlay_id),
         },
     )
-    deferred_source = str(input_obj.get("kind", "")) in {"dxf", "xlsx_tables", "json", "pickle"}
-    if deferred_source:
-        workflow.materialize_task_source(task_id, continue_pipeline=bool(start_pipeline), smooth=smooth)
-    elif start_pipeline:
+    if start_pipeline:
         workflow.prepare_task(task_id, auto_solve=True, smooth=smooth, overlay_id=int(overlay_id))
     return TaskCreated(
         task_id=task_id,
@@ -204,14 +202,18 @@ def _build_task(
 
 
 def _create_scene(input_obj: dict) -> SceneCreated:
-    """Create a reusable scene and queue deferred materialization when needed."""
+    """Parse and persist a reusable ready scene inside the API process."""
     scene_id = uuid.uuid4().hex
-    deferred = str(input_obj.get("kind", "")) in {"dxf", "xlsx_tables", "json", "pickle"}
-    state = "preparing" if deferred else "ready"
-    store.create_scene(scene_id, {"state": state, "created_at": time.time()}, input_obj)
-    if deferred:
-        workflow.enqueue_scene_materialization(scene_id)
-    return SceneCreated(scene_id=scene_id, state=state)
+    store.create_scene(scene_id, {"state": "ready", "created_at": time.time()}, input_obj)
+    return SceneCreated(scene_id=scene_id, state="ready")
+
+
+async def _create_scene_response(input_obj: dict) -> SceneCreated:
+    """Map user-source parsing failures to a synchronous client error."""
+    try:
+        return await run_in_threadpool(lambda: _create_scene(input_obj))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 async def _read_upload_bytes(file: UploadFile, *, label: str = "Input file") -> bytes:
@@ -222,7 +224,7 @@ async def _read_upload_bytes(file: UploadFile, *, label: str = "Input file") -> 
 
 
 async def _read_xlsx_file(file: UploadFile, *, label: str) -> bytes:
-    """Read and size-check an XLSX source; workbook parsing stays in the worker."""
+    """Read and size-check an XLSX source before API-side polygon preparation."""
     if not (file.filename or "").lower().endswith(".xlsx"):
         raise HTTPException(status_code=415, detail=f"{label} must be a .xlsx file")
     return await _read_upload_bytes(file, label=label)
@@ -347,19 +349,19 @@ def ready():
 
 @app.post("/v1/scenes/dxf_upload", response_model=SceneCreated)
 async def create_scene_dxf_upload(file: UploadFile = File(...)):
-    """Upload one DXF source and create a reusable scene without starting analysis."""
+    """Parse one DXF in the API and create a ready reusable scene without analysis."""
     input_obj = await _read_upload_input(file, dxf_only=True)
-    return await run_in_threadpool(lambda: _create_scene(input_obj))
+    return await _create_scene_response(input_obj)
 
 
 @app.post("/v1/scenes/json_upload", response_model=SceneCreated)
 async def create_scene_json_upload(file: UploadFile = File(...)):
-    """Upload source-polygons JSON and create a reusable scene."""
+    """Parse source-polygons JSON in the API and create a ready reusable scene."""
     if not (file.filename or "").lower().endswith(".json"):
         raise HTTPException(status_code=415, detail="file must be a .json file")
     content = await _read_upload_bytes(file)
     input_obj = {"kind": "json", "filename": file.filename or "polygons.json", "content": content}
-    return await run_in_threadpool(lambda: _create_scene(input_obj))
+    return await _create_scene_response(input_obj)
 
 
 @app.post("/v1/scenes/tables_upload", response_model=SceneCreated)
@@ -369,7 +371,7 @@ async def create_scene_tables_upload(
     loads_file: UploadFile = File(...),
     load_column: Annotated[int, Form(ge=1, le=4)] = 1,
 ):
-    """Upload three XLSX source tables and create a reusable scene."""
+    """Parse three XLSX source tables in the API and create a ready reusable scene."""
     nodes_content, elements_content, loads_content = await asyncio.gather(
         _read_xlsx_file(nodes_file, label="nodes_file"),
         _read_xlsx_file(elements_file, label="elements_file"),
@@ -387,18 +389,18 @@ async def create_scene_tables_upload(
         "elements_filename": elements_file.filename or "elements.xlsx",
         "loads_filename": loads_file.filename or "loads.xlsx",
     }
-    return await run_in_threadpool(lambda: _create_scene(input_obj))
+    return await _create_scene_response(input_obj)
 
 
 @app.post("/v1/scenes/pkl_upload", response_model=SceneCreated)
 async def create_scene_pkl_upload(file: UploadFile = File(...)):
-    """Upload a restricted pickle polygon source and create a reusable scene."""
+    """Parse a restricted pickle source in the API and create a ready reusable scene."""
     suffix = (file.filename or "").lower()
     if not suffix.endswith((".pickle", ".pkl")):
         raise HTTPException(status_code=415, detail="file must be a .pickle or .pkl file")
     content = await _read_upload_bytes(file)
     input_obj = {"kind": "pickle", "filename": file.filename or "polygons.pickle", "content": content}
-    return await run_in_threadpool(lambda: _create_scene(input_obj))
+    return await _create_scene_response(input_obj)
 
 
 @app.get("/v1/scenes/{scene_id}", response_model=SceneInfo)
@@ -580,7 +582,7 @@ async def create_task_upload(
     component_result_top_k: int | None = Query(None, ge=1, le=100),
     validate_results: bool | None = Query(None),
 ):
-    """Create a task from one DXF file. Parsing is deferred to a worker."""
+    """Create a task from one DXF file. Source polygons are prepared in the API."""
     input_obj = await _read_upload_input(file, dxf_only=True)
     if whole is None:
         try:
@@ -609,7 +611,7 @@ async def create_task_tables_upload(
     component_result_top_k: int | None = Query(None, ge=1, le=100),
     validate_results: bool | None = Query(None),
 ):
-    """Create a task from three XLSX exports; workbook parsing runs in a worker."""
+    """Create a task from three XLSX exports; polygons are prepared in the API."""
     nodes_content, elements_content, loads_content = await asyncio.gather(
         _read_xlsx_file(nodes_file, label="nodes_file"),
         _read_xlsx_file(elements_file, label="elements_file"),

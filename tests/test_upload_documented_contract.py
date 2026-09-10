@@ -13,7 +13,7 @@ def test_upload_without_required_file_is_422_not_500(endpoint):
     assert any(row["type"] == "missing" for row in errors)
 
 
-def test_tables_upload_reads_three_files_without_parsing_them_in_api(monkeypatch):
+def test_tables_upload_route_packs_three_files_before_threadpool_materialization(monkeypatch):
     seen = {}
     async def finish(**kwargs):
         seen.update(kwargs)

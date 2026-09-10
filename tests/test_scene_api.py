@@ -105,3 +105,81 @@ def test_three_scene_tables_roundtrip_to_source_polygons(monkeypatch):
     result = source_polygons_from_xlsx_bundle(captured[0]['content'], load_column=2)
     assert result['polygons'][0]['load'] == 8.1
     assert len(result['polygons']) == 2
+
+
+def test_create_scene_materializes_in_api_and_never_enqueues_scene_job(monkeypatch):
+    seen = {}
+
+    def create_scene(scene_id, meta, input_obj):
+        seen["scene_id"] = scene_id
+        seen["meta"] = dict(meta)
+        seen["input"] = dict(input_obj)
+
+    monkeypatch.setattr(api.store, "create_scene", create_scene)
+    monkeypatch.setattr(
+        api.workflow,
+        "enqueue_scene_materialization",
+        lambda scene_id: pytest.fail("scene polygon preparation must stay in the API request"),
+    )
+
+    result = api._create_scene({"kind": "dxf", "filename": "a.dxf", "content": b"DXF"})
+
+    assert result.state == "ready"
+    assert seen["meta"]["state"] == "ready"
+    assert seen["input"]["kind"] == "dxf"
+
+
+def test_uploaded_task_starts_compute_directly_without_materialize_source_job(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        api.store,
+        "create_scene",
+        lambda scene_id, meta, input_obj: calls.append(("scene", dict(meta), dict(input_obj))),
+    )
+    monkeypatch.setattr(
+        api.store,
+        "create_task",
+        lambda task_id, meta, plan, input_obj: calls.append(("task", dict(meta), dict(input_obj))),
+    )
+    monkeypatch.setattr(api.store, "publish_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        api.workflow,
+        "materialize_task_source",
+        lambda *args, **kwargs: pytest.fail("uploaded task must not enqueue materialize_source"),
+    )
+    monkeypatch.setattr(
+        api.workflow,
+        "prepare_task",
+        lambda task_id, **kwargs: calls.append(("prepare", task_id, dict(kwargs))) or True,
+    )
+
+    created = api._build_task(
+        api.TaskParameters(n=[1]),
+        {"kind": "dxf", "filename": "a.dxf", "content": b"DXF"},
+        start_pipeline=True,
+    )
+
+    scene_call = next(row for row in calls if row[0] == "scene")
+    task_call = next(row for row in calls if row[0] == "task")
+    prepare_call = next(row for row in calls if row[0] == "prepare")
+    assert scene_call[1]["state"] == "ready"
+    assert task_call[2] == {"kind": "scene_ref", "scene_id": created.scene_id}
+    assert prepare_call[1] == created.task_id
+
+
+def test_scene_upload_parse_error_is_422(monkeypatch):
+    from rebar_service.source_polygons import SourcePolygonsError
+
+    def fail(_input_obj):
+        raise SourcePolygonsError("bad source")
+
+    monkeypatch.setattr(api, "_create_scene", fail)
+    error_client = TestClient(api.app, raise_server_exceptions=False)
+    response = error_client.post(
+        "/v1/scenes/dxf_upload",
+        files={"file": ("bad.dxf", b"broken", "application/dxf")},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "bad source"
