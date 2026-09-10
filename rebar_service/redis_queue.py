@@ -167,7 +167,11 @@ class RedisQueue:
         )
 
         # Одна поставленная job -> одно удаление из workload.
-        pipe.lrem(self.settings.workload_queue, 1, job_id)
+        pipe.lrem(
+            self.settings.workload_queue,
+            1,
+            job_id,
+        )
 
         # Удаляем lease.
         pipe.delete(
