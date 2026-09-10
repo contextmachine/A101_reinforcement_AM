@@ -11,7 +11,7 @@ from .codec import decode_object, encode_object, sha256
 from .config import Settings
 from .database import Database
 from .jsonutil import dumps, loads, to_jsonable
-from .overlays import normalize_overlay_id, resolve_overlay, resolve_overlay_selector
+from .overlays import normalize_overlay_id, resolve_overlay
 from .polygon_storage import build_polygon_variants, geometry_polygons
 
 
@@ -116,10 +116,6 @@ class PostgresStore:
         "initial_variant",
         "paused",
         "generation",
-        "scene_id",
-        "analysis_variant",
-        "analysis_overlay_id",
-        "component_selection",
     }
     _JSON_TASK_COLUMNS = {"parameters", "n_source"}
 
@@ -312,15 +308,6 @@ class PostgresStore:
                 ).mappings().first()
             if row is None:
                 raise KeyError(f"source input for task={task_id} not found")
-            if str(row["kind"]) == "scene_ref":
-                scene_id = dict(_json_value(row["metadata"], {}) or {}).get("scene_id")
-                with self.database.connect() as conn:
-                    row = conn.execute(
-                        text("SELECT kind, filename, content, sha256, metadata FROM scene_sources WHERE scene_id=:scene_id"),
-                        {"scene_id": scene_id},
-                    ).mappings().first()
-                if row is None:
-                    raise KeyError(f"source scene for task={task_id} not found")
             kind = str(row["kind"])
             metadata = dict(_json_value(row["metadata"], {}) or {})
             if kind in {"dxf", "xlsx_tables", "json", "pickle"}:
@@ -391,12 +378,6 @@ class PostgresStore:
                 {"task_id": task_id},
             ).mappings().all()
         initial_variant = str(row["initial_variant"])
-        analysis_variant = str(row.get("analysis_variant") or initial_variant)
-        analysis_overlay_id = int(row.get("analysis_overlay_id") or 0)
-        scene_id = str(row.get("scene_id") or task_id)
-        component_selection = [
-            int(x) for x in (row.get("component_selection") or ([-2] if bool(row["whole"]) else [-3]))
-        ]
         meta: dict[str, Any] = {}
         meta.update(
             {
@@ -407,9 +388,7 @@ class PostgresStore:
                 "cancelled": row["cancelled_at"] is not None,
                 "paused": bool(row["paused"]),
                 "parameters": dict(_json_value(row["parameters"], {}) or {}),
-                "requested_n": self.requested_ns(
-                    task_id, variant=analysis_variant, overlay_id=analysis_overlay_id
-                ),
+                "requested_n": self.requested_ns(task_id, variant=initial_variant),
                 "n_mode": str(row["n_mode"]),
                 "n_source": _json_value(row["n_source"], []),
                 "scan_mode": str(row["scan_mode"]),
@@ -421,12 +400,6 @@ class PostgresStore:
                 "initial_variant": initial_variant,
                 "initial_smooth": initial_variant == "smooth",
                 "generation": int(row["generation"]),
-                "scene_id": scene_id,
-                "analysis_variant": analysis_variant,
-                "analysis_smooth": analysis_variant == "smooth",
-                "analysis_overlay_id": analysis_overlay_id,
-                "overlay_id": analysis_overlay_id,
-                "component_selection": component_selection,
             }
         )
         effective = {
@@ -1408,38 +1381,17 @@ class PostgresStore:
         meta = self.get_meta(task_id)
         if meta is None:
             return None
-
-        scene_id = str(meta.get("scene_id") or task_id)
-        legacy = scene_id == str(task_id)
-        if legacy:
-            # Revision-0003 canonicalizes historical frontend reads to raw/base.
-            variant = "raw"
-            overlay_id = 0
-        else:
-            variant = self._variant(
-                str(meta.get("analysis_variant") or meta.get("initial_variant") or "raw")
-            )
-            overlay_id = int(meta.get("analysis_overlay_id", 0) or 0)
-
-        statuses = self.get_n_statuses(
-            task_id, variant=variant, overlay_id=overlay_id
-        )
+        statuses = self.get_n_statuses(task_id, variant=str(meta.get("initial_variant", "raw")))
         counts: dict[str, int] = {}
         for value in statuses.values():
             status = str(value.get("status", "unknown"))
             counts[status] = counts.get(status, 0) + 1
         return {
             "task": meta,
-            "scene_id": scene_id,
-            "variant": variant,
-            "smooth": variant == "smooth",
-            "overlay_id": overlay_id,
-            "plan": self.get_plan(task_id, variant=variant, overlay_id=overlay_id),
+            "plan": self.get_plan(task_id, variant=str(meta.get("initial_variant", "raw"))),
             "n": statuses,
             "status_counts": counts,
-            "results": self.get_result_metas(
-                task_id, variant=variant, overlay_id=overlay_id
-            ),
+            "results": self.get_result_metas(task_id),
         }
 
     # ======================================================================
@@ -1456,23 +1408,8 @@ class PostgresStore:
     ) -> None:
         kind = str(input_obj.get("kind", "polygons"))
         deferred_source = kind in {"dxf", "xlsx_tables", "json", "pickle"}
-        scene_ref = kind == "scene_ref"
-        if scene_ref:
-            ref = str(input_obj["scene_id"])
-            scene = self.get_scene(ref)
-            if scene is None or str(scene.get("state")) != "ready":
-                raise ValueError("Scene is not ready")
-            # Source parsing/smoothing belongs to scene materialization, not PUT.
-            variants = {"raw": [], "smooth": []}  # SQL copies immutable scene rows below.
-        else:
-            variants = {"raw": [], "smooth": []} if deferred_source else build_polygon_variants(input_obj)
+        variants = {"raw": [], "smooth": []} if deferred_source else build_polygon_variants(input_obj)
         initial_variant = self._variant(str(meta.get("initial_variant", "raw")))
-        scene_id = str(meta.get("scene_id") or task_id)
-        analysis_variant = self._variant(str(meta.get("analysis_variant") or initial_variant))
-        analysis_overlay_id = normalize_overlay_id(meta.get("analysis_overlay_id", 0))
-        component_selection = [
-            int(x) for x in (meta.get("component_selection") or ([-2] if bool(meta.get("whole", False)) else [-3]))
-        ]
         requested = list(dict.fromkeys(int(n) for n in plan.get("order", meta.get("requested_n", []))))
         filename = (
             str(input_obj.get("filename"))
@@ -1503,15 +1440,6 @@ class PostgresStore:
             for key, value in input_obj.items()
             if key not in {"content", "polygons"}
         }
-        # Compatibility: production callers that predate scene-aware API still
-        # get a scene. Lightweight unit-test databases may expose only begin().
-        if hasattr(self.database, "connect") and self.get_scene(scene_id) is None:
-            self.create_scene(
-                scene_id,
-                {"state": "preparing" if deferred_source else "ready", "created_at": meta.get("created_at", time.time())},
-                input_obj,
-            )
-
         now = _utc_from_epoch(meta.get("created_at", time.time()))
         try:
             with self.database.begin() as conn:
@@ -1522,14 +1450,11 @@ class PostgresStore:
                             id, state, parameters, n_mode, n_source, scan_mode, whole,
                             component_result_top_k, validate_results, max_concurrent_jobs,
                             manual_mode, initial_variant, paused, cancelled_at, generation,
-                            scene_id, analysis_variant, analysis_overlay_id, component_selection,
                             created_at, updated_at
                         ) VALUES (
                             :id, :state, CAST(:parameters AS jsonb), :n_mode, CAST(:n_source AS jsonb),
                             :scan_mode, :whole, :top_k, :validate_results, :max_jobs, :manual_mode,
-                            :initial_variant, :paused, NULL, 0,
-                            :scene_id, :analysis_variant, :analysis_overlay_id, :component_selection,
-                            :created_at, :updated_at
+                            :initial_variant, :paused, NULL, 0, :created_at, :updated_at
                         )
                         """
                     ),
@@ -1547,10 +1472,6 @@ class PostgresStore:
                         "manual_mode": bool(meta.get("manual_mode", False)),
                         "initial_variant": initial_variant,
                         "paused": bool(meta.get("paused", False)),
-                        "scene_id": scene_id,
-                        "analysis_variant": analysis_variant,
-                        "analysis_overlay_id": analysis_overlay_id,
-                        "component_selection": component_selection,
                         "created_at": now,
                         "updated_at": _utc_from_epoch(meta.get("updated_at", now)),
                     },
@@ -1578,45 +1499,35 @@ class PostgresStore:
                         else None
                     )
                     variant_state = "source_pending" if deferred_source else "stored"
-                    if scene_ref:
-                        conn.execute(text("""
-                            INSERT INTO task_variants (task_id, variant, polygons, smoothing_metadata,
-                                                       preparation_state, created_at, updated_at)
-                            SELECT :task_id, variant, polygons, smoothing_metadata, 'stored', :created_at, :created_at
-                            FROM scene_variants WHERE scene_id=:scene_id AND variant=:variant
-                        """), {"task_id": task_id, "scene_id": scene_id, "variant": variant, "created_at": now})
-                    else:
-                        conn.execute(
-                            text(
-                                """
-                                INSERT INTO task_variants (
-                                    task_id, variant, polygons, smoothing_metadata, preparation_state,
-                                    created_at, updated_at
-                                ) VALUES (
-                                    :task_id, :variant, CAST(:polygons AS jsonb), CAST(:smoothing AS jsonb),
-                                    :preparation_state, :created_at, :created_at
-                                )
-                                """
-                            ),
-                            {
-                                "task_id": task_id,
-                                "variant": variant,
-                                "polygons": _json_param(polygons),
-                                "smoothing": None if smoothing is None else _json_param(smoothing),
-                                "preparation_state": variant_state,
-                                "created_at": now,
-                            },
-                        )
-                    if variant != analysis_variant:
-                        continue
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO task_variants (
+                                task_id, variant, polygons, smoothing_metadata, preparation_state,
+                                created_at, updated_at
+                            ) VALUES (
+                                :task_id, :variant, CAST(:polygons AS jsonb), CAST(:smoothing AS jsonb),
+                                :preparation_state, :created_at, :created_at
+                            )
+                            """
+                        ),
+                        {
+                            "task_id": task_id,
+                            "variant": variant,
+                            "polygons": _json_param(polygons),
+                            "smoothing": None if smoothing is None else _json_param(smoothing),
+                            "preparation_state": variant_state,
+                            "created_at": now,
+                        },
+                    )
                     conn.execute(
                         text(
                             """
                             INSERT INTO task_analyses (task_id, variant, overlay_id, preparation_state, created_at, updated_at)
-                            VALUES (:task_id, :variant, :overlay_id, 'stored', :created_at, :created_at)
+                            VALUES (:task_id, :variant, 0, 'stored', :created_at, :created_at)
                             """
                         ),
-                        {"task_id": task_id, "variant": variant, "overlay_id": analysis_overlay_id, "created_at": now},
+                        {"task_id": task_id, "variant": variant, "created_at": now},
                     )
                     for position, n in enumerate(requested):
                         conn.execute(
@@ -1625,12 +1536,12 @@ class PostgresStore:
                                 INSERT INTO task_n_requests (
                                     task_id, variant, overlay_id, n, position, status, requested_at, updated_at
                                 ) VALUES (
-                                    :task_id, :variant, :overlay_id, :n, :position, 'requested', :created_at, :created_at
+                                    :task_id, :variant, 0, :n, :position, 'requested', :created_at, :created_at
                                 )
                                 ON CONFLICT (task_id, variant, overlay_id, n) DO NOTHING
                                 """
                             ),
-                            {"task_id": task_id, "variant": variant, "overlay_id": analysis_overlay_id, "n": int(n), "position": position, "created_at": now},
+                            {"task_id": task_id, "variant": variant, "n": int(n), "position": position, "created_at": now},
                         )
         except Exception as exc:
             if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
@@ -1717,377 +1628,19 @@ class PostgresStore:
                 )
         return True
 
-    # ---------- reusable scene source / variants / stable components ----------
-    def create_scene(
-        self,
-        scene_id: str,
-        meta: Mapping[str, Any],
-        input_obj: Mapping[str, Any],
-    ) -> None:
-        """Persist reusable source data independently from any analysis task."""
-
-        kind = str(input_obj.get("kind", "polygons"))
-        deferred_source = kind in {"dxf", "xlsx_tables", "json", "pickle"}
-        variants = {"raw": [], "smooth": []} if deferred_source else build_polygon_variants(input_obj)
-        content = input_obj.get("content")
-        source_bytes = bytes(content) if isinstance(content, (bytes, bytearray, memoryview)) else None
-        if deferred_source and source_bytes is None:
-            raise ValueError(f"source content is required for deferred scene kind={kind}")
-
-        source_sha256 = sha256(
-            source_bytes if source_bytes is not None else _json_param(variants["raw"]).encode("utf-8")
-        )
-        source_meta = {
-            key: json_safe_value(value)
-            for key, value in input_obj.items()
-            if key not in {"content", "polygons"}
-        }
-        metadata = dict(meta.get("metadata", {}) or {})
-        now = _utc_from_epoch(meta.get("created_at", time.time()))
-        state = str(meta.get("state") or ("preparing" if deferred_source else "ready"))
-
-        components: list[dict[str, Any]] = []
-        if not deferred_source:
-            from .scene_geometry import build_stable_scene_components
-
-            components = build_stable_scene_components(variants["raw"])
-
-        try:
-            with self.database.begin() as conn:
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO scenes (id, state, metadata, created_at, updated_at)
-                        VALUES (:id, :state, CAST(:metadata AS jsonb), :created_at, :created_at)
-                        """
-                    ),
-                    {
-                        "id": scene_id,
-                        "state": state,
-                        "metadata": _json_param(metadata),
-                        "created_at": now,
-                    },
-                )
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO scene_sources (scene_id, kind, filename, content, sha256, metadata)
-                        VALUES (:scene_id, :kind, :filename, :content, :sha256, CAST(:metadata AS jsonb))
-                        """
-                    ),
-                    {
-                        "scene_id": scene_id,
-                        "kind": kind,
-                        "filename": str(input_obj.get("filename")) if input_obj.get("filename") else None,
-                        "content": source_bytes,
-                        "sha256": source_sha256,
-                        "metadata": _json_param(source_meta),
-                    },
-                )
-                for variant in ("raw", "smooth"):
-                    smoothing = (
-                        {"algorithm": "smooth_load", "version": 1, "threshold": 0.6}
-                        if variant == "smooth" and not deferred_source
-                        else None
-                    )
-                    conn.execute(
-                        text(
-                            """
-                            INSERT INTO scene_variants (
-                                scene_id, variant, polygons, smoothing_metadata, created_at, updated_at
-                            ) VALUES (
-                                :scene_id, :variant, CAST(:polygons AS jsonb), CAST(:smoothing AS jsonb),
-                                :created_at, :created_at
-                            )
-                            """
-                        ),
-                        {
-                            "scene_id": scene_id,
-                            "variant": variant,
-                            "polygons": _json_param(variants[variant]),
-                            "smoothing": None if smoothing is None else _json_param(smoothing),
-                            "created_at": now,
-                        },
-                    )
-                for component in components:
-                    conn.execute(
-                        text(
-                            """
-                            INSERT INTO scene_components (scene_id, component_id, polygon_indices, bounds)
-                            VALUES (:scene_id, :component_id, :polygon_indices, :bounds)
-                            """
-                        ),
-                        {
-                            "scene_id": scene_id,
-                            "component_id": int(component["id"]),
-                            "polygon_indices": [int(x) for x in component.get("polygon_indices", [])],
-                            "bounds": component.get("bounds"),
-                        },
-                    )
-        except Exception as exc:
-            if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
-                raise ValueError(f"Сцена {scene_id} уже существует") from exc
-            raise
-
-    def get_scene(self, scene_id: str) -> dict[str, Any] | None:
-        with self.database.connect() as conn:
-            row = conn.execute(
-                text("SELECT id, state, metadata, created_at, updated_at FROM scenes WHERE id=:scene_id"),
-                {"scene_id": scene_id},
-            ).mappings().first()
-        if row is None:
-            return None
-        return {
-            "scene_id": str(row["id"]),
-            "state": str(row["state"]),
-            "metadata": dict(_json_value(row["metadata"], {}) or {}),
-            "created_at": _epoch(row["created_at"]),
-            "updated_at": _epoch(row["updated_at"]),
-            "components": self.scene_components(scene_id),
-        }
-
-    def set_scene_state(self, scene_id: str, state: str, **metadata: Any) -> dict[str, Any]:
-        if self.get_scene(scene_id) is None:
-            raise KeyError(scene_id)
-        with self.database.begin() as conn:
-            if metadata:
-                conn.execute(
-                    text(
-                        """
-                        UPDATE scenes
-                        SET state=:state,
-                            metadata=metadata || CAST(:metadata AS jsonb),
-                            updated_at=now()
-                        WHERE id=:scene_id
-                        """
-                    ),
-                    {"scene_id": scene_id, "state": str(state), "metadata": _json_param(metadata)},
-                )
-            else:
-                conn.execute(
-                    text("UPDATE scenes SET state=:state, updated_at=now() WHERE id=:scene_id"),
-                    {"scene_id": scene_id, "state": str(state)},
-                )
-        return dict(self.get_scene(scene_id) or {})
-
-    def load_scene_variant_polygons(self, scene_id: str, *, variant: str = "raw") -> list[dict[str, Any]]:
-        selected = self._variant(variant)
-        with self.database.connect() as conn:
-            row = conn.execute(
-                text("SELECT polygons FROM scene_variants WHERE scene_id=:scene_id AND variant=:variant"),
-                {"scene_id": scene_id, "variant": selected},
-            ).first()
-        if row is None:
-            raise KeyError(f"scene variant {scene_id}/{selected} not found")
-        return [dict(item) for item in (_json_value(row[0], []) or [])]
-
-    def save_scene_components(self, scene_id: str, components: Sequence[Mapping[str, Any]]) -> None:
-        if self.get_scene(scene_id) is None:
-            raise KeyError(scene_id)
-        with self.database.begin() as conn:
-            conn.execute(text("DELETE FROM scene_components WHERE scene_id=:scene_id"), {"scene_id": scene_id})
-            for raw in components:
-                component = dict(raw)
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO scene_components (scene_id, component_id, polygon_indices, bounds)
-                        VALUES (:scene_id, :component_id, :polygon_indices, :bounds)
-                        """
-                    ),
-                    {
-                        "scene_id": scene_id,
-                        "component_id": int(component.get("id", component.get("component_id"))),
-                        "polygon_indices": [int(x) for x in component.get("polygon_indices", [])],
-                        "bounds": component.get("bounds"),
-                    },
-                )
-
-    def scene_components(self, scene_id: str) -> list[dict[str, Any]]:
-        with self.database.connect() as conn:
-            rows = conn.execute(
-                text(
-                    """
-                    SELECT component_id, polygon_indices, bounds
-                    FROM scene_components WHERE scene_id=:scene_id ORDER BY component_id
-                    """
-                ),
-                {"scene_id": scene_id},
-            ).mappings().all()
-        return [
-            {
-                "id": int(row["component_id"]),
-                "polygon_indices": [int(x) for x in row["polygon_indices"] or []],
-                "bounds": None if row["bounds"] is None else [float(x) for x in row["bounds"]],
-            }
-            for row in rows
-        ]
-
-    def ensure_scene_variants(self, scene_id: str) -> bool:
-        """Materialize deferred source, both variants and stable components once."""
-
-        with self.database.begin() as conn:
-            conn.execute(
-                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
-                {"lock_name": f"scene:{scene_id}"},
-            )
-            scene = conn.execute(
-                text("SELECT state, metadata FROM scenes WHERE id=:scene_id FOR UPDATE"),
-                {"scene_id": scene_id},
-            ).mappings().first()
-            if scene is None:
-                raise KeyError(scene_id)
-
-            variants_now = conn.execute(
-                text("SELECT variant, polygons FROM scene_variants WHERE scene_id=:scene_id ORDER BY variant"),
-                {"scene_id": scene_id},
-            ).mappings().all()
-            existing = {str(r["variant"]): list(_json_value(r["polygons"], []) or []) for r in variants_now}
-            scene_metadata = dict(_json_value(scene.get("metadata"), {}) or {})
-            existing_ready = bool(existing.get("raw") and existing.get("smooth"))
-            if str(scene["state"]) == "ready" and existing_ready and not scene_metadata.get("needs_component_backfill"):
-                return False
-
-            source = conn.execute(
-                text("SELECT kind, filename, content, sha256, metadata FROM scene_sources WHERE scene_id=:scene_id"),
-                {"scene_id": scene_id},
-            ).mappings().first()
-            if source is None:
-                raise KeyError(f"source input for scene={scene_id} not found")
-            kind = str(source["kind"])
-            metadata = dict(_json_value(source["metadata"], {}) or {})
-            content = bytes(source["content"] or b"")
-
-            if existing_ready:
-                variants = existing
-            elif kind in {"dxf", "xlsx_tables", "json", "pickle"}:
-                if sha256(content) != str(source["sha256"]):
-                    raise IOError(f"source input for scene={scene_id} повреждён")
-                if kind == "dxf":
-                    input_obj = {"kind": "dxf", "filename": source["filename"] or "input.dxf", "content": content}
-                elif kind == "xlsx_tables":
-                    from .source_polygons import source_polygons_from_xlsx_bundle
-
-                    input_obj = source_polygons_from_xlsx_bundle(content, load_column=int(metadata["load_column"]))
-                elif kind == "json":
-                    from .source_polygons import source_polygons_from_json_bytes
-
-                    input_obj = source_polygons_from_json_bytes(content)
-                else:
-                    from .safe_pickle import load_source_polygons_pickle
-
-                    input_obj = load_source_polygons_pickle(content, max_polygons=int(self.settings.max_source_polygons))
-                variants = build_polygon_variants(input_obj)
-            elif kind == "polygons":
-                variants = {
-                    str(row["variant"]): [dict(x) for x in (_json_value(row["polygons"], []) or [])]
-                    for row in variants_now
-                }
-                if not variants.get("raw"):
-                    raise ValueError(f"scene={scene_id} has no raw polygons")
-                if not variants.get("smooth"):
-                    from A101.read_dxf import smooth_load
-                    from .polygon_storage import canonicalize_polygons, geometry_polygons
-
-                    variants["smooth"] = canonicalize_polygons(smooth_load(geometry_polygons(variants["raw"])))
-            else:
-                raise ValueError(f"unsupported scene source kind={kind}")
-
-            from .scene_geometry import build_stable_scene_components
-
-            components = build_stable_scene_components(variants["raw"])
-            for variant in ("raw", "smooth"):
-                smoothing = {"algorithm": "smooth_load", "version": 1, "threshold": 0.6} if variant == "smooth" else None
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO scene_variants (scene_id, variant, polygons, smoothing_metadata)
-                        VALUES (:scene_id, :variant, CAST(:polygons AS jsonb), CAST(:smoothing AS jsonb))
-                        ON CONFLICT (scene_id, variant) DO UPDATE SET
-                            polygons=EXCLUDED.polygons,
-                            smoothing_metadata=EXCLUDED.smoothing_metadata,
-                            updated_at=now()
-                        """
-                    ),
-                    {
-                        "scene_id": scene_id,
-                        "variant": variant,
-                        "polygons": _json_param(variants[variant]),
-                        "smoothing": None if smoothing is None else _json_param(smoothing),
-                    },
-                )
-            conn.execute(text("DELETE FROM scene_components WHERE scene_id=:scene_id"), {"scene_id": scene_id})
-            for component in components:
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO scene_components (scene_id, component_id, polygon_indices, bounds)
-                        VALUES (:scene_id, :component_id, :polygon_indices, :bounds)
-                        """
-                    ),
-                    {
-                        "scene_id": scene_id,
-                        "component_id": int(component["id"]),
-                        "polygon_indices": [int(x) for x in component.get("polygon_indices", [])],
-                        "bounds": component.get("bounds"),
-                    },
-                )
-            conn.execute(
-                text("UPDATE scenes SET state='ready', metadata=metadata - 'needs_component_backfill', updated_at=now() WHERE id=:scene_id"),
-                {"scene_id": scene_id},
-            )
-        return True
-
-    def sync_task_variants_from_scene(self, task_id: str, scene_id: str) -> None:
-        """Copy canonical scene variants into the task compatibility rows.
-
-        Derived analysis state remains task-owned; this only keeps historical
-        task storage APIs working without reparsing the uploaded source.
-        """
-        if self.get_scene(scene_id) is None:
-            raise KeyError(scene_id)
-        with self.database.begin() as conn:
-            rows = conn.execute(
-                text(
-                    "SELECT variant, polygons, smoothing_metadata FROM scene_variants "
-                    "WHERE scene_id=:scene_id ORDER BY variant"
-                ),
-                {"scene_id": scene_id},
-            ).mappings().all()
-            if not rows:
-                raise KeyError(f"scene variants for {scene_id} not found")
-            for row in rows:
-                conn.execute(
-                    text(
-                        """
-                        UPDATE task_variants SET
-                            polygons=CAST(:polygons AS jsonb),
-                            smoothing_metadata=CAST(:smoothing AS jsonb),
-                            preparation_state='stored',
-                            updated_at=now()
-                        WHERE task_id=:task_id AND variant=:variant
-                        """
-                    ),
-                    {
-                        "task_id": task_id,
-                        "variant": str(row["variant"]),
-                        "polygons": _json_param(_json_value(row["polygons"], []) or []),
-                        "smoothing": None if row["smoothing_metadata"] is None else _json_param(_json_value(row["smoothing_metadata"], {})),
-                    },
-                )
-
-    def scene_overlay_events(self, scene_id: str) -> list[dict[str, Any]]:
-        if self.get_scene(scene_id) is None:
-            raise KeyError(scene_id)
+    # ---------- overlay event log / analysis identity ----------
+    def overlay_events(self, task_id: str) -> list[dict[str, Any]]:
+        if self.get_meta(task_id) is None:
+            raise KeyError(task_id)
         with self.database.connect() as conn:
             rows = conn.execute(
                 text(
                     """
                     SELECT seq, overlay_id, event_type, idxs, real, created_at
-                    FROM scene_overlay_events WHERE scene_id=:scene_id ORDER BY seq
+                    FROM task_overlay_events WHERE task_id=:task_id ORDER BY seq
                     """
                 ),
-                {"scene_id": scene_id},
+                {"task_id": task_id},
             ).mappings().all()
         return [
             {
@@ -2101,23 +1654,19 @@ class PostgresStore:
             for row in rows
         ]
 
-    def append_scene_overlay_events(
-        self,
-        scene_id: str,
-        events: Sequence[Mapping[str, Any]],
-    ) -> list[dict[str, Any]]:
-        if self.get_scene(scene_id) is None:
-            raise KeyError(scene_id)
-        polygon_count = len(self.load_scene_variant_polygons(scene_id, variant="raw"))
+    def append_overlay_events(self, task_id: str, events: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        if self.get_meta(task_id) is None:
+            raise KeyError(task_id)
+        polygon_count = len(self.load_variant_polygons(task_id, variant="raw"))
         rows: list[dict[str, Any]] = []
         seen: set[int] = set()
         for raw in events:
             event_type = str(raw.get("type", "")).lower()
             if event_type not in {"clean", "unclean"}:
                 raise ValueError("overlay type must be 'clean' or 'unclean'")
-            overlay_id = int(raw.get("id"))
-            if overlay_id <= 0:
-                raise ValueError("overlay id must be a positive integer; 0 is reserved for base state")
+            overlay_id = normalize_overlay_id(raw.get("id"))
+            if overlay_id == 0:
+                raise ValueError("overlay id 0 is reserved for the base analysis")
             if overlay_id in seen:
                 raise ValueError(f"duplicate overlay id in request: {overlay_id}")
             seen.add(overlay_id)
@@ -2127,20 +1676,19 @@ class PostgresStore:
                 raise ValueError(f"source polygon indices out of range: {invalid}")
             rows.append({"id": overlay_id, "type": event_type, "idxs": idxs, "real": bool(raw.get("real", False))})
         if not rows:
-            return self.scene_overlay_events(scene_id)
+            return self.overlay_events(task_id)
         try:
             with self.database.begin() as conn:
-                conn.execute(text("SELECT id FROM scenes WHERE id=:scene_id FOR UPDATE"), {"scene_id": scene_id})
                 for row in rows:
                     conn.execute(
                         text(
                             """
-                            INSERT INTO scene_overlay_events (scene_id, overlay_id, event_type, idxs, real)
-                            VALUES (:scene_id, :overlay_id, :event_type, :idxs, :real)
+                            INSERT INTO task_overlay_events (task_id, overlay_id, event_type, idxs, real)
+                            VALUES (:task_id, :overlay_id, :event_type, :idxs, :real)
                             """
                         ),
                         {
-                            "scene_id": scene_id,
+                            "task_id": task_id,
                             "overlay_id": row["id"],
                             "event_type": row["type"],
                             "idxs": row["idxs"],
@@ -2149,117 +1697,30 @@ class PostgresStore:
                     )
         except Exception as exc:
             if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
-                raise ValueError("overlay id already exists for this scene") from exc
+                raise ValueError("overlay id already exists for this task") from exc
             raise
-        return self.scene_overlay_events(scene_id)
-
-    def resolve_scene_overlay_id(self, scene_id: str, selector: int | str | None = 0) -> int:
-        if self.get_scene(scene_id) is None:
-            raise KeyError(scene_id)
-        return resolve_overlay_selector(self.scene_overlay_events(scene_id), selector)
-
-    def resolved_scene_polygons(
-        self,
-        scene_id: str,
-        *,
-        variant: str = "raw",
-        overlay_id: int | str | None = 0,
-    ) -> list[dict[str, Any]]:
-        selected = self.resolve_scene_overlay_id(scene_id, overlay_id)
-        polygons = self.load_scene_variant_polygons(scene_id, variant=self._variant(variant))
-        events = self.scene_overlay_events(scene_id) if selected else []
-        return resolve_overlay(polygons, events, selected)
-
-    def link_task_scene_context(
-        self,
-        task_id: str,
-        *,
-        scene_id: str,
-        variant: str,
-        overlay_id: int,
-        component_selection: Sequence[int],
-    ) -> None:
-        selected_variant = self._variant(variant)
-        selected_overlay = normalize_overlay_id(overlay_id)
-        with self.database.begin() as conn:
-            result = conn.execute(
-                text(
-                    """
-                    UPDATE tasks SET
-                        scene_id=:scene_id,
-                        analysis_variant=:variant,
-                        analysis_overlay_id=:overlay_id,
-                        component_selection=:component_selection,
-                        initial_variant=:variant,
-                        updated_at=now()
-                    WHERE id=:task_id
-                    """
-                ),
-                {
-                    "task_id": task_id,
-                    "scene_id": scene_id,
-                    "variant": selected_variant,
-                    "overlay_id": selected_overlay,
-                    "component_selection": [int(x) for x in component_selection],
-                },
-            )
-            if getattr(result, "rowcount", 1) == 0:
-                raise KeyError(task_id)
-
-    def task_analysis_context(self, task_id: str) -> dict[str, Any]:
-        meta = self.get_meta(task_id)
-        if meta is None:
-            raise KeyError(task_id)
-        return {
-            "scene_id": str(meta.get("scene_id") or task_id),
-            "variant": str(meta.get("analysis_variant") or meta.get("initial_variant") or "raw"),
-            "smooth": str(meta.get("analysis_variant") or meta.get("initial_variant") or "raw") == "smooth",
-            "overlay_id": int(meta.get("analysis_overlay_id", 0) or 0),
-            "component_selection": [int(x) for x in (meta.get("component_selection") or ([-2] if meta.get("whole") else [-3]))],
-        }
-
-    # ---------- overlay event log / analysis identity ----------
-    def overlay_events(self, task_id: str) -> list[dict[str, Any]]:
-        """Compatibility alias: overlays are scene-owned from schema revision 0003."""
-        meta = self.get_meta(task_id)
-        if meta is None:
-            raise KeyError(task_id)
-        return self.scene_overlay_events(str(meta.get("scene_id") or task_id))
-
-    def append_overlay_events(self, task_id: str, events: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-        """Compatibility alias that appends events to the task's reusable scene."""
-        meta = self.get_meta(task_id)
-        if meta is None:
-            raise KeyError(task_id)
-        return self.append_scene_overlay_events(str(meta.get("scene_id") or task_id), events)
+        return self.overlay_events(task_id)
 
     def resolved_source_polygons(
         self, task_id: str, *, variant: str = "raw", overlay_id: int | None = 0
     ) -> list[dict[str, Any]]:
-        meta = self.get_meta(task_id)
-        if meta is None:
-            raise KeyError(task_id)
-        scene_id = str(meta.get("scene_id") or task_id)
-        selected_variant = self._variant(variant)
         selected_overlay = normalize_overlay_id(overlay_id)
-        if scene_id == str(task_id) and selected_variant == "raw" and selected_overlay == 0:
-            scene = self.get_scene(scene_id) or {}
-            origin = dict(scene.get("metadata", {}).get("legacy_canonical_source", {}) or {})
-            selected_variant = self._variant(str(origin.get("variant", selected_variant)))
-            selected_overlay = normalize_overlay_id(origin.get("overlay_id", selected_overlay))
-        return self.resolved_scene_polygons(scene_id, variant=selected_variant, overlay_id=selected_overlay)
+        polygons = self.load_variant_polygons(task_id, variant=self._variant(variant))
+        events = self.overlay_events(task_id) if selected_overlay else []
+        return resolve_overlay(polygons, events, selected_overlay)
 
     def ensure_analysis(self, task_id: str, *, variant: str = "raw", overlay_id: int | None = 0) -> dict[str, Any]:
         selected = self._variant(variant)
         selected_overlay = normalize_overlay_id(overlay_id)
-        meta = self.get_meta(task_id)
-        if meta is None:
+        if self.get_meta(task_id) is None:
             raise KeyError(task_id)
-        scene_id = str(meta.get("scene_id") or task_id)
         if selected_overlay:
-            # A positive analysis overlay must be an actual event id on the scene.
-            resolved = self.resolve_scene_overlay_id(scene_id, selected_overlay)
-            if resolved != selected_overlay:
+            with self.database.connect() as conn:
+                exists = conn.execute(
+                    text("SELECT 1 FROM task_overlay_events WHERE task_id=:task_id AND overlay_id=:overlay_id"),
+                    {"task_id": task_id, "overlay_id": selected_overlay},
+                ).scalar_one_or_none()
+            if exists is None:
                 raise KeyError(f"overlay={selected_overlay} not found")
         with self.database.begin() as conn:
             conn.execute(
@@ -2272,35 +1733,6 @@ class PostgresStore:
                 ),
                 {"task_id": task_id, "variant": selected, "overlay_id": selected_overlay},
             )
-            # Task creation historically seeds N requests at overlay 0.  Snapshot
-            # those requests into the immutable analysis context when necessary.
-            requested = conn.execute(
-                text(
-                    """
-                    SELECT n, position FROM task_n_requests
-                    WHERE task_id=:task_id AND variant=:variant AND overlay_id=0
-                    ORDER BY position, n
-                    """
-                ),
-                {"task_id": task_id, "variant": selected},
-            ).mappings().all()
-            for row in requested:
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO task_n_requests (task_id, variant, overlay_id, n, position, status)
-                        VALUES (:task_id, :variant, :overlay_id, :n, :position, 'requested')
-                        ON CONFLICT (task_id, variant, overlay_id, n) DO NOTHING
-                        """
-                    ),
-                    {
-                        "task_id": task_id,
-                        "variant": selected,
-                        "overlay_id": selected_overlay,
-                        "n": int(row["n"]),
-                        "position": int(row["position"]),
-                    },
-                )
         state = self.analysis_state(task_id, variant=selected, overlay_id=selected_overlay)
         if state is None:
             raise KeyError(f"analysis {task_id}/{selected}/{selected_overlay} not found")
@@ -2788,8 +2220,6 @@ class PostgresStore:
             )
         row["start_polygons"] = geometry_rows
         row["overlay_id"] = selected_overlay
-        row["variant"] = selected
-        row["smooth"] = selected == "smooth"
         return row
 
     def save_component(
@@ -2811,10 +2241,7 @@ class PostgresStore:
                 "demand_bounds": component.get("demand_bounds"), "max_useful_n": row.get("max_useful_n"),
                 "state": row.get("state", "created"),
             }
-        n_bounds = dict(row.get("bounds") or {}) if isinstance(row.get("bounds"), Mapping) else {}
-        for key in ("max_n_state", "max_n_milp"):
-            if key in row:
-                n_bounds[key] = row[key]
+        n_bounds = row.get("bounds") if isinstance(row.get("bounds"), Mapping) else None
         with self.database.begin() as conn:
             conn.execute(
                 text(
@@ -2884,9 +2311,6 @@ class PostgresStore:
         }
         if row["n_bounds"] is not None:
             result["bounds"] = _json_value(row["n_bounds"], {})
-            for key in ("max_n_state", "max_n_milp"):
-                if key in result["bounds"]:
-                    result[key] = result["bounds"][key]
         return result
 
     def component_ids(self, task_id: str, *, variant: str = "raw", overlay_id: int | None = 0) -> list[str]:
@@ -3002,13 +2426,6 @@ class PostgresStore:
         self._delete_artifact(
             task_id, self._variant(variant), f"solver:{cid}:{int(n)}", overlay_id=normalize_overlay_id(overlay_id)
         )
-
-    def completed_frontier_ns(self, task_id: str, component_id: Any, *, variant: str = "raw", overlay_id: int = 0) -> set[int]:
-        with self.database.connect() as conn:
-            rows = conn.execute(text("SELECT n FROM component_results WHERE task_id=:task_id AND variant=:variant AND overlay_id=:overlay_id AND component_id=:component_id"),
-                {"task_id": task_id, "variant": self._variant(variant), "overlay_id": normalize_overlay_id(overlay_id),
-                 "component_id": self.component_db_id(component_id)}).scalars().all()
-        return {int(n) for n in rows}
 
     def frontier_version(self, task_id: str, *, variant: str = "raw", overlay_id: int | None = 0) -> int:
         with self.database.connect() as conn:
@@ -3149,7 +2566,7 @@ class PostgresStore:
             params["overlay_id"] = normalize_overlay_id(overlay_id)
         sql = f"""
             SELECT result FROM solutions WHERE {' AND '.join(clauses)}
-            ORDER BY is_feasible DESC, actual_mass_kg ASC NULLS LAST, is_optimal DESC,
+            ORDER BY is_feasible DESC, is_optimal DESC, actual_mass_kg ASC NULLS LAST,
                      proxy_mass ASC NULLS LAST, created_at ASC
         """
         with self.database.connect() as conn:
@@ -3179,7 +2596,7 @@ class PostgresStore:
             SELECT solution_id, variant, overlay_id, source, total_n, component_ns, proxy_mass,
                    actual_mass_kg, is_feasible, is_optimal, status, created_at
             FROM solutions WHERE {' AND '.join(clauses)}
-            ORDER BY is_feasible DESC, actual_mass_kg ASC NULLS LAST, is_optimal DESC,
+            ORDER BY is_feasible DESC, is_optimal DESC, actual_mass_kg ASC NULLS LAST,
                      proxy_mass ASC NULLS LAST, created_at ASC
         """
         with self.database.connect() as conn:
@@ -3216,7 +2633,7 @@ class PostgresStore:
             params["overlay_id"] = normalize_overlay_id(overlay_id)
         sql = f"""
             SELECT result FROM solutions WHERE {' AND '.join(clauses)}
-            ORDER BY is_feasible DESC, actual_mass_kg ASC NULLS LAST, is_optimal DESC,
+            ORDER BY is_feasible DESC, is_optimal DESC, actual_mass_kg ASC NULLS LAST,
                      proxy_mass ASC NULLS LAST, created_at ASC
             LIMIT 1
         """

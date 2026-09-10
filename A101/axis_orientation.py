@@ -311,7 +311,7 @@ def _lookup(mapping: Mapping[Any, Any], key: Any):
 def class_holds(
     diameters: Mapping[Any, float],
     recipes: Mapping[Any, Sequence[Any]] | None = None,
-    anchor_factor: float = 40.0,
+    anchor_factor: float = 32.0,
 ) -> tuple[dict[Any, float], dict[Any, float], dict[Any, tuple[Any, ...]]]:
     """Return base holds, holds for every recipe class and recursive leaves."""
 
@@ -410,7 +410,7 @@ def add_box_anchorage(
     recipes: Mapping[Any, Sequence[Any]] | None,
     diameters: Mapping[Any, float],
     steps: Mapping[Any, float],
-    anchor_factor: float = 40.0,
+    anchor_factor: float = 32.0,
     axis: str = "y",
     field: Any = None,
 ) -> list[dict[str, Any]]:

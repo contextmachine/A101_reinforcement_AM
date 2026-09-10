@@ -295,15 +295,12 @@ def _rectangle_area_with_hold(
     base_area = width * height
     hold = float(holds.get(level, 0.0))
 
-    # Objective anchorage is deliberately *not* clipped by field boundaries.
-    # Every candidate pays for anchorage on both ends, including edge candidates,
-    # so MILP has no artificial preference for rectangles touching the boundary.
     if axis == "x" and hold > 0:
-        x0 -= hold
-        x1 += hold
+        x0 = max(0.0, x0 - hold)
+        x1 = min(float(x_edges[-1]), x1 + hold)
     elif axis == "y" and hold > 0:
-        y0 -= hold
-        y1 += hold
+        y0 = max(0.0, y0 - hold)
+        y1 = min(float(y_edges[-1]), y1 + hold)
 
     return base_area, (x1 - x0) * (y1 - y0), hold
 

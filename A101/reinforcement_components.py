@@ -417,7 +417,7 @@ def split_reinforcement_components(
     load2cls: Mapping[Any, int],
     recipes: Mapping[Any, Sequence[Any]] | None,
     diameters: Mapping[Any, float],
-    anchor_factor: float = 40.0,
+    anchor_factor: float = 32.0,
     axis: str = "y",
     area_eps: float = 1e-6,
 ) -> dict[str, Any]:
@@ -555,45 +555,6 @@ def split_reinforcement_components(
     }
 
 
-class CandidateCoverInfeasible(ValueError):
-    """Demand has no candidate cover under the physical geometry constraints."""
-
-
-def filter_candidates_by_physical_geometry(
-    rectangles: Sequence[Sequence[int]],
-    *,
-    work_x_edges: Sequence[float],
-    work_y_edges: Sequence[float],
-    axis: str,
-    physical_geometry: Any,
-    area_eps: float = 1e-6,
-) -> tuple[list[Any], int]:
-    """Remove candidate coverage rectangles that cross physical void.
-
-    ``active`` and ``background_only`` geometry are merged upstream into
-    ``physical_geometry``.  Anchorage is intentionally *not* included in this
-    containment test; this tests the candidate's calculation/coverage rectangle.
-    """
-    if physical_geometry is None:
-        return list(rectangles), 0
-    geometry = _clean_geometry(_geom(physical_geometry))
-    if geometry is None or geometry.is_empty:
-        return [], len(rectangles)
-    kept: list[Any] = []
-    rejected = 0
-    tolerance = max(0.0, float(area_eps))
-    for raw in rectangles:
-        rect = tuple(raw)
-        world = grid_rectangles_to_world([rect], work_x_edges, work_y_edges, axis)[0]
-        candidate = box(*world[:4])
-        outside = candidate.difference(geometry)
-        if outside.is_empty or float(outside.area) <= tolerance:
-            kept.append(raw)
-        else:
-            rejected += 1
-    return kept, rejected
-
-
 def prepare_component_problem(
     component: Mapping[str, Any],
     *,
@@ -601,7 +562,7 @@ def prepare_component_problem(
     recipes: Mapping[Any, Sequence[Any]] | None,
     densities: Mapping[Any, float],
     diameters: Mapping[Any, float],
-    anchor_factor: float = 40.0,
+    anchor_factor: float = 32.0,
     axis: str = "y",
     min_width: float = 1000.0,
     grid_size: float = 300.0,
@@ -619,8 +580,6 @@ def prepare_component_problem(
     max_dense_cells: int | None = 20000,
     max_refinement_factor: float | None = 3.0,
     fallback_to_composite_cells: bool = True,
-    physical_geometry: Any = None,
-    physical_area_eps: float = 1e-6,
     progress: bool = False,
 ) -> dict[str, Any]:
     """Build the existing prepared solver model for one demand component."""
@@ -720,19 +679,6 @@ def prepare_component_problem(
     started = perf_counter()
     xs, ys, load_matrix, int_matrix = _grid_to_matrices(grid, load2cls, preserve_area_eps)
     work_matrix, work_x_edges, work_y_edges, work_x_steps, work_y_steps = orient_grid(int_matrix, xs, ys, axis)
-    physical_mask = np.ones(work_matrix.shape, dtype=bool)
-    if physical_geometry is not None:
-        ys_idx, xs_idx = np.nonzero(work_matrix > 0)
-        cell_rects = [(int(x), int(y), int(x), int(y), 1) for y, x in zip(ys_idx, xs_idx)]
-        physical_cells, _ = filter_candidates_by_physical_geometry(
-            cell_rects, work_x_edges=work_x_edges, work_y_edges=work_y_edges,
-            axis=axis, physical_geometry=physical_geometry, area_eps=physical_area_eps,
-        )
-        physical_mask[ys_idx, xs_idx] = False
-        for x, y, _, _, _ in physical_cells:
-            physical_mask[y, x] = True
-        if np.any((work_matrix > 0) & ~physical_mask):
-            raise CandidateCoverInfeasible(f"component {component_id}: required cells cross physical void")
     base_holds, holds, recipe_leaves = class_holds(diameters, recipes, anchor_factor)
     mark("dense_matrix", started, shape=tuple(map(int, work_matrix.shape)), nonzero=int(np.count_nonzero(work_matrix)))
 
@@ -756,15 +702,9 @@ def prepare_component_problem(
 
     started = perf_counter()
     selectable = relabel_rectangle_candidates(requirement_rectangles, dict(recipes or {}))
-    physical_rejected = 0
-    if physical_geometry is not None:
-        selectable, physical_rejected = filter_candidates_by_physical_geometry(
-            selectable, work_x_edges=work_x_edges, work_y_edges=work_y_edges, axis=axis,
-            physical_geometry=physical_geometry, area_eps=physical_area_eps,
-        )
-    mark("relabel_rectangles", started, selectable=len(selectable), physical_rejected=physical_rejected)
+    mark("relabel_rectangles", started, selectable=len(selectable))
     if np.any(work_matrix != 0) and not selectable:
-        raise CandidateCoverInfeasible(
+        raise ValueError(
             f"component {component_id}: ненулевое требование, но нет допустимых кандидатов; "
             f"cross_span={cross_span:.3f}, requested_min_width={requested_min_width:.3f}, "
             f"candidate_min_width={candidate_min_width:.3f}, shape={tuple(map(int, work_matrix.shape))}"
@@ -780,7 +720,7 @@ def prepare_component_problem(
         work_rectangles, mosaic, mosaic_stats = selectable, None, None
     mark("reduce_mosaic", started, candidates=len(work_rectangles))
     if np.any(work_matrix != 0) and not work_rectangles:
-        raise CandidateCoverInfeasible(f"component {component_id}: ненулевое требование, но после mosaic нет кандидатов")
+        raise ValueError(f"component {component_id}: ненулевое требование, но после mosaic нет кандидатов")
 
     source_classes = {_load_class(load2cls, row["load"]) for row in polygons}
     required_leaf_classes = {leaf for cls in source_classes if cls > 0 for leaf in recipe_leaves.get(cls, (cls,))}
@@ -793,7 +733,7 @@ def prepare_component_problem(
         if not any(candidate >= threshold for candidate in candidate_classes)
     )
     if missing_candidate_classes:
-        raise CandidateCoverInfeasible(
+        raise ValueError(
             f"component {component_id}: после подготовки сетки отсутствует покрытие "
             f"порогов {missing_candidate_classes}; candidate classes={sorted(candidate_classes)}, "
             f"grid preservation={preserve_stats}"
@@ -832,14 +772,11 @@ def prepare_component_problem(
         "load_matrix": load_matrix,
         "int_matrix": int_matrix,
         "work_matrix": work_matrix,
-        "work_physical_mask": physical_mask,
-        "strict_physical_candidates": physical_geometry is not None,
         "work_x_edges": np.asarray(work_x_edges),
         "work_y_edges": np.asarray(work_y_edges),
         "work_x_steps": np.asarray(work_x_steps),
         "work_y_steps": np.asarray(work_y_steps),
         "work_rectangles": work_rectangles,
-        "selectable_rectangles": list(selectable),
         "mosaic": mosaic,
         "mosaic_stats": mosaic_stats,
         "prepared": prepared,
@@ -856,7 +793,6 @@ def prepare_component_problem(
             "discarded_refined_shape": None if discarded_refined_shape is None else tuple(map(int, discarded_refined_shape)),
             "prepare_times_s": stage_times,
             "candidate_rectangles": len(work_rectangles),
-            "physical_rejected_candidates": int(physical_rejected),
             "requested_min_width": requested_min_width,
             "candidate_min_width": candidate_min_width,
             "cross_span": cross_span,
@@ -1046,7 +982,7 @@ def fit_component_frontier(
     densities: Mapping[Any, float],
     diameters: Mapping[Any, float],
     steps: Mapping[Any, float],
-    anchor_factor: float = 40.0,
+    anchor_factor: float = 32.0,
     axis: str = "y",
     field: Any = None,
     min_width: float | Mapping[Any, float] | None = None,

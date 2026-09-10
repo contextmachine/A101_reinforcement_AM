@@ -10,9 +10,6 @@ from rebar_service.store import RedisStore
 
 
 class QueueStore:
-    def get_meta(self, task_id):
-        return {}  # This fixture models a legacy task without scene selection.
-
     def __init__(self):
         self.jobs: list[dict] = []
         self.records = {
