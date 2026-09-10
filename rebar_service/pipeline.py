@@ -968,6 +968,206 @@ class PipelineWorkflow:
                     ))
         self._maybe_complete_analysis(task_id, variant, analysis_auto_solve)
 
+    @staticmethod
+    def _expand_recipe_layers(cls: int, recipes: Mapping[Any, Sequence[Any]] | None) -> tuple[int, ...]:
+        """Recursively expand a reinforcement class into primitive recipe layers."""
+        normalized: dict[int, tuple[int, ...]] = {}
+        for raw_key, raw_value in dict(recipes or {}).items():
+            key = int(raw_key)
+            if isinstance(raw_value, (str, bytes)):
+                values = (int(raw_value),)
+            else:
+                try:
+                    values = tuple(int(value) for value in raw_value)
+                except TypeError:
+                    values = (int(raw_value),)
+            normalized[key] = values
+
+        cache: dict[int, tuple[int, ...]] = {}
+
+        def expand(value: int, trail: tuple[int, ...] = ()) -> tuple[int, ...]:
+            value = int(value)
+            if value in cache:
+                return cache[value]
+            recipe = normalized.get(value)
+            if not recipe:
+                cache[value] = (value,)
+                return cache[value]
+            if value in trail:
+                path = " -> ".join(map(str, (*trail, value)))
+                raise ValueError(f"Cyclic reinforcement recipe: {path}")
+            leaves = tuple(
+                leaf
+                for child in recipe
+                for leaf in expand(int(child), (*trail, value))
+            )
+            cache[value] = leaves
+            return leaves
+
+        return expand(int(cls))
+
+    def _component_minimum_layers(
+        self, task_id: str, component_id: Any, *, variant: str = "raw"
+    ) -> tuple[dict[str, Any], dict[str, Any], tuple[int, ...] | None]:
+        """Return stored problem, component row and primitive layers of its maximum class.
+
+        Legacy/recovery problems can lack class metadata; those deliberately
+        return ``None`` layers so the caller falls back to the ordinary solver.
+        """
+        stored = self._variant_call(self.store.load_problem, task_id, component_id, variant=variant)
+        if not stored:
+            raise KeyError("component problem missing")
+        problem = dict(stored["problem"])
+        component = dict(problem.get("component", {}) or {})
+        classes = [int(value) for value in component.get("classes", []) if int(value) > 0]
+        if not classes:
+            classes = [
+                int(row.get("class", 0))
+                for row in component.get("polygons", [])
+                if isinstance(row, Mapping) and int(row.get("class", 0)) > 0
+            ]
+        if not classes:
+            return problem, component, None
+        cfg = dict(self._field(task_id, variant).get("cfg", {}) or {})
+        maximum_class = max(classes)
+        layers = self._expand_recipe_layers(maximum_class, cfg.get("recipes"))
+        if not layers:
+            raise ValueError(f"empty reinforcement recipe for class={maximum_class}")
+        return problem, component, layers
+
+    @staticmethod
+    def _analytical_infeasible_frontier(
+        component_id: Any, n: int, min_n: int, source: str, *, variant: str
+    ) -> dict[str, Any]:
+        return {
+            "n": int(n),
+            "component_id": component_id,
+            "is_feasible": False,
+            "is_optimal": True,
+            "solve_state": "infeasible",
+            "reason": "below_component_min_n",
+            "min_useful_n": int(min_n),
+            "solver_result": {
+                "is_feasible": False,
+                "is_optimal": True,
+                "status": "Infeasible",
+                "reason": "below_component_min_n",
+                "min_useful_n": int(min_n),
+                "analytical_min_n": True,
+            },
+            "rectangles": [],
+            "fit_result": None,
+            "class_changes": [],
+            "anchored_boxes": [],
+            "proxy_mass": float("inf"),
+            "source": source,
+            "variant": variant,
+            "smooth": variant_is_smooth(variant),
+            "analytical_min_n": True,
+        }
+
+    def _analytical_minimum_frontier(
+        self,
+        task_id: str,
+        component_id: Any,
+        source: str = "components",
+        *,
+        variant: str = "raw",
+    ) -> tuple[int | None, dict[str, Any] | None]:
+        """Build the exact minimum-N full-bounds solution when no matrix void blocks it.
+
+        The minimum is determined only by the recursively expanded recipe of the
+        component's maximum reinforcement class. A matrix value -1 is a physical
+        void, so any such cell disables this shortcut and the caller falls back to
+        the ordinary solver for the same N. Background cells (0) are traversable.
+        """
+        from A101.axis_orientation import add_box_anchorage
+
+        problem, component, layers = self._component_minimum_layers(
+            task_id, component_id, variant=variant
+        )
+        if layers is None:
+            return None, None
+        min_n = len(layers)
+        matrix = np.asarray(problem.get("work_matrix", []))
+        if matrix.size and np.any(matrix < 0):
+            return min_n, None
+
+        bounds = tuple(
+            map(
+                float,
+                component.get("demand_bounds")
+                or component.get("bounds")
+                or component["geometry"].bounds,
+            )
+        )
+        rectangles = [(*bounds, int(layer)) for layer in layers]
+        field = self._field(task_id, variant)
+        cfg = field["cfg"]
+        params = self._params(task_id)
+        anchored = add_box_anchorage(
+            rectangles,
+            recipes=cfg.get("recipes"),
+            diameters=cfg["diameters"],
+            steps=cfg["steps"],
+            anchor_factor=float(params.get("anchor_factor", 40.0)),
+            axis=cfg["axis"],
+            field=field["field_geometry"],
+        )
+        for row in anchored:
+            row["component_id"] = component_id
+
+        proxy_mass = 0.0
+        for row in anchored:
+            geometry = row.get("geometry") if isinstance(row, Mapping) else None
+            if geometry is None:
+                geometry = box(*row["bounds"][:4])
+            density = cfg["densities"].get(
+                row.get("class"), cfg["densities"].get(str(row.get("class")), 1.0)
+            )
+            proxy_mass += float(geometry.area) * float(density)
+
+        fast_n1 = min_n == 1
+        fit_result = {
+            "status": f"N={min_n} analytical full-component cover",
+            "is_feasible": True,
+            "is_optimal": True,
+            "rectangles": rectangles,
+            "objective": 0.0,
+            "class_changes": [],
+            "stats": {"analytical_min_n_fast_path": True},
+            "analytical_min_n_fast_path": True,
+            "n1_fast_path": fast_n1,
+        }
+        result = {
+            "n": min_n,
+            "component_id": component_id,
+            "is_feasible": True,
+            "is_optimal": True,
+            "solve_state": "optimal",
+            "min_useful_n": min_n,
+            "primitive_layers": list(map(int, layers)),
+            "solver_result": {
+                "is_feasible": True,
+                "is_optimal": True,
+                "status": "Optimal",
+                "rectangles": rectangles,
+                "analytical_min_n_fast_path": True,
+                "n1_fast_path": fast_n1,
+            },
+            "rectangles": rectangles,
+            "fit_result": fit_result,
+            "class_changes": [],
+            "anchored_boxes": anchored,
+            "proxy_mass": float(proxy_mass),
+            "source": source,
+            "variant": variant,
+            "smooth": variant_is_smooth(variant),
+            "analytical_min_n_fast_path": True,
+            "n1_fast_path": fast_n1,
+        }
+        return min_n, result
+
     def _single_component_frontier(
         self, task_id: str, component_id: Any, source: str = "components", *, variant: str = "raw"
     ) -> dict[str, Any]:
@@ -1050,12 +1250,17 @@ class PipelineWorkflow:
         if self._is_n_cancelled(task_id, n, variant):
             self._publish(task_id, {"type": "component_n_cancelled", "component_id": cid, "n": n, "variant": variant})
             return
-        meta = self.store.get_meta(task_id) or {}
-        scene_task = bool(meta.get("scene_id") and str(meta["scene_id"]) != str(task_id))
-        if not scene_task and (n == 1 or job.payload.get("force_single_box")):
-            result = self._single_component_frontier(task_id, cid, variant=variant)
-            self._variant_call(self.store.save_frontier_result, task_id, cid, 1, result, variant=variant)
-            self._frontier_ready(task_id, cid, 1, result, variant=variant)
+        min_n, analytical = self._analytical_minimum_frontier(task_id, cid, variant=variant)
+        if min_n is not None and n < min_n:
+            result = self._analytical_infeasible_frontier(
+                cid, n, min_n, "components", variant=variant
+            )
+            self._variant_call(self.store.save_frontier_result, task_id, cid, n, result, variant=variant)
+            self._frontier_ready(task_id, cid, n, result, variant=variant)
+            return
+        if min_n is not None and n == min_n and analytical is not None:
+            self._variant_call(self.store.save_frontier_result, task_id, cid, n, analytical, variant=variant)
+            self._frontier_ready(task_id, cid, n, analytical, variant=variant)
             return
         stored = self._variant_call(self.store.load_problem, task_id, cid, variant=variant)
         if not stored:
@@ -1529,12 +1734,18 @@ class PipelineWorkflow:
         n = int(job.payload["n"])
         if self._is_n_cancelled(task_id, n, variant):
             return
-        meta = self.store.get_meta(task_id) or {}
-        scene_task = bool(meta.get("scene_id") and str(meta["scene_id"]) != str(task_id))
-        if not scene_task and (n == 1 or job.payload.get("force_single_box")):
-            result = self._single_component_frontier(task_id, "whole", "whole", variant=variant)
-            self._variant_call(self.store.save_frontier_result, task_id, "whole", 1, result, variant=variant)
-            self._queue_whole_layout(task_id, result, variant=variant)
+        min_n, analytical = self._analytical_minimum_frontier(
+            task_id, "whole", "whole", variant=variant
+        )
+        if min_n is not None and n < min_n:
+            result = self._analytical_infeasible_frontier(
+                "whole", n, min_n, "whole", variant=variant
+            )
+            self._variant_call(self.store.save_frontier_result, task_id, "whole", n, result, variant=variant)
+            return
+        if min_n is not None and n == min_n and analytical is not None:
+            self._variant_call(self.store.save_frontier_result, task_id, "whole", n, analytical, variant=variant)
+            self._queue_whole_layout(task_id, analytical, variant=variant)
             return
         stored = self._variant_call(self.store.load_problem, task_id, "whole", variant=variant)
         if not stored:
