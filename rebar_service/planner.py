@@ -114,3 +114,28 @@ def normalize_n_request(value) -> tuple[str, list[int], dict]:
         order = coarse_refinement_order(spec.start, spec.stop, spec.coarse_step)
         return "range", order, spec.model_dump()
     raise ValueError("n должен быть числом, списком или диапазоном")
+
+
+def edge_to_middle_order(values: Iterable[int]) -> list[int]:
+    """Return sorted values alternating from low edge and high edge."""
+    ordered = sorted(set(int(v) for v in values))
+    out: list[int] = []
+    left, right = 0, len(ordered) - 1
+    while left <= right:
+        out.append(ordered[left])
+        left += 1
+        if left <= right:
+            out.append(ordered[right])
+            right -= 1
+    return out
+
+
+def round_robin_unit_plans(plans: dict[object, list[int]]) -> list[tuple[object, int]]:
+    """Interleave already-ordered per-unit plans by position, preserving unit order."""
+    result: list[tuple[object, int]] = []
+    max_len = max((len(values) for values in plans.values()), default=0)
+    for position in range(max_len):
+        for unit, values in plans.items():
+            if position < len(values):
+                result.append((unit, int(values[position])))
+    return result

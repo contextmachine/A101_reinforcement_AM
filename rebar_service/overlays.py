@@ -14,6 +14,38 @@ def normalize_overlay_id(value: int | str | None) -> int:
     return overlay_id
 
 
+
+def resolve_overlay_selector(
+    events: Sequence[Mapping[str, Any]],
+    selector: int | str | None = 0,
+) -> int:
+    """Resolve a public overlay selector to a real positive event id or 0.
+
+    Positive values are opaque event ids. Negative values are relative positions
+    in append order: -1 is the last event, -2 the previous one, and so on.
+    """
+
+    if selector in (None, ""):
+        return 0
+    value = int(selector)
+    if value == 0:
+        return 0
+
+    ordered = sorted(
+        (dict(row) for row in events),
+        key=lambda row: int(row.get("seq", 0)),
+    )
+    if value > 0:
+        if any(int(row.get("id", row.get("overlay_id", -1))) == value for row in ordered):
+            return value
+        raise KeyError(f"overlay={value} not found")
+
+    index = len(ordered) + value
+    if index < 0 or index >= len(ordered):
+        raise KeyError(f"overlay selector={value} is outside available history")
+    return int(ordered[index].get("id", ordered[index].get("overlay_id")))
+
+
 def resolve_overlay(
     polygons: Sequence[Mapping[str, Any]],
     events: Sequence[Mapping[str, Any]],
