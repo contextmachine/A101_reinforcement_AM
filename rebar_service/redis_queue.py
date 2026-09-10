@@ -140,21 +140,72 @@ class RedisQueue:
         self.redis.zadd(self.task_key(task_id, "slots"), {job_id: time.time() + self.settings.job_lease_seconds})
         self.redis.expire(self.task_key(task_id, "slots"), self.settings.queue_state_ttl_seconds)
 
-    def ack_job(self, raw: str, job: Mapping[str, Any], state: str = "done") -> None:
+    def ack_job(
+            self,
+            raw: str,
+            job: Mapping[str, Any],
+            state: str = "done",
+    ) -> None:
         task_id = str(job["task_id"])
         job_id = str(job["job_id"])
-        self.redis.lrem(self.settings.processing_queue, 1, raw)
-        self.redis.lrem(self.settings.workload_queue, 1, job_id)
-        self.redis.delete(self.job_key(job_id) + ":lease")
-        self.redis.zrem(self.task_key(task_id, "slots"), job_id)
-        self.redis.srem(self.task_key(task_id, "pending"), job_id)
-        if job.get("dedupe_key"):
-            self.redis.delete(self.dedupe_key(str(job["dedupe_key"])))
-        self.redis.set(
-            self.job_key(job_id),
-            dumps({**job, "state": state, "finished_at": time.time()}),
-            ex=self.settings.queue_state_ttl_seconds,
+
+        ttl = int(self.settings.queue_state_ttl_seconds)
+
+        final_state = dumps(
+            {
+                **job,
+                "state": state,
+                "finished_at": time.time(),
+            }
         )
+
+        pipe = self.redis.pipeline(transaction=True)
+
+        # Удаляем фактический payload из processing.
+        pipe.lrem(
+            self.settings.processing_queue,
+            1,
+            raw,
+        )
+
+        # Удаляем ВСЕ возможные дубликаты job_id из workload.
+        # В корректном состоянии он там только один.
+        pipe.lrem(
+            self.settings.workload_queue,
+            0,
+            job_id,
+        )
+
+        pipe.delete(
+            self.job_key(job_id) + ":lease"
+        )
+
+        pipe.zrem(
+            self.task_key(task_id, "slots"),
+            job_id,
+        )
+
+        pipe.srem(
+            self.task_key(task_id, "pending"),
+            job_id,
+        )
+
+        if job.get("dedupe_key"):
+            pipe.delete(
+                self.dedupe_key(
+                    str(job["dedupe_key"])
+                )
+            )
+
+        pipe.set(
+            self.job_key(job_id),
+            final_state,
+            ex=ttl,
+        )
+
+        # MULTI/EXEC:
+        # Redis применяет очистку как одну атомарную операцию.
+        pipe.execute()
 
     def requeue_job(self, raw: str, job: Mapping[str, Any], delay: float = 0.0) -> None:
         task_id = str(job["task_id"])

@@ -86,7 +86,7 @@ def _extract_polygons_from_doc(doc):
             {
                 "points": points,
                 "color": color,
-                "load": color_map[color] - 1,
+                "load": round(color_map[color], 1),
             }
         )
 
