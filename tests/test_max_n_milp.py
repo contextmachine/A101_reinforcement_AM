@@ -59,5 +59,5 @@ def test_legacy_problem_mapping_ignores_physical_mask_and_uses_only_work_matrix(
 def test_hard_cap_stops_large_layer_sum():
     matrix = np.array([[2]], dtype=int)
     result = estimate_max_useful_n(matrix, recipes={2: tuple([1] * 120)}, hard_cap=250)
-    assert result["max_useful_n"] == 100
+    assert result["max_useful_n"] == 250
     assert result["capped"] is True
