@@ -137,7 +137,7 @@ def _coerce_class_matrix(value: Any) -> np.ndarray:
 
 def estimate_max_useful_n(
     matrix: Any, *,
-    recipes: Mapping[Any, Sequence[Any]] | None = None, hard_cap: int = 100,
+    recipes: Mapping[Any, Sequence[Any]] | None = None, hard_cap: int = 250,
 ) -> dict[str, Any]:
     """Compute the exact rectangle-count policy bound from matrix + recipes.
 

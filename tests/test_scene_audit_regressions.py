@@ -93,7 +93,7 @@ def test_new_task_n1_does_not_bypass_prepared_solver(monkeypatch):
 
 def test_max_n_uses_complete_matrix_cover_not_pruned_main_candidates():
     problem = {'work_matrix': np.array([[1, 1]]), 'selectable_rectangles': [(0, 0, 0, 0, 1), (1, 0, 1, 0, 1)]}
-    result = estimate_max_useful_n(problem, hard_cap=100)
+    result = estimate_max_useful_n(problem, hard_cap=250)
     assert result['max_useful_n'] == 1
 
 def test_max_n_ignores_legacy_physical_mask_and_still_solves_all_recipe_layers():
