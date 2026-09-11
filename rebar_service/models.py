@@ -186,8 +186,8 @@ class AnalysisTaskStart(TaskParameters):
         values = list(dict.fromkeys(int(v) for v in value))
         if not values or any(v < 1 for v in values):
             raise ValueError("n должен содержать положительные целые значения")
-        if any(v > 100 for v in values):
-            raise ValueError("N одного solver-запуска не может превышать 100")
+        if any(v > 250 for v in values):
+            raise ValueError("N одного solver-запуска не может превышать 250")
         return values
 
     @field_validator("components")
