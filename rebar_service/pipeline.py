@@ -25,7 +25,7 @@ from .planner import edge_to_middle_order, round_robin_unit_plans
 
 WHOLE_COMPONENT_ID = -1
 WHOLE_COMPONENT_KEY = "whole"
-SOLVER_HARD_MAX_N = 100
+SOLVER_HARD_MAX_N = 1000
 
 
 def component_storage_id(component_id: int | str) -> int | str:
