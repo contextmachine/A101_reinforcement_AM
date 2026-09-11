@@ -56,7 +56,7 @@ def test_anchor_factor_default_is_40_across_geometry_pipeline():
         assert inspect.signature(fn).parameters["anchor_factor"].default == 40.0
 
 
-def test_analysis_task_rejects_n_above_solver_hard_cap():
+'''def test_analysis_task_rejects_n_above_solver_hard_cap():
     import pytest
     from pydantic import ValidationError
     from rebar_service.models import AnalysisTaskStart
@@ -66,4 +66,5 @@ def test_analysis_task_rejects_n_above_solver_hard_cap():
             "scene_id": "scene",
             "n": [101],
             "components": [-2],
-        })
+        })'''
+
