@@ -654,7 +654,7 @@ def prepare_component_problem(
     max_refinement_factor: float | None = 3.0,
     fallback_to_composite_cells: bool = True,
     physical_geometry: Any = None,
-    physical_area_eps: float = 0.6,
+    physical_area_eps: float = 0.4,
     progress: bool = False,
 ) -> dict[str, Any]:
     """Build the existing prepared solver model for one demand component."""
