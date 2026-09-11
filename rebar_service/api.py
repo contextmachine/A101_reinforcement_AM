@@ -88,7 +88,7 @@ def _build_task(
     validate_n_request_limits(
         parameters.n,
         max_values=settings.max_planned_n_values,
-        max_n=min(int(settings.max_n_value), 100),
+        max_n=min(int(settings.max_n_value), 250),
     )
     validate_solver_limits(
         parameters.solver.model_dump(mode="python"),
