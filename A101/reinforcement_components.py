@@ -596,7 +596,7 @@ def _mark_matrix_voids(
     work_y_edges: Sequence[float],
     axis: str,
     physical_geometry: Any,
-    area_eps: float = 1e-6,
+    area_eps: float = 0.5,
 ) -> np.ndarray:
     """Encode pure physical void as ``-1`` directly in the class matrix.
 
@@ -622,7 +622,8 @@ def _mark_matrix_voids(
                 [(x, y, x, y, 1)], work_x_edges, work_y_edges, axis
             )[0]
             cell = box(*world[:4])
-            if float(cell.intersection(material).area) <= tolerance:
+            int_are = float(cell.intersection(material).area)
+            if int_are/cell.area <= tolerance:
                 out[y, x] = -1
     return out
 
