@@ -1,0 +1,32 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  finalizers:
+  - finalizer.keda.sh
+  labels:
+    scaledobject.keda.sh/name: rebar-worker-test
+  name: rebar-worker-test
+  namespace: rebar-optimizer
+spec:
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 150
+    scalingModifiers: {}
+  cooldownPeriod: 300
+  maxReplicaCount: 12
+  minReplicaCount: 0
+  pollingInterval: 5
+  scaleTargetRef:
+    name: rebar-worker-test
+  triggers:
+  - authenticationRef:
+      name: rebar-redis-auth
+    metadata:
+      activationListLength: '0'
+      address: rebar-redis.rebar-optimizer.svc.cluster.local:6379
+      listLength: '1'
+      listName: rebar:test:jobs:workload
+    type: redis
+

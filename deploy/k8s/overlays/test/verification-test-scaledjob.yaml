@@ -1,0 +1,114 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledJob
+metadata:
+  finalizers:
+  - finalizer.keda.sh
+  name: rebar-verification-worker-test
+  namespace: rebar-optimizer
+spec:
+  failedJobsHistoryLimit: 3
+  jobTargetRef:
+    activeDeadlineSeconds: 21600
+    backoffLimit: 0
+    completions: 1
+    parallelism: 1
+    template:
+      metadata:
+        creationTimestamp: null
+        labels:
+          app: rebar-verification-worker-test
+          rebar-queue-environment: test
+      spec:
+        automountServiceAccountToken: false
+        containers:
+        - command:
+          - python
+          - -m
+          - rebar_service.verification_worker
+          env:
+          - name: REBAR_POSTGRES_USER
+            valueFrom:
+              secretKeyRef:
+                key: POSTGRES_USER
+                name: a101-postgres-auth
+          - name: REBAR_POSTGRES_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                key: POSTGRES_PASSWORD
+                name: a101-postgres-auth
+          - name: REBAR_DB_POOL_SIZE
+            value: '1'
+          - name: REBAR_DB_MAX_OVERFLOW
+            value: '0'
+          - name: REBAR_WORKER_EXIT_WHEN_IDLE
+            value: 'true'
+          envFrom:
+          - configMapRef:
+              name: rebar-config-test
+          - secretRef:
+              name: rebar-secrets
+          - configMapRef:
+              name: rebar-test-queues
+          image: ghcr.io/contextmachine/a101_reinforcement_am:sha-d138feb
+          imagePullPolicy: IfNotPresent
+          name: verification-worker
+          resources:
+            limits:
+              cpu: '2'
+              memory: 4Gi
+            requests:
+              cpu: 500m
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /tmp
+            name: tmp
+          - mountPath: /tmp/rebar-cache
+            name: cache
+        dnsPolicy: ClusterFirst
+        imagePullSecrets:
+        - name: ghcr-secret
+        restartPolicy: Never
+        schedulerName: default-scheduler
+        securityContext:
+          fsGroup: 10001
+          runAsGroup: 10001
+          runAsNonRoot: true
+          runAsUser: 10001
+          seccompProfile:
+            type: RuntimeDefault
+        terminationGracePeriodSeconds: 120
+        tolerations:
+        - effect: NoSchedule
+          key: workload
+          operator: Equal
+          value: heavy-jobs
+        volumes:
+        - emptyDir: {}
+          name: tmp
+        - emptyDir: {}
+          name: cache
+    ttlSecondsAfterFinished: 300
+  maxReplicaCount: 8
+  pollingInterval: 5
+  rollout: {}
+  scalingStrategy:
+    strategy: default
+  successfulJobsHistoryLimit: 3
+  triggers:
+  - authenticationRef:
+      name: rebar-redis-auth
+    metadata:
+      activationListLength: '0'
+      address: rebar-redis.rebar-optimizer.svc.cluster.local:6379
+      listLength: '1'
+      listName: rebar:test:verification:workload
+    type: redis
+

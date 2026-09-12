@@ -1,0 +1,15 @@
+# Test stack for front-end debugging: its own queues (rebar:test:*), ConfigMap and images, sharing
+# Postgres, Redis and the csi-s3 log PVC with production. Apply with:
+#   kubectl -n rebar-optimizer apply -k deploy/k8s/overlays/test
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: rebar-optimizer
+resources:
+  - configmap-test.yaml
+  - configmap-test-queues.yaml
+  - api-test-deployment.yaml
+  - api-test-service.yaml
+  - worker-test-deployment.yaml
+  - worker-test-scaledobject.yaml
+  - bars-test-scaledjob.yaml
+  - verification-test-scaledjob.yaml

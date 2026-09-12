@@ -1,0 +1,17 @@
+apiVersion: v1
+data:
+  REBAR_BARS_PROCESSING_QUEUE: rebar:test:bars:processing
+  REBAR_BARS_READY_QUEUE: rebar:test:bars:ready
+  REBAR_BARS_WORKLOAD_QUEUE: rebar:test:bars:workload
+  REBAR_PROCESSING_QUEUE: rebar:test:jobs:processing
+  REBAR_READY_QUEUE: rebar:test:jobs:ready
+  REBAR_SOLVER_LOG_DIR: /app/logs
+  REBAR_VERIFICATION_PROCESSING_QUEUE: rebar:test:verification:processing
+  REBAR_VERIFICATION_READY_QUEUE: rebar:test:verification:ready
+  REBAR_VERIFICATION_WORKLOAD_QUEUE: rebar:test:verification:workload
+  REBAR_WORKLOAD_QUEUE: rebar:test:jobs:workload
+kind: ConfigMap
+metadata:
+  name: rebar-test-queues
+  namespace: rebar-optimizer
+

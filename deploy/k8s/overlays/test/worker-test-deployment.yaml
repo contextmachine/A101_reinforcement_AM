@@ -1,0 +1,99 @@
+# Test-stack solver worker (front-end debugging). Consumes the rebar:test:* queues declared in
+# configmap-test-queues.yaml; two workers per 256 GB / 32 vCPU node of the ng-rebar-jobs-e pool.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rebar-worker-test
+  namespace: rebar-optimizer
+  labels:
+    app: rebar-worker-test
+spec:
+  replicas: 12
+  selector:
+    matchLabels:
+      app: rebar-worker-test
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+  template:
+    metadata:
+      labels:
+        app: rebar-worker-test
+        rebar-queue-environment: test
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: ghcr-secret
+      nodeSelector:
+        node-group: ng-rebar-jobs-e
+        workload: rebar-jobs
+      tolerations:
+        - key: workload
+          operator: Equal
+          value: rebar-jobs
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 300
+      containers:
+        - name: worker
+          image: ghcr.io/contextmachine/a101_reinforcement_am:sha-d138feb
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "rebar_service.worker"]
+          env:
+            - name: REBAR_POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: a101-postgres-auth
+                  key: POSTGRES_USER
+            - name: REBAR_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: a101-postgres-auth
+                  key: POSTGRES_PASSWORD
+            - name: REBAR_DB_POOL_SIZE
+              value: "1"
+            - name: REBAR_DB_MAX_OVERFLOW
+              value: "0"
+          envFrom:
+            - configMapRef:
+                name: rebar-config-test
+            - secretRef:
+                name: rebar-secrets
+            - configMapRef:
+                name: rebar-test-queues
+          resources:
+            requests:
+              cpu: "15"
+              memory: 112Gi
+            limits:
+              cpu: "15"
+              memory: 112Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /tmp/rebar-cache
+            - name: solver-logs
+              mountPath: /app/logs
+              subPath: rebar-optimizer/logs
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}
+        - name: solver-logs
+          persistentVolumeClaim:
+            claimName: rebar-solver-logs
