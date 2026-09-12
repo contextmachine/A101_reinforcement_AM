@@ -93,12 +93,13 @@ class V2Pipeline:
     def add_ns(self, task_id: str, ns: Sequence[int]) -> list[int]:
         added = self.v2.add_ns(task_id, [int(n) for n in ns])
         task = self.v2.get_task(task_id)
-        if task is not None and added:
-            if task.get("cancelled"):
+        if task is not None:
+            if added and task.get("cancelled"):
                 # New N revive a task whose previous N were all cancelled.
                 self.v2.set_task(task_id, cancelled=False)
-            if str(task.get("state")) != "ready":
-                # Preparation never finished (cancelled early or failed): run it again.
+            if str(task.get("state")) != "ready" and (added or not task.get("cancelled")):
+                # Preparation never finished (job lost, cancelled early or failed): run it
+                # again. The dedupe key makes this a no-op while a prepare job is queued.
                 self.enqueue("v2_prepare", task_id)
         self.schedule_pending(task_id)
         return added

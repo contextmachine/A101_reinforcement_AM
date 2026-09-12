@@ -300,3 +300,17 @@ def test_solver_subprocess_failure_reason_is_persisted(tmp_path, monkeypatch):
         drain(store, pipeline)
     row = store.v2.get_n(task_id, 3)
     assert row["state"] == "error" and "code -9" in row["error"]
+
+
+def test_repeating_put_n_revives_a_task_whose_prepare_job_was_lost(tmp_path):
+    settings = make_settings(tmp_path)
+    store = FakeStore(settings)
+    pipeline = V2Pipeline(store, settings)
+    task_id = pipeline.create_task(scene_id="scene", overlay_id=0, smooth=False, config=CONFIG, ns=[2])
+    store.queue.jobs.clear()  # the prepare job never reached a worker
+    assert store.v2.get_task(task_id)["state"] == "created"
+    assert pipeline.add_ns(task_id, [2]) == []  # nothing new, but preparation is re-queued
+    assert [job["kind"] for job in store.queue.jobs] == ["v2_prepare"]
+    drain(store, pipeline)
+    assert store.v2.get_task(task_id)["state"] == "ready"
+    assert store.v2.get_n(task_id, 2)["state"] == "success"
