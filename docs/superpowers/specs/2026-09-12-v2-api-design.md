@@ -131,9 +131,11 @@ horizontal bars use `direction=(0,-1)` and the origin is the start of the base b
 * An additional zone whose bars land on background guides is shifted as a whole by the clearance
   (`_shift_zones_off_background`), so its step stays uniform; only residual collisions are
   repaired bar by bar.
-* Zones are re-derived from the laid-out tracks with a grid tolerance of 0.3·step
-  (`_RUN_GRID_TOL`): a bar pushed off its guide stays a member of its zone, a missing or extra bar
-  starts a new run. Before this every shifted bar became its own one-bar zone.
+* Zones are the source of the bars and are never re-derived from them: the `zones` of a bars /
+  task result are the input zones, normalised (plus one-bar zones for gap-filling rods). Overlaying
+  a zone on the background grid legitimately shifts individual bars (a 150 mm step on a 300 mm
+  background reads 100/200/100/200; a bar sharing a guide with a background bar moves by the
+  clearance) and those shifts do not propagate back, so zones → bars → zones is stable.
 * The verification band of a rod counts only the width inside the field (material polygons), so
   edge rods are not credited to concrete beyond the slab edge.
 

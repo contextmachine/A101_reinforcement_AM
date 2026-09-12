@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import Counter
+
 from math import pi
 
 import pytest
@@ -138,7 +140,7 @@ def test_layout_axis_y_bg_and_additional_bars():
     assert all(b["d"] == 20.0 and b["anchorage"] == {"start": 800.0, "end": 800.0} for b in add_bars)
     assert all(b["start"][1] == 600.0 and b["end"][1] == 2400.0 for b in add_bars)
 
-    # Output zones: bg keeps its id, the first run keeps the input id, extra runs get max+1...
+    # Output zones: the input zones, normalised (anchorage resolved); never re-derived from the bars.
     assert result["zones"][0] == {
         "id": 0, "kind": "bg", "arm": {"d": 18.0, "step": 300.0}, "anchorage": {"start": 720.0, "end": 720.0},
     }
@@ -150,12 +152,9 @@ def test_layout_axis_y_bg_and_additional_bars():
         assert z["arm"] == {"d": 20.0, "step": 150.0}
         assert z["length"] == 1800.0 and z["direction"] == [1.0, 0.0] and z["origin"][1] == 600.0
         assert z["anchorage"] == {"start": 800.0, "end": 800.0}
-    # Every bar sits on its zone's arithmetic grid.
-    by_id = {z["id"]: z for z in additional}
-    for bar in add_bars:
-        z = by_id[bar["zone_id"]]
-        offset = (bar["start"][0] - z["origin"][0]) / z["arm"]["step"]
-        assert abs(offset - round(offset)) <= 0.35 + 1e-9 and -z["left"] <= round(offset) <= z["right"]
+        # Zones are echoed as given; every bar belongs to an input zone and each zone has its bar count.
+    counts = Counter(b["zone_id"] for b in add_bars)
+    assert all(counts[z["id"]] == z["left"] + z["right"] + 1 for z in additional)
 
     metrics = result["mass_metrics"]
     assert set(metrics) == {"additional", "bg"} and all(set(metrics[g]) == set(MASS_KEYS) for g in metrics)
@@ -350,11 +349,8 @@ def test_layout_axis_x_horizontal_bars_and_zone_conventions():
     assert sum(z["left"] + z["right"] + 1 for z in additional) == 2
     for z in additional:
         assert z["direction"] == [0.0, -1.0] and z["origin"][0] == 600.0 and z["length"] == 1800.0
-    by_id = {z["id"]: z for z in additional}
-    for bar in add_bars:
-        z = by_id[bar["zone_id"]]
-        offset = (z["origin"][1] - bar["start"][1]) / z["arm"]["step"]
-        assert abs(offset - round(offset)) <= 0.35 + 1e-9 and -z["left"] <= round(offset) <= z["right"]
+    counts = Counter(b["zone_id"] for b in add_bars)
+    assert all(counts[z["id"]] == z["left"] + z["right"] + 1 for z in additional)
     bg = result["mass_metrics"]["bg"]
     assert bg["without_anchorage_kg"] == pytest.approx(4 * 3000 * unit(18))
     assert bg["with_anchorage_unclipped_kg"] == pytest.approx(4 * (3000 + 1440) * unit(18))

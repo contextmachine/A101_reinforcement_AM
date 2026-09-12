@@ -83,7 +83,17 @@ def fill_gaps(
             if report["rods_added"] >= max_rods:
                 break
             anchor = float(anchor_factor) * d
-            segments = _clip_to_field(field, axis, c_pos, l_lo - anchor, l_hi + anchor, long)
+            # the rod runs the full length of the zone it belongs to (an infinite line clipped to the
+            # zone box and the field); without a zone it spans the short elements only
+            for (bx0, by0, bx1, by1), zd, _zs, _zo in additional_boxes:
+                lo_b, hi_b = (bx0, bx1) if long == 0 else (by0, by1)
+                c_lo_b, c_hi_b = (by0, by1) if long == 0 else (bx0, bx1)
+                if zd == d and c_lo_b - 1.0 <= c_pos <= c_hi_b + 1.0 and lo_b <= l_hi and hi_b >= l_lo:
+                    l_lo, l_hi = min(l_lo, lo_b), max(l_hi, hi_b)
+            c_pos = _clear_position(c_pos, d, bars, l_lo, l_hi, cross, long)
+            if c_pos is None:
+                continue
+            segments = _clip_to_field(field, axis, c_pos, l_lo, l_hi, long)
             for s_lo, s_hi in segments:
                 if s_hi - s_lo <= 1.0:
                     continue
@@ -188,15 +198,31 @@ def _propose_rod(polygon, bars, additional_boxes, *, axis: str, cover_mm: float)
         candidate = origin + k * step
         if a + d <= candidate <= b - d:
             position = candidate
-    # keep the clearance to every rod already there (a thinner bar on the same line included)
-    for p, rd in all_positions:
-        clearance = (d + rd) / 2.0
-        if abs(position - p) < clearance - 1e-6:
-            up, down = p + clearance, p - clearance
-            position = up if (b - up) >= (down - a) else down
-    if position <= a or position >= b:
-        return None
     return (position, l_lo, l_hi, d)
+
+
+def _clear_position(position, d, bars, l_lo, l_hi, cross, long):
+    """Move ``position`` off every rod overlapping ``[l_lo, l_hi]`` by the clearance ``(d + d_other)/2``.
+
+    Returns ``None`` when no clear position exists within a step of the requested one.
+    """
+    rods = []
+    for b in bars:
+        s, e = b["start"], b["end"]
+        b_lo, b_hi = min(s[long], e[long]), max(s[long], e[long])
+        if b_hi < l_lo or b_lo > l_hi:
+            continue
+        rods.append((0.5 * (s[cross] + e[cross]), float(b["d"])))
+    target = position
+    for _ in range(8):
+        blocking = [(p, rd) for p, rd in rods if abs(position - p) < (d + rd) / 2.0 - 1e-6]
+        if not blocking:
+            return position if abs(position - target) <= 100.0 else None
+        p, rd = min(blocking, key=lambda r: abs(position - r[0]))
+        clearance = (d + rd) / 2.0
+        up, down = p + clearance, p - clearance
+        position = up if abs(up - target) <= abs(down - target) else down
+    return None
 
 
 def _merge_proposals(proposals, *, cross: int, long: int):

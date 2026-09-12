@@ -36,7 +36,6 @@ _ALIGN_TOL = 1e-4
 #: Two tracks of one zone belong to the same arithmetic run when their spacing equals the zone
 #: step within this many millimetres (guide slots are exact up to floating-point noise).
 _RUN_TOL = 1e-3
-_RUN_GRID_TOL = 0.35  # fraction of the step a bar may deviate from its grid position and stay in the run
 
 
 # --------------------------------------------------------------------------------------------
@@ -381,61 +380,24 @@ def fitted_boxes_to_zones(
 # --------------------------------------------------------------------------------------------
 
 
-def _runs(rows: Sequence[Mapping[str, Any]], axis: str, step: float) -> list[list[Mapping[str, Any]]]:
-    """Split one zone's tracks (sorted by cross coordinate) into arithmetic runs of ``step``.
-
-    A track joins the current run when it sits on the run's next grid position (origin +
-    k·step, k consecutive) within ``_RUN_GRID_TOL`` of the step: bars pushed off background
-    guides by the clearance rule stay members of their zone, a missing or extra bar starts a
-    new run.
-    """
-    ordered = sorted(rows, key=lambda t: (_track_cross(t, axis), int(t["id"])))
-    runs: list[list[Mapping[str, Any]]] = []
-    origins: list[float] = []
-    for track in ordered:
-        coordinate = _track_cross(track, axis)
-        if runs:
-            expected = origins[-1] + len(runs[-1]) * step
-            if abs(coordinate - expected) <= _RUN_GRID_TOL * step:
-                runs[-1].append(track)
-                continue
-        runs.append([track])
-        origins.append(coordinate)
-    return runs
-
-
-def _run_zone(
+def _normalized_zone(
     zone: Mapping[str, Any],
-    run: Sequence[Mapping[str, Any]],
     *,
-    zone_id: int,
-    axis: str,
     d: float,
     step: float,
     direction: tuple[float, float],
     anchorage: tuple[float, float],
-    keep_split: bool,
 ) -> dict[str, Any]:
-    cross, long = _frame(axis)
-    coordinates = sorted(_track_cross(t, axis) for t in run)
-    if direction[cross] < 0:
-        coordinates.reverse()
-    count = len(coordinates)
-    left, right = int(zone.get("left", 0) or 0), int(zone.get("right", 0) or 0)
-    if not keep_split or left + right + 1 != count:
-        left, right = 0, count - 1
-    base_cross = coordinates[left]
-    origin_long = float(zone["origin"][long])
-    origin = [base_cross, origin_long] if cross == 0 else [origin_long, base_cross]
+    """The input zone as the wire contract spells it: zones are never re-derived from bars."""
     return {
-        "id": int(zone_id),
+        "id": _zone_id(zone),
         "kind": "additional",
         "arm": {"d": float(d), "step": float(step)},
-        "left": left,
-        "right": right,
+        "left": int(zone.get("left", 0) or 0),
+        "right": int(zone.get("right", 0) or 0),
         "length": float(zone["length"]),
         "anchorage": {"start": float(anchorage[0]), "end": float(anchorage[1])},
-        "origin": [float(origin[0]), float(origin[1])],
+        "origin": [float(zone["origin"][0]), float(zone["origin"][1])],
         "direction": [float(direction[0]), float(direction[1])],
     }
 
@@ -447,7 +409,13 @@ def _derive(
     axis: str,
     anchor_factor: float,
 ) -> dict[str, Any]:
-    """Re-derive wire zones from the laid-out tracks and describe every track.
+    """Describe every laid-out track and echo the input zones.
+
+    Zones are the source of the bars, never the other way round: overlaying zones on the
+    background grid shifts individual bars (a 150 mm step on a 300 mm background reads
+    100/200/100/200, a bar sharing a guide with a background bar moves by the clearance), and
+    those shifts must not propagate back into the zones, otherwise zones → bars → zones would
+    never settle.  The returned zones are therefore the input zones, normalised.
 
     Returns ``{"zones": [...], "track_zone": {track_id: zone_id}, "track_info": {track_id: {...}}}``
     where ``track_info`` holds ``group`` (``bg``/``additional``), ``d``, ``anchorage`` oriented to
@@ -485,7 +453,6 @@ def _derive(
         else:
             by_zone[int(track["input_zone_index"])].append(track)
 
-    next_id = max((_zone_id(z) for z in zones), default=0) + 1
     for index, zone in enumerate(additional):
         zone_id = _zone_id(zone)
         d, step = _arm(zone)
@@ -517,19 +484,9 @@ def _derive(
         for tid, extra in siblings.items():
             for other in extra:
                 track_info[other]["rod"] = False
-        for k, run in enumerate(_runs(representatives, axis, step)):
-            if k == 0:
-                run_id = zone_id
-            else:
-                run_id, next_id = next_id, next_id + 1
-            out_zones.append(_run_zone(
-                zone, run, zone_id=run_id, axis=axis, d=d, step=step, direction=direction,
-                anchorage=anchorage, keep_split=(k == 0),
-            ))
-            for track in run:
-                track_zone[int(track["id"])] = run_id
-                for other in siblings.get(int(track["id"]), []):
-                    track_zone[other] = run_id
+        out_zones.append(_normalized_zone(zone, d=d, step=step, direction=direction, anchorage=anchorage))
+        for track in rows:
+            track_zone[int(track["id"])] = zone_id
     return {"zones": out_zones, "track_zone": track_zone, "track_info": track_info}
 
 
@@ -591,8 +548,8 @@ def _mass_metrics(
 def zones_from_layout(
     layout: Mapping[str, Any], zones: Sequence[Mapping[str, Any]], *, axis: str, anchor_factor: float
 ) -> list[dict[str, Any]]:
-    """Wire zones re-derived from ``layout['tracks']`` (input ids preserved, extra runs get new ids)."""
-    return _derive(layout, zones, axis=axis, anchor_factor=anchor_factor)["zones"]
+    """Wire zones of a layout: the input zones, normalised (zones are never re-derived from bars)."""
+    return _derive(layout, zones, axis=_axis(axis), anchor_factor=anchor_factor)["zones"]
 
 
 def bars_from_layout(
