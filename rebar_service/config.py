@@ -86,6 +86,9 @@ class Settings(BaseSettings):
     artifact_cache_ttl_seconds: float = 43200.0
     # JSON object of extra HiGHS options for the solving stage, e.g. {"presolve": "off"}.
     highs_options: str = ""
+    # Candidate rectangles for the whole-field MILP: 0 = exhaustive enumeration (linear_idea),
+    # >0 = lattice-tightened pool (A101.lattice_candidates) with at most this many rectangles.
+    candidate_lattice_cap: int = 0
 
     grid_size: float = 300.0
     fill_notches: float = 1000.0

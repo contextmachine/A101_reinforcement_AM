@@ -337,3 +337,19 @@ def test_returned_zones_lay_out_to_the_same_bars_again(tmp_path):
         assert out["mass_metrics"]["additional"]["with_anchorage_kg"] == pytest.approx(
             row["mass_metrics"]["additional"]["with_anchorage_kg"])
         zones = out["zones"]
+
+
+def test_lattice_candidate_pool_runs_the_whole_pipeline(tmp_path):
+    settings = make_settings(tmp_path, candidate_lattice_cap=500)
+    store = FakeStore(settings)
+    pipeline = V2Pipeline(store, settings)
+    task_id = pipeline.create_task(scene_id="scene", overlay_id=0, smooth=False, config=CONFIG, ns=[1, 2, 3])
+    drain(store, pipeline)
+    task = store.v2.get_task(task_id)
+    assert task["state"] == "ready"
+    generator = task["prepare_info"]["candidate_generator"]
+    assert generator["generator"] == "lattice" and generator["candidates"] == task["prepare_info"]["candidate_rectangles"]
+    assert generator["candidates"] <= 500
+    rows = [store.v2.get_n(task_id, n) for n in (1, 2, 3)]
+    assert all(r["state"] == "success" for r in rows), rows
+    assert any(r["status"] in {"optimal", "feasable"} and r["result"]["bars"] for r in rows), rows

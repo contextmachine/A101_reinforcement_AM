@@ -656,8 +656,15 @@ def prepare_component_problem(
     physical_geometry: Any = None,
     physical_area_eps: float = 1e-6,
     progress: bool = False,
+    candidate_generator: Callable[..., tuple[list[tuple[int, int, int, int, int]], Mapping[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Build the existing prepared solver model for one demand component.
+
+    ``candidate_generator`` optionally replaces the exhaustive rectangle enumeration: it is
+    called as ``generator(work_matrix, x_edges=..., x_steps=..., y_steps=..., min_w=..., holds=...)``
+    and must return ``(candidates, info)`` with candidates in the ``(x1, y1, x2, y2, class)``
+    matrix-index contract of :func:`A101.linear_idea.generate_all_rectangles`; ``info`` is
+    recorded in ``stats["candidate_generator"]``.
 
     ``max_n_resolver`` is an optional hook ``resolver(work_matrix, context)``
     called right after the candidate rectangles have been filtered by matrix
@@ -788,15 +795,23 @@ def prepare_component_problem(
     small_cross_component = cross_span < requested_min_width - 1e-9
 
     started = perf_counter()
-    requirement_rectangles = generate_all_rectangles(
-        int_matrix=work_matrix,
-        x_steps=work_x_steps,
-        y_steps=work_y_steps,
-        xs=work_x_edges,
-        min_w=candidate_min_width,
-        holds=holds,
-    )
-    mark("generate_rectangles", started, rectangles=len(requirement_rectangles))
+    generator_info: dict[str, Any] = {}
+    if candidate_generator is not None:
+        requirement_rectangles, raw_info = candidate_generator(
+            work_matrix, x_edges=work_x_edges, x_steps=work_x_steps, y_steps=work_y_steps,
+            min_w=candidate_min_width, holds=holds,
+        )
+        generator_info = dict(raw_info or {})
+    else:
+        requirement_rectangles = generate_all_rectangles(
+            int_matrix=work_matrix,
+            x_steps=work_x_steps,
+            y_steps=work_y_steps,
+            xs=work_x_edges,
+            min_w=candidate_min_width,
+            holds=holds,
+        )
+    mark("generate_rectangles", started, rectangles=len(requirement_rectangles), **generator_info)
 
     started = perf_counter()
     selectable = relabel_rectangle_candidates(requirement_rectangles, dict(recipes or {}))
@@ -921,6 +936,7 @@ def prepare_component_problem(
             "discarded_refined_shape": None if discarded_refined_shape is None else tuple(map(int, discarded_refined_shape)),
             "prepare_times_s": stage_times,
             "candidate_rectangles": len(work_rectangles),
+            "candidate_generator": generator_info or None,
             "matrix_barrier_rejected_candidates": int(barrier_rejected),
             "requested_min_width": requested_min_width,
             "candidate_min_width": candidate_min_width,

@@ -221,6 +221,9 @@ Large v2 artifacts (the prepared problem, per-N solver and fit rows) are written
 `REBAR_ARTIFACT_CACHE_DIR`; Postgres keeps only a reference row. Leave `REBAR_ARTIFACT_DIR` empty to store
 them inline in Postgres (only sensible for small scenes). `REBAR_HIGHS_OPTIONS` (a JSON object) adds HiGHS
 options to every solving stage, for example `{"presolve": "off"}`.
+`REBAR_CANDIDATE_LATTICE_CAP` (0 = off) replaces the exhaustive candidate enumeration of the whole-field MILP
+with the lattice-tightened pool of `A101/lattice_candidates.py`, capped at that many rectangles (the finest lattice
+that fits is chosen automatically; `prepare_info.candidate_generator` reports it).
 
 
 `/v2` — минималистичный контракт (`payload-v2-am-aa.md`): поле считается целиком, без

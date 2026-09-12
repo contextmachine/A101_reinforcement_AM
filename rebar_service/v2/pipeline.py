@@ -294,6 +294,13 @@ class V2Pipeline:
                 raise CandidateCoverInfeasible("точный max-N MILP не нашёл допустимого покрытия прямоугольниками")
             return int(result["max_useful_n"])
 
+        generator = None
+        if int(settings.candidate_lattice_cap) > 0:
+            from A101.lattice_candidates import lattice_candidates
+
+            def generator(work_matrix, *, x_edges, min_w, cap=int(settings.candidate_lattice_cap), **_ignored):
+                return lattice_candidates(work_matrix, x_edges=x_edges, min_w=min_w, cap=cap)
+
         problem = prepare_component_problem(
             component,
             load2cls=cfg["load2cls"], recipes=cfg.get("recipes"), densities=cfg["densities"],
@@ -304,7 +311,7 @@ class V2Pipeline:
             max_n=None, max_n_resolver=resolver, use_mosaic=bool(settings.use_mosaic),
             preserve_demand_classes=True, strict_grid_coverage=True,
             refine_unrepresentable_cells=False, refine_mixed_cells=False,
-            physical_geometry=field_geometry,
+            physical_geometry=field_geometry, candidate_generator=generator,
         )
         max_useful_n = int(estimate["max_useful_n"])
         bounds = component_n_bounds(problem["prepared"], cap=max_useful_n)
@@ -315,6 +322,7 @@ class V2Pipeline:
             "nonredundant_upper_bound": bounds.get("nonredundant_upper_bound"),
             "candidate_rectangles": problem.get("stats", {}).get("candidate_rectangles"),
             "matrix_shape": problem.get("stats", {}).get("matrix_shape"),
+            "candidate_generator": problem.get("stats", {}).get("candidate_generator"),
         }
         return field, problem, info
 

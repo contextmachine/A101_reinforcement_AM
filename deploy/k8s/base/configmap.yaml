@@ -44,6 +44,8 @@ data:
   REBAR_ARTIFACT_CACHE_DIR: /tmp/rebar-cache/artifacts
   # Extra HiGHS options for the solving stage as a JSON object, e.g. '{"presolve": "off"}'.
   REBAR_HIGHS_OPTIONS: '{}'
+  # 0 = exhaustive candidate enumeration; >0 = lattice-tightened pool capped at this many rectangles.
+  REBAR_CANDIDATE_LATTICE_CAP: '0'
   REBAR_CORS_ORIGINS: '*'
   REBAR_SCHEDULER_BATCH_SIZE: '256'
   REBAR_COMBINE_BATCH_SIZE: '256'

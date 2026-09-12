@@ -49,6 +49,8 @@ data:
   REBAR_ARTIFACT_DIR: /app/artifacts
   REBAR_ARTIFACT_CACHE_DIR: /tmp/rebar-cache/artifacts
   REBAR_HIGHS_OPTIONS: '{"presolve": "off"}'
+  # 0 = exhaustive candidate enumeration; >0 = lattice-tightened pool capped at this many rectangles.
+  REBAR_CANDIDATE_LATTICE_CAP: '0'
 kind: ConfigMap
 metadata:
   name: rebar-config-test

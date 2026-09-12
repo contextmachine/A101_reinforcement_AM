@@ -37,6 +37,7 @@ def main():
     ap.add_argument("--ns", default="10"); ap.add_argument("--highs", default="")
     ap.add_argument("--threads", type=int, default=12); ap.add_argument("--prepare-only", action="store_true")
     ap.add_argument("--time-limit", type=float, default=None)
+    ap.add_argument("--lattice-cap", type=int, default=0, help="REBAR_CANDIDATE_LATTICE_CAP (0 = exhaustive)")
     a = ap.parse_args()
     ns = [int(x) for x in a.ns.split(",") if x]
     polys = extract_polygons(a.dxf)
@@ -47,7 +48,7 @@ def main():
         solver_backend="highs", fit_milp_backend="auto", grid_size=300, fill_notches=1000, short_edge=300,
         simplify_step=1000, use_mosaic=True, min_internal_step=100, solver_threads=a.threads, fit_threads=1,
         solver_log_dir=log_dir, highs_options=a.highs, max_n=1000, require_optimal=True,
-        solver_time_limit=a.time_limit,
+        solver_time_limit=a.time_limit, candidate_lattice_cap=a.lattice_cap,
     )
     store = FakeStore(settings, rows)
     pipeline = V2Pipeline(store, settings)
@@ -68,7 +69,7 @@ def main():
             break
     total = time.perf_counter() - t0
     task = store.v2.get_task(task_id)
-    result = {"dxf": a.dxf, "axis": a.axis, "highs": a.highs, "threads": a.threads, "total_s": round(total, 1),
+    result = {"dxf": a.dxf, "axis": a.axis, "highs": a.highs, "threads": a.threads, "lattice_cap": a.lattice_cap, "total_s": round(total, 1),
               "stages": stage_times, "task_state": task["state"], "max_useful_n": task.get("max_useful_n"),
               "min_useful_n": task.get("min_useful_n"), "prepare_info": task.get("prepare_info"),
               "polygons": len(rows), "ns": {}}

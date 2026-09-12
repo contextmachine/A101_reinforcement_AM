@@ -157,7 +157,9 @@ Kept (all read from `Settings`, no request field, no cap): `REBAR_SOLVER_THREADS
 `REBAR_MAX_N` (cap for `max_useful_n` and for requested N, see Q7), `REBAR_GRID_SIZE`,
 `REBAR_FILL_NOTCHES`, `REBAR_SHORT_EDGE`, `REBAR_SIMPLIFY_STEP`, `REBAR_USE_MOSAIC`,
 `REBAR_MIN_INTERNAL_STEP`, `REBAR_MAX_JOBS_PER_TASK`, queue names, lease/claim timeouts,
-`REBAR_SOLVER_LOG_DIR`, `REBAR_WORKER_EXIT_WHEN_IDLE`.
+`REBAR_SOLVER_LOG_DIR`, `REBAR_WORKER_EXIT_WHEN_IDLE`, `REBAR_HIGHS_OPTIONS` (JSON, extra HiGHS options
+for the solving stage), `REBAR_CANDIDATE_LATTICE_CAP` (0 = exhaustive candidates; >0 = lattice-tightened
+candidate pool of at most that many rectangles, see `A101/lattice_candidates.py`).
 
 Removed: `solver.threads/timeout_seconds/backend/require_optimal/prepared_max_n/highs_options`
 request fields, `max_concurrent_jobs`, `component_result_top_k`, `validate_results`,
