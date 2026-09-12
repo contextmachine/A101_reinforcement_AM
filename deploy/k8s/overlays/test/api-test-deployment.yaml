@@ -49,7 +49,7 @@ spec:
             name: rebar-secrets
         - configMapRef:
             name: rebar-test-queues
-        image: ghcr.io/contextmachine/a101_reinforcement_am:sha-d138feb
+        image: ghcr.io/contextmachine/a101_reinforcement_am:sha-f0accfb
         imagePullPolicy: Always
         livenessProbe:
           failureThreshold: 3
