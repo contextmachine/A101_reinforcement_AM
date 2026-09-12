@@ -110,6 +110,15 @@ DEPRECATED_V1 = {
     ("post", "/v1/tasks/upload"), ("post", "/v1/tasks/tables_upload"), ("post", "/v1/tasks/json_upload"),
     ("post", "/v1/verification/zones"), ("post", "/v1/verification/task"),
     ("get", "/v1/tasks/{task_id}/overlays"), ("post", "/v1/tasks/{task_id}/overlays"),
+    # task-scoped reads/controls superseded by the whole-field v2 task (no components, no pause)
+    ("get", "/v1/tasks/{task_id}/components"), ("get", "/v1/tasks/{task_id}/components/{component_id}"),
+    ("post", "/v1/tasks/{task_id}/components/{component_id}/n"),
+    ("get", "/v1/tasks/{task_id}/components/{component_id}/results"),
+    ("get", "/v1/tasks/{task_id}/components/{component_id}/results/{n}"),
+    ("get", "/v1/tasks/{task_id}/solutions"), ("get", "/v1/tasks/{task_id}/solutions/{solution_id}"),
+    ("get", "/v1/tasks/{task_id}/results"), ("get", "/v1/tasks/{task_id}/results/{n}"),
+    ("get", "/v1/tasks/{task_id}/results/{n}/dxf"), ("post", "/v1/tasks/{task_id}/n"),
+    ("post", "/v1/tasks/{task_id}/pause"), ("post", "/v1/tasks/{task_id}/resume"),
 }
 
 

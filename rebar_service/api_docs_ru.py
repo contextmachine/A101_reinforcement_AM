@@ -402,4 +402,19 @@ DEPRECATED_REPLACEMENTS = {
     "verify_task_solution": "POST /v2/verification (zones из GET /v2/tasks/{task_id}/{n})",
     "list_overlays": "GET /v2/scenes/{scene_id}/overlays/{overlay_id}",
     "append_overlays": "POST /v2/scenes/{scene_id}/overlays",
+    # Task-scoped v1 reads/controls: v2 has no components, frontiers, pause or DXF export;
+    # the whole-field task itself is the replacement.
+    "list_components": "GET /v2/tasks/{task_id} (в v2 нет компонент: поле считается целиком)",
+    "get_component": "GET /v2/tasks/{task_id} (в v2 нет компонент: поле считается целиком)",
+    "schedule_component_n": "PUT /v2/tasks/{task_id}/n",
+    "list_component_results": "GET /v2/tasks/{task_id}",
+    "get_component_result": "GET /v2/tasks/{task_id}/{n}",
+    "list_solutions": "GET /v2/tasks/{task_id}",
+    "get_solution": "GET /v2/tasks/{task_id}/{n}",
+    "list_results": "GET /v2/tasks/{task_id}",
+    "get_result": "GET /v2/tasks/{task_id}/{n}",
+    "get_result_dxf": "GET /v2/tasks/{task_id}/{n} (bars/zones без анкеровки; DXF-экспорта в v2 нет)",
+    "add_n": "PUT /v2/tasks/{task_id}/n",
+    "pause_task": "PUT /v2/tasks/{task_id}/cancel (паузы в v2 нет; отменённые N можно добавить заново)",
+    "resume_task": "PUT /v2/tasks/{task_id}/n (паузы в v2 нет; отменённые N можно добавить заново)",
 }
