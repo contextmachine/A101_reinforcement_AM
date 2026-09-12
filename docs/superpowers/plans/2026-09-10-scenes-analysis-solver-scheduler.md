@@ -141,7 +141,7 @@
 - Test: `tests/test_max_n_milp.py`
 
 **Interfaces:**
-- Produces `estimate_max_useful_n(prepared, *, recipes, physical_geometry, hard_cap=100) -> dict` with `max_useful_n`, per-layer counts and feasibility.
+- Produces `estimate_max_useful_n(prepared, *, recipes, physical_geometry, hard_cap=250) -> dict` with `max_useful_n`, per-layer counts and feasibility.
 - Max-N job is explicit worker job and stores component/whole bound before solves are expanded.
 
 - [ ] Add failing small exact-cover tests where minimum rectangles are analytically known and tests for hard cap 100/infeasible physical cover.

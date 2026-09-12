@@ -596,7 +596,7 @@ def _mark_matrix_voids(
     work_y_edges: Sequence[float],
     axis: str,
     physical_geometry: Any,
-    area_eps: float = 0.5,
+    area_eps: float = 1e-6,
 ) -> np.ndarray:
     """Encode pure physical void as ``-1`` directly in the class matrix.
 
@@ -622,8 +622,7 @@ def _mark_matrix_voids(
                 [(x, y, x, y, 1)], work_x_edges, work_y_edges, axis
             )[0]
             cell = box(*world[:4])
-            int_are = float(cell.intersection(material).area)
-            if int_are/cell.area <= tolerance:
+            if float(cell.intersection(material).area) <= tolerance:
                 out[y, x] = -1
     return out
 
@@ -654,7 +653,7 @@ def prepare_component_problem(
     max_refinement_factor: float | None = 3.0,
     fallback_to_composite_cells: bool = True,
     physical_geometry: Any = None,
-    physical_area_eps: float = 0.8,
+    physical_area_eps: float = 1e-6,
     progress: bool = False,
 ) -> dict[str, Any]:
     """Build the existing prepared solver model for one demand component."""
@@ -1113,6 +1112,19 @@ def fit_component_frontier(
             component_problem["work_y_edges"],
             axis,
         )
+        void_rectangles = []
+        work_matrix = np.asarray(component_problem.get("work_matrix"))
+        if work_matrix.ndim == 2 and np.any(work_matrix < 0):
+            ys, xs = np.where(work_matrix < 0)
+            grid_voids = [(int(x), int(y), int(x), int(y), 0) for y, x in zip(ys, xs)]
+            void_rectangles = [
+                tuple(row[:4]) for row in grid_rectangles_to_world(
+                    grid_voids,
+                    component_problem["work_x_edges"],
+                    component_problem["work_y_edges"],
+                    axis,
+                )
+            ]
         fitted = fit_box_layout(
             component_problem["poly_mos"],
             rectangles,
@@ -1122,6 +1134,7 @@ def fit_component_frontier(
             time_limit=time_limit,
             allow_class_upgrade=allow_class_upgrade,
             allowed_classes=set(densities) & set(diameters) & set(steps),
+            avoid_rectangles=void_rectangles,
             milp_backend=fit_milp_backend,
             threads=fit_threads,
         )

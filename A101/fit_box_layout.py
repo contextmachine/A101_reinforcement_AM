@@ -14,7 +14,7 @@ def fit_box_layout(polygons, rectangles, recipes=None, *, recipe_mode="threshold
                    densities=None, min_w=None, nearest=8, per_direction=1,
                    max_distance=None, time_limit=None, mip_rel_gap=0,
                    allow_class_upgrade=True, allowed_classes=None,
-                   milp_backend="auto", threads=1, output=False, eps=1e-8):
+                   avoid_rectangles=None, milp_backend="auto", threads=1, output=False, eps=1e-8):
     import numpy as np
     import shapely
     from shapely.geometry import box
@@ -29,6 +29,22 @@ def fit_box_layout(polygons, rectangles, recipes=None, *, recipe_mode="threshold
 
     recipes = {int(k): tuple(map(int, seq(v))) for k, v in dict(recipes or {}).items()}
     densities = {int(k): float(v) for k, v in dict(densities or {}).items()}
+    avoid_bounds = np.asarray([tuple(map(float, row[:4])) for row in (avoid_rectangles or [])], dtype=float)
+    if avoid_bounds.size:
+        avoid_bounds = avoid_bounds.reshape((-1, 4))
+        if np.any(avoid_bounds[:, 2] < avoid_bounds[:, 0]) or np.any(avoid_bounds[:, 3] < avoid_bounds[:, 1]):
+            raise ValueError("avoid_rectangles содержит некорректные bounds")
+    else:
+        avoid_bounds = np.empty((0, 4), dtype=float)
+
+    def avoid_overlap(raw_bounds):
+        if not len(avoid_bounds):
+            return 0.0
+        x0, y0, x1, y1 = map(float, raw_bounds[:4])
+        dx = np.maximum(0.0, np.minimum(x1, avoid_bounds[:, 2]) - np.maximum(x0, avoid_bounds[:, 0]))
+        dy = np.maximum(0.0, np.minimum(y1, avoid_bounds[:, 3]) - np.maximum(y0, avoid_bounds[:, 1]))
+        return float(np.sum(dx * dy))
+
     leaf_cache = {}
 
     def leaves(cls, stack=()):
@@ -154,11 +170,31 @@ def fit_box_layout(polygons, rectangles, recipes=None, *, recipe_mode="threshold
         hit = None if useful is None else box(*raw_bounds).intersection(useful)
         x0, y0, x1, y1 = raw_bounds if hit is None or hit.is_empty or hit.area <= eps else map(float, hit.bounds)
         width = minimum_width(cls)
-        if x1 - x0 < width - eps:
-            d = (width - x1 + x0) / 2.0; x0 -= d; x1 += d
-        if y1 - y0 < width - eps:
-            d = (width - y1 + y0) / 2.0; y0 -= d; y1 += d
-        return float(x0), float(y0), float(x1), float(y1)
+        target_w = max(float(x1 - x0), width)
+        target_h = max(float(y1 - y0), width)
+        centered_x = float(x0 - (target_w - (x1 - x0)) / 2.0)
+        centered_y = float(y0 - (target_h - (y1 - y0)) / 2.0)
+
+        # Any start in [x1-target_w, x0] x [y1-target_h, y0] preserves the
+        # tightened demand bounds. Check the centered historical placement and
+        # both extreme shifts on each axis, then prefer the least matrix-void
+        # overlap. With no avoid rectangles the movement tie-break reproduces
+        # the historical symmetric expansion exactly.
+        x_starts = sorted({centered_x, float(x0), float(x1 - target_w)})
+        y_starts = sorted({centered_y, float(y0), float(y1 - target_h)})
+        candidates = [
+            (sx, sy, sx + target_w, sy + target_h)
+            for sx in x_starts
+            for sy in y_starts
+        ]
+        fitted = min(
+            candidates,
+            key=lambda bounds: (
+                avoid_overlap(bounds),
+                (bounds[0] - centered_x) ** 2 + (bounds[1] - centered_y) ** 2,
+            ),
+        )
+        return tuple(map(float, fitted))
 
     tree = STRtree(geometries) if len(geometries) else None
     cells = []
@@ -189,10 +225,14 @@ def fit_box_layout(polygons, rectangles, recipes=None, *, recipe_mode="threshold
         out = [result_rectangle(fitted_bounds[i], classes0[i]) for i in range(len(source))]
         mass = sum((b[2] - b[0]) * (b[3] - b[1]) * explicit_density[i]
                    for i, b in enumerate(fitted_bounds))
+        void_area = float(sum(avoid_overlap(bounds) for bounds in fitted_bounds))
         return {"status": "Already covered", "is_feasible": True, "is_optimal": True,
                 "rectangles": out, "objective": float(mass - source_mass), "mass": float(mass),
                 "missing_groups": [], "class_changes": [],
-                "stats": {"missing_cells": 0, "missing_groups": 0, "class_upgrades": 0}}
+                "stats": {"missing_cells": 0, "missing_groups": 0, "class_upgrades": 0,
+                          "void_preference_used": bool(len(avoid_bounds)),
+                          "void_overlap_area": void_area,
+                          "minimum_void_overlap_area": void_area}}
 
     grouped = defaultdict(list)
     for index, atom in enumerate(cells):
@@ -239,14 +279,21 @@ def fit_box_layout(polygons, rectangles, recipes=None, *, recipe_mode="threshold
         if not len(ids):
             continue
         current, target_bounds = bounds0[ids], np.asarray(group["b"], dtype=float)
-        expanded_area = ((np.maximum(current[:, 2], target_bounds[2]) - np.minimum(current[:, 0], target_bounds[0])) *
-                         (np.maximum(current[:, 3], target_bounds[3]) - np.minimum(current[:, 1], target_bounds[1])))
+        expanded_bounds = np.column_stack((
+            np.minimum(current[:, 0], target_bounds[0]),
+            np.minimum(current[:, 1], target_bounds[1]),
+            np.maximum(current[:, 2], target_bounds[2]),
+            np.maximum(current[:, 3], target_bounds[3]),
+        ))
+        expanded_area = ((expanded_bounds[:, 2] - expanded_bounds[:, 0]) *
+                         (expanded_bounds[:, 3] - expanded_bounds[:, 1]))
         scores = np.asarray([
             min(expanded_area[k] * density(cls, i) for cls in target_classes[int(i)]) -
             (current[k, 2] - current[k, 0]) * (current[k, 3] - current[k, 1]) * explicit_density[i]
             for k, i in enumerate(ids)
         ])
-        order = np.lexsort((scores, distances))
+        avoid_scores = np.asarray([avoid_overlap(bounds) for bounds in expanded_bounds], dtype=float)
+        order = np.lexsort((scores, distances, avoid_scores))
         chosen = set(map(int, ids[order[:max(int(nearest), int(group["deficit"]))]]))
         sx = np.where(current[:, 2] <= target_bounds[0] + eps, -1,
                       np.where(current[:, 0] >= target_bounds[2] - eps, 1, 0))
@@ -254,7 +301,9 @@ def fit_box_layout(polygons, rectangles, recipes=None, *, recipe_mode="threshold
                       np.where(current[:, 1] >= target_bounds[3] - eps, 1, 0))
         for direction in set(zip(sx, sy)) - {(0, 0)}:
             positions = np.flatnonzero((sx == direction[0]) & (sy == direction[1]))
-            chosen.update(map(int, ids[positions[np.lexsort((scores[positions], distances[positions]))[:int(per_direction)]]]))
+            chosen.update(map(int, ids[positions[np.lexsort((
+                scores[positions], distances[positions], avoid_scores[positions]
+            ))[:int(per_direction)]]]))
         for i in chosen:
             expanded = (min(bounds0[i, 0], target_bounds[0]), min(bounds0[i, 1], target_bounds[1]),
                         max(bounds0[i, 2], target_bounds[2]), max(bounds0[i, 3], target_bounds[3]))
@@ -295,29 +344,35 @@ def fit_box_layout(polygons, rectangles, recipes=None, *, recipe_mode="threshold
                               for j in np.flatnonzero(inside)
                               if cell_contribution(cls, j) > 0)
             cost = (fitted[2] - fitted[0]) * (fitted[3] - fitted[1]) * value_density - original_mass
-            if signature not in best or cost < best[signature][0] - eps:
-                best[signature] = (float(cost), fitted, int(cls))
+            void = avoid_overlap(fitted)
+            old = best.get(signature)
+            if (old is None or void < old[1] - eps or
+                    (abs(void - old[1]) <= eps and cost < old[0] - eps)):
+                best[signature] = (float(cost), float(void), fitted, int(cls))
 
         kept = []
-        for signature, (cost, fitted, cls) in sorted(best.items(), key=lambda item: (item[1][0], -sum(v for _, v in item[0]))):
+        for signature, (cost, void, fitted, cls) in sorted(
+                best.items(), key=lambda item: (item[1][1], item[1][0], -sum(v for _, v in item[0]))):
             coverage = dict(signature)
             dominated = False
-            for old_signature, old_cost, _, _ in kept:
+            for old_signature, old_cost, old_void, _, _ in kept:
                 old = dict(old_signature)
-                if old_cost <= cost + eps and all(old.get(cell, 0) >= value for cell, value in coverage.items()):
+                lex_not_worse = (old_void < void - eps or
+                                 (abs(old_void - void) <= eps and old_cost <= cost + eps))
+                if lex_not_worse and all(old.get(cell, 0) >= value for cell, value in coverage.items()):
                     dominated = True; break
             if not dominated:
-                kept.append((signature, cost, fitted, cls))
+                kept.append((signature, cost, void, fitted, cls))
         variants.append(kept)
 
     flat, owners = [], []
     for owner, rows in enumerate(variants):
         owners.append([])
-        for signature, cost, fitted, cls in rows:
-            owners[owner].append(len(flat)); flat.append((owner, signature, cost, fitted, cls))
+        for signature, cost, void, fitted, cls in rows:
+            owners[owner].append(len(flat)); flat.append((owner, signature, cost, void, fitted, cls))
 
     coverage = [[] for _ in cells]
-    for variable, (_, signature, _, _, _) in enumerate(flat):
+    for variable, (_, signature, _, _, _, _) in enumerate(flat):
         for cell, coefficient in signature:
             coverage[cell].append((variable, coefficient))
 
@@ -337,24 +392,24 @@ def fit_box_layout(polygons, rectangles, recipes=None, *, recipe_mode="threshold
     rows += [([v for v, _ in entries], [float(c) for _, c in entries], float(need), float("inf"))
              for entries, need in merged.items()]
 
-    def solve_scipy():
+    def solve_scipy(objective, constraint_rows):
         from scipy.optimize import Bounds, LinearConstraint, milp
         from scipy.sparse import csr_matrix
 
-        ri, ci, values, lower, upper = [], [], [], [], []
-        for row, (ids, coefficients, lo, hi) in enumerate(rows):
-            ri.extend([row] * len(ids)); ci.extend(ids); values.extend(coefficients)
+        ri, ci, matrix_values, lower, upper = [], [], [], [], []
+        for row, (ids, coefficients, lo, hi) in enumerate(constraint_rows):
+            ri.extend([row] * len(ids)); ci.extend(ids); matrix_values.extend(coefficients)
             lower.append(lo); upper.append(hi)
-        matrix = csr_matrix((values, (ri, ci)), shape=(len(rows), len(flat)))
+        matrix = csr_matrix((matrix_values, (ri, ci)), shape=(len(constraint_rows), len(flat)))
         options = {"disp": bool(output), "mip_rel_gap": float(mip_rel_gap)}
         if time_limit is not None:
             options["time_limit"] = float(time_limit)
-        result = milp(c=np.asarray([row[2] for row in flat]), integrality=np.ones(len(flat), dtype=np.int8),
+        result = milp(c=np.asarray(objective, dtype=float), integrality=np.ones(len(flat), dtype=np.int8),
                       bounds=Bounds(np.zeros(len(flat)), np.ones(len(flat))),
                       constraints=LinearConstraint(matrix, np.asarray(lower), np.asarray(upper)), options=options)
         return None if result.x is None else np.asarray(result.x), str(result.message), bool(result.success)
 
-    def solve_highs():
+    def solve_highs(objective, constraint_rows):
         import highspy
 
         solver = highspy.Highs(); solver.setOptionValue("output_flag", bool(output))
@@ -363,32 +418,63 @@ def fit_box_layout(polygons, rectangles, recipes=None, *, recipe_mode="threshold
             solver.setOptionValue("time_limit", float(time_limit))
         count = len(flat); indices = np.arange(count, dtype=np.int32)
         solver.addVars(count, np.zeros(count), np.ones(count))
-        solver.changeColsCost(count, indices, np.asarray([row[2] for row in flat]))
+        solver.changeColsCost(count, indices, np.asarray(objective, dtype=float))
         solver.changeColsIntegrality(count, indices, np.asarray([highspy.HighsVarType.kInteger] * count))
-        lengths = np.asarray([len(row[0]) for row in rows], dtype=np.int32)
+        lengths = np.asarray([len(row[0]) for row in constraint_rows], dtype=np.int32)
         starts = np.r_[0, np.cumsum(lengths[:-1])].astype(np.int32)
-        columns = np.asarray([v for ids, _, _, _ in rows for v in ids], dtype=np.int32)
-        coefficients = np.asarray([c for _, values, _, _ in rows for c in values], dtype=float)
-        solver.addRows(len(rows), np.asarray([row[2] for row in rows]),
-                       np.asarray([highspy.kHighsInf if not np.isfinite(row[3]) else row[3] for row in rows]),
+        columns = np.asarray([v for ids, _, _, _ in constraint_rows for v in ids], dtype=np.int32)
+        coefficients = np.asarray([c for _, row_values, _, _ in constraint_rows for c in row_values], dtype=float)
+        solver.addRows(len(constraint_rows), np.asarray([row[2] for row in constraint_rows]),
+                       np.asarray([highspy.kHighsInf if not np.isfinite(row[3]) else row[3] for row in constraint_rows]),
                        len(columns), starts, columns, coefficients)
-        solver.run(); status = solver.getModelStatus(); values = np.asarray(list(solver.getSolution().col_value))
-        return (values if len(values) == count else None), solver.modelStatusToString(status), status == highspy.HighsModelStatus.kOptimal
+        solver.run(); status = solver.getModelStatus(); solution = np.asarray(list(solver.getSolution().col_value))
+        return (solution if len(solution) == count else None), solver.modelStatusToString(status), status == highspy.HighsModelStatus.kOptimal
 
     backend = str(milp_backend).lower()
     if backend not in {"auto", "highs", "scipy"}:
         raise ValueError("milp_backend: 'auto', 'highs' или 'scipy'")
-    values = status = optimal = None
-    if backend in {"auto", "highs"}:
-        try:
-            values, status, optimal = solve_highs()
-        except Exception:
-            if backend == "highs":
-                raise
-            values = None
-    if values is None and backend in {"auto", "scipy"}:
-        values, status, optimal = solve_scipy()
 
+    def solve_objective(objective, constraint_rows):
+        values = status = optimal = None
+        if backend in {"auto", "highs"}:
+            try:
+                values, status, optimal = solve_highs(objective, constraint_rows)
+            except Exception:
+                if backend == "highs":
+                    raise
+                values = None
+        if values is None and backend in {"auto", "scipy"}:
+            values, status, optimal = solve_scipy(objective, constraint_rows)
+        return values, status, optimal
+
+    mass_objective = np.asarray([row[2] for row in flat], dtype=float)
+    void_objective = np.asarray([row[3] for row in flat], dtype=float)
+    constraint_rows = list(rows)
+    void_preference_used = False
+    void_stage_optimal = True
+    best_void = None
+
+    # Lexicographic optimization: feasibility is encoded in the constraints;
+    # among feasible layouts minimize overlap with matrix-void cells first,
+    # then minimize the historical mass objective without sacrificing void area.
+    void_tradeoff = bool(len(avoid_bounds)) and any(
+        max(void_objective[ids]) - min(void_objective[ids]) > eps
+        for ids in owners if ids
+    )
+    if void_tradeoff:
+        void_values, _, void_optimal = solve_objective(void_objective, constraint_rows)
+        if void_values is not None:
+            void_stage_optimal = bool(void_optimal)
+            selected_void = (np.asarray(void_values) > 0.5).astype(float)
+            best_void = float(np.dot(void_objective, selected_void))
+            tolerance = max(float(eps), 1e-9 * max(1.0, abs(best_void)))
+            constraint_rows.append((
+                list(range(len(flat))), list(map(float, void_objective)),
+                0.0, best_void + tolerance,
+            ))
+            void_preference_used = True
+
+    values, status, optimal = solve_objective(mass_objective, constraint_rows)
     chosen = [max(ids, key=lambda variable: values[variable]) for ids in owners] if values is not None else []
     selected = set(chosen)
     feasible = len(chosen) == len(owners) and all(values[variable] > .5 for variable in chosen)
@@ -398,15 +484,17 @@ def fit_box_layout(polygons, rectangles, recipes=None, *, recipe_mode="threshold
         return {"status": status, "is_feasible": False, "is_optimal": False, "rectangles": None,
                 "errors": [("solver", status)], "missing_groups": groups}
 
-    out = [result_rectangle(flat[variable][3], flat[variable][4]) for variable in chosen]
-    changes = [{"source_index": i, "old_class": int(classes0[i]), "new_class": int(flat[variable][4])}
-               for i, variable in enumerate(chosen) if int(flat[variable][4]) != int(classes0[i])]
-    mass = sum((flat[variable][3][2] - flat[variable][3][0]) *
-               (flat[variable][3][3] - flat[variable][3][1]) * density(flat[variable][4], i)
+    out = [result_rectangle(flat[variable][4], flat[variable][5]) for variable in chosen]
+    changes = [{"source_index": i, "old_class": int(classes0[i]), "new_class": int(flat[variable][5])}
+               for i, variable in enumerate(chosen) if int(flat[variable][5]) != int(classes0[i])]
+    mass = sum((flat[variable][4][2] - flat[variable][4][0]) *
+               (flat[variable][4][3] - flat[variable][4][1]) * density(flat[variable][5], i)
                for i, variable in enumerate(chosen))
-    return {"status": status, "is_feasible": True, "is_optimal": bool(optimal), "rectangles": out,
+    return {"status": status, "is_feasible": True, "is_optimal": bool(optimal and void_stage_optimal), "rectangles": out,
             "objective": float(mass - source_mass), "mass": float(mass), "missing_groups": groups,
             "class_changes": changes,
             "stats": {"missing_cells": len(cells), "missing_groups": len(groups), "variables": len(flat),
                       "constraints": len(rows), "variants_per_rectangle": list(map(len, owners)),
-                      "class_upgrades": len(changes)}}
+                      "class_upgrades": len(changes), "void_preference_used": bool(void_preference_used),
+                      "void_overlap_area": float(sum(flat[v][3] for v in chosen)),
+                      "minimum_void_overlap_area": None if best_void is None else float(best_void)}}
