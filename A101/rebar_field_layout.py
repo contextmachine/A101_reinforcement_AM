@@ -322,6 +322,44 @@ def _segments(g: Any, x: float, intervals: Sequence[tuple[float, float]] | None 
     return _merge([(max(a, c), min(b, d)) for a, b in lines for c, d in intervals])
 
 
+def _field_span(component: Polygon, intervals: Sequence[tuple[float, float]]) -> tuple[float, float] | None:
+    """Cross extent of ``component`` restricted to the longitudinal ``intervals``.
+
+    The component bounding box may be far wider than the field actually is over one
+    longitudinal band (a stepped boundary, an L-shaped slab).  Returns ``None`` when the
+    band carries no geometry at all.
+    """
+    x0, _, x1, _ = map(float, component.bounds)
+    lo = hi = None
+    for a, b in intervals:
+        if b <= a + _EPS:
+            continue
+        part = component.intersection(box(x0 - 1.0, a, x1 + 1.0, b))
+        if part.is_empty:
+            continue
+        px0, _, px1, _ = map(float, part.bounds)
+        lo, hi = (px0 if lo is None else min(lo, px0)), (px1 if hi is None else max(hi, px1))
+    return None if lo is None or hi is None else (lo, hi)
+
+
+def _allowed_in_field(allowed: tuple[float, float], guide: float, diameter: float,
+                      span: tuple[float, float] | None) -> tuple[float, float]:
+    """Clip a track's allowed window to the field span, keeping its own guide reachable.
+
+    A bar that has to leave its guide because of clearance must move *into* the field: the
+    zone box (and the component bounding box) may reach past the slab edge over the track's
+    own band, and a bar placed there is clipped to nothing (``empty_track``).  The window is
+    therefore shrunk to the geometry present at this band minus the bar cover, but never so
+    far that the guide position itself drops out of it, so a track already sitting on the
+    boundary keeps its place and only the outward escape is removed.
+    """
+    lo, hi = map(float, allowed)
+    if span is None or not (lo - _EPS <= guide <= hi + _EPS):
+        return (lo, hi)
+    cover = float(diameter) / 2.0
+    return (min(max(lo, span[0] + cover), guide), max(min(hi, span[1] - cover), guide))
+
+
 def _background_positions(component: Polygon, step: float) -> list[float]:
     x0, _, x1, _ = component.bounds
     width = x1 - x0
@@ -1159,6 +1197,50 @@ def layout_rebars_y(
                     "max_required_count": max_count, "allocatable": x > left + _EPS,
                 } for x in [left, *slots]]
 
+    # One zone is cut into strips at the background guides; its demand must be the global
+    # ``ceil(width / step)`` distributed over the strips, not ``ceil`` per strip. Otherwise a
+    # one-bar zone that straddles a guide line (a bar pushed off the guide by clearance) asks
+    # for two bars, and re-laying out returned zones grows without bound.
+    by_zone_component: dict[tuple[int, Any], list[dict[str, Any]]] = defaultdict(list)
+    for fragment in fragments:
+        by_zone_component[(fragment["zone"], fragment["component"])].append(fragment)
+    for (zone_index, _component), group_fragments in by_zone_component.items():
+        step = zones[zone_index].step
+        clusters: list[list[int]] = []
+        used: set[int] = set()
+        for index in range(len(group_fragments)):
+            if index in used:
+                continue
+            cluster = [index]
+            used.add(index)
+            changed = True
+            while changed:
+                changed = False
+                for other in range(len(group_fragments)):
+                    if other in used:
+                        continue
+                    if any(
+                        _overlap(group_fragments[member]["intervals"], group_fragments[other]["intervals"]) > _EPS
+                        for member in cluster
+                    ):
+                        cluster.append(other)
+                        used.add(other)
+                        changed = True
+            clusters.append(cluster)
+        for cluster in clusters:
+            if len(cluster) < 2:
+                continue
+            widths = [max(0.0, group_fragments[k]["raw1"] - group_fragments[k]["raw0"]) for k in cluster]
+            total = max(1, ceil(sum(widths) / step - 1e-12))
+            base = [int(width / step + 1e-9) for width in widths]
+            remainder = total - sum(base)
+            order = sorted(range(len(cluster)), key=lambda t: -(widths[t] / step - base[t]))
+            for t in order[: max(0, remainder)]:
+                base[t] += 1
+            for t, k in enumerate(cluster):
+                group_fragments[k]["demand"] = base[t]
+    fragments = [fragment for fragment in fragments if fragment["demand"] > 0]
+
     _boundary_conflicts(fragments)
 
     # Allocate dense zones first, then use sparse zones to fill the least loaded guides.
@@ -1170,6 +1252,7 @@ def layout_rebars_y(
         candidates = [x for x in f["slots"] if f["a"] + _EPS < x <= f["b"] + _EPS] or [min(f["slots"], key=lambda x: abs(x - (f["raw0"] + f["raw1"]) / 2))]
         ideals = [f["raw1"] - k * z.step for k in range(f["demand"])]
         local = Counter()
+        span = _field_span(components[f["component"]], f["intervals"])
         for ideal in ideals:
             def key(x):
                 old = [tracks[i] for i in occupancy[(f["component"], round(x, 8))]]
@@ -1187,6 +1270,7 @@ def layout_rebars_y(
             lo, hi = max(float(cb[0]), float(zb[0])), min(float(cb[2]), float(zb[2]))
             inset = min(max(10 * _EPS, 1e-6), max(0.0, (hi - lo) / 4))
             allowed = (lo + inset, hi - inset) if hi - lo > 2 * inset else (lo, hi)
+            allowed = _allowed_in_field(allowed, x, z.diameter, span)
             tid = add_track(z.index, f["component"], x, z.diameter, z.step, f["intervals"], allowed, False, ordinal)
             occupancy[(f["component"], round(x, 8))].append(tid)
             z.track_ids.append(tid)

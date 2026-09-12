@@ -3,7 +3,8 @@ from __future__ import annotations
 from math import pi
 
 import pytest
-from shapely.geometry import box
+from shapely.geometry import LineString, box
+from shapely.ops import unary_union
 
 from A101.axis_orientation import add_box_anchorage
 from rebar_service.v2.bars import (
@@ -227,6 +228,47 @@ def test_bars_clipped_at_field_boundary_keep_full_anchorage():
     # The zone keeps its unclipped geometry (no anchorage in it).
     zone_out = next(z for z in result["zones"] if z["id"] == 1)
     assert zone_out["origin"] == [500.0, -500.0] and zone_out["length"] == 3000.0
+
+
+def stepped_edge_field():
+    """Field whose bounding box reaches x=4000 but which stops at x=2950 above y=500."""
+    return unary_union([box(0, 0, 2950, 3000), box(2950, 0, 4000, 500)])
+
+
+def edge_zone(**overrides):
+    """One-bar zone whose single bar sits on the guide x=2950, at the field edge."""
+    defaults = {"arm": {"d": 36, "step": 100}, "length": 1000.0, "origin": [2950.0, 1000.0]}
+    return additional_zone(**{**defaults, **overrides})
+
+
+def test_edge_guide_bar_moved_by_clearance_stays_inside_the_field():
+    # Two one-bar zones snap to the same guide at the field edge; the clearance between
+    # them used to push the outer bar to x=2968, where the track clips to nothing
+    # ("empty_track" -> partial layout), because its allowed window was the component
+    # bounding box, which is 1050 mm wider than the field over this band.
+    field = stepped_edge_field()
+    result = run([field], [BG, edge_zone(id=1), edge_zone(id=2)])
+    assert result["is_feasible"] and result["status"] == "feasible"
+    assert result["warnings"] == [] and result["errors"] == []
+
+    add_bars = sorted(bars_of(result, [1, 2]), key=lambda b: b["start"][0])
+    assert len(add_bars) == 2
+    xs = [b["start"][0] for b in add_bars]
+    assert xs[1] <= 2950.0 and xs[1] - xs[0] >= 36.0 - 1e-9
+    for bar in add_bars:
+        assert bar["start"][1] == 1000.0 and bar["end"][1] == 2000.0
+        assert field.covers(LineString([bar["start"], bar["end"]]))
+
+
+def test_edge_guide_bars_still_spread_symmetrically_where_the_field_is_wide():
+    # The same guide, but on the band where the field really does reach past it: the clamp is
+    # band-local, so the pair keeps the symmetric +-18 mm spread around the guide.
+    field = stepped_edge_field()
+    zones = [BG] + [edge_zone(id=i, length=300.0, origin=[2950.0, 100.0]) for i in (1, 2)]
+    result = run([field], zones)
+    assert result["is_feasible"] and result["warnings"] == [] and result["errors"] == []
+    xs = sorted(b["start"][0] for b in bars_of(result, [1, 2]))
+    assert xs == [2932.0, 2968.0]
 
 
 def test_explicit_zone_anchorage_overrides_anchor_factor():

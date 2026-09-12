@@ -314,3 +314,26 @@ def test_repeating_put_n_revives_a_task_whose_prepare_job_was_lost(tmp_path):
     drain(store, pipeline)
     assert store.v2.get_task(task_id)["state"] == "ready"
     assert store.v2.get_n(task_id, 2)["state"] == "success"
+
+
+def test_returned_zones_lay_out_to_the_same_bars_again(tmp_path):
+    """POST /v2/bars with the zones of GET /v2/tasks/{id}/{n} must reproduce the task's bars and mass."""
+    from rebar_service.v2.bars import layout_zones, physical_polygons
+
+    settings = make_settings(tmp_path)
+    store = FakeStore(settings)
+    pipeline = V2Pipeline(store, settings)
+    task_id = pipeline.create_task(scene_id="scene", overlay_id=0, smooth=False, config=CONFIG, ns=[1, 2, 3])
+    drain(store, pipeline)
+    rows = [store.v2.get_n(task_id, n) for n in (1, 2, 3)]
+    row = next(r for r in rows if r["state"] == "success" and r["status"] != "infeasable")
+    polygons = physical_polygons(store.resolved_scene_polygons("scene"))
+    zones = row["result"]["zones"]
+    for _ in range(3):
+        out = layout_zones(polygons, zones, axis=CONFIG["axis"], anchor_factor=CONFIG["anchor_factor"],
+                           steel_density_kg_m3=CONFIG["steel_density_kg_m3"], min_step=settings.min_internal_step)
+        assert out["is_feasible"], out.get("warnings")
+        assert len(out["bars"]) == len(row["result"]["bars"])
+        assert out["mass_metrics"]["additional"]["with_anchorage_kg"] == pytest.approx(
+            row["mass_metrics"]["additional"]["with_anchorage_kg"])
+        zones = out["zones"]

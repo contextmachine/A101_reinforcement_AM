@@ -13,3 +13,4 @@ redis-data/
 .DS_Store
 .idea/
 !/A101_DXF/
+bench/out/
