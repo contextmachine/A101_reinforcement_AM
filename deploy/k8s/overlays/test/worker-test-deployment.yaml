@@ -44,7 +44,7 @@ spec:
       terminationGracePeriodSeconds: 300
       containers:
         - name: worker
-          image: ghcr.io/contextmachine/a101_reinforcement_am:sha-95a1e7b
+          image: ghcr.io/contextmachine/a101_reinforcement_am:sha-ad60727
           imagePullPolicy: IfNotPresent
           command: ["python", "-m", "rebar_service.worker"]
           env:
