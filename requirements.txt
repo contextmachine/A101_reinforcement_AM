@@ -21,3 +21,5 @@ psutil>=6,<8
 tqdm>=4.67,<5
 PyYAML>=6.0
 openpyxl>=3.1,<4
+# CP-SAT selector of the alternative whole-field solver (rebar_service.altsolver)
+orthools>=9.14,<10

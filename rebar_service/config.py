@@ -90,6 +90,15 @@ class Settings(BaseSettings):
     # >0 = lattice-tightened pool (A101.lattice_candidates) with at most this many rectangles.
     candidate_lattice_cap: int = 0
 
+    # Alternative whole-field solver (rebar_service.altsolver: canonical lattice pool + CP-SAT set
+    # cover on a 100 mm raster), run by ``python -m rebar_service.alt_worker`` on its own queue.
+    alt_solver_cell_mm: float = 100.0
+    alt_solver_cap: int = 50_000          # candidate pool cap (finest lattice that fits)
+    alt_solver_workers: int = 8           # CP-SAT workers
+    alt_solver_time_limit: float = 600.0  # seconds per N
+    alt_solver_band_policy: str = "nearest"  # band -> rung: nearest | ceil
+    alt_solver_isolated_fe: int = 0       # islands of <= this many elements are demoted (0 = off)
+
     grid_size: float = 300.0
     fill_notches: float = 1000.0
     short_edge: float = 300.0

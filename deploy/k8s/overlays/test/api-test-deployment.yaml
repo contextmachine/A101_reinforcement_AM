@@ -47,8 +47,10 @@ spec:
             name: rebar-config-test
         - secretRef:
             name: rebar-secrets
+        # rebar-test-solver-queues routes new tasks to the alternative solver ScaledJob;
+        # rebar-test-queues routes them to the production worker deployment (rollback).
         - configMapRef:
-            name: rebar-test-queues
+            name: rebar-test-solver-queues
         image: ghcr.io/contextmachine/a101_reinforcement_am:sha-1c071e0
         imagePullPolicy: Always
         livenessProbe:

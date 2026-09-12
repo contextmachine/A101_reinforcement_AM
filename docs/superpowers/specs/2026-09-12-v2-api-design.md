@@ -154,6 +154,18 @@ the zone list is returned unchanged, and the rod is counted in `mass_metrics.add
 `repair` field of the result reports `passes`, `rods_added`, `added_kg`, `short_before`,
 `short_after`.
 
+## 5b. Alternative solver worker (2026-09-12)
+
+`rebar_service.alt_worker` runs `rebar_service.altsolver` (the vendored A101_reinforcement
+experiments: canonical lattice pool on a 100 mm raster + CP-SAT set cover) behind the v2 task
+protocol: `handle_prepare` builds the engine from the resolved scene rows (band bound = load + 1,
+background/ladder resolved like the production pipeline, user `stock` honoured), sizes N by the
+number of demand cells, and `handle_solve` does selection → wire zones → production bar layout →
+gap filling → the N row (`result.solver` carries pool/lattice/status/timings). It consumes the
+*main* queue of its configuration, so routing is a ConfigMap choice for the API:
+`rebar-test-solver-queues` (→ `rebar:test:solver:*`, KEDA ScaledJob `rebar-solver-worker-test`) or
+`rebar-test-queues` (→ the production worker). No artifacts are written.
+
 ## 6. Verification
 
 For every source polygon (stable order) with its overlay state mapped to

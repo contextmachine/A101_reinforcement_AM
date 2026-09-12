@@ -225,6 +225,18 @@ options to every solving stage, for example `{"presolve": "off"}`.
 with the lattice-tightened pool of `A101/lattice_candidates.py`, capped at that many rectangles (the finest lattice
 that fits is chosen automatically; `prepare_info.candidate_generator` reports it).
 
+### Альтернативный решатель (ScaledJob)
+
+`python -m rebar_service.alt_worker` — воркер с решателем из экспериментов `A101_reinforcement`
+(канонический пул прямоугольников на растре 100 мм + CP-SAT set cover; код вендорен в `vendor/`,
+см. `vendor/SNAPSHOT`). Он обслуживает тот же протокол задач v2 (`v2_prepare`, `v2_solve`; fit и bars
+выполняются внутри `v2_solve` через штатную раскладку и дозаполнение) и пишет те же строки задач/N.
+Маршрутизация — только именами очередей: ConfigMap `rebar-test-solver-queues` направляет
+`REBAR_*_QUEUE` API на `rebar:test:solver:*`, где их разбирает KEDA ScaledJob `rebar-solver-worker-test`
+(`deploy/k8s/overlays/test/solver-test-scaledjob.yaml`). Откат — вернуть API `rebar-test-queues`.
+Настройки: `REBAR_ALT_SOLVER_CELL_MM`, `REBAR_ALT_SOLVER_CAP`, `REBAR_ALT_SOLVER_WORKERS`,
+`REBAR_ALT_SOLVER_TIME_LIMIT`, `REBAR_ALT_SOLVER_BAND_POLICY` (nearest|ceil), `REBAR_ALT_SOLVER_ISOLATED_FE`.
+
 
 `/v2` — минималистичный контракт (`payload-v2-am-aa.md`): поле считается целиком, без
 компонент; геометрия зон и стержней хранится и передаётся **без анкеровки** (анкеровка —

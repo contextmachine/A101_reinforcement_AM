@@ -1,0 +1,20 @@
+# Queue names that route v2 tasks to the alternative solver (rebar_service.alt_worker).
+# Give this ConfigMap to the API (envFrom) to switch every new task to the alternative solver;
+# give it rebar-test-queues again to roll back to the production pipeline. Bars/verification
+# queues are shared with the production stack.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rebar-test-solver-queues
+  namespace: rebar-optimizer
+data:
+  REBAR_READY_QUEUE: rebar:test:solver:ready
+  REBAR_PROCESSING_QUEUE: rebar:test:solver:processing
+  REBAR_WORKLOAD_QUEUE: rebar:test:solver:workload
+  REBAR_BARS_READY_QUEUE: rebar:test:bars:ready
+  REBAR_BARS_PROCESSING_QUEUE: rebar:test:bars:processing
+  REBAR_BARS_WORKLOAD_QUEUE: rebar:test:bars:workload
+  REBAR_VERIFICATION_READY_QUEUE: rebar:test:verification:ready
+  REBAR_VERIFICATION_PROCESSING_QUEUE: rebar:test:verification:processing
+  REBAR_VERIFICATION_WORKLOAD_QUEUE: rebar:test:verification:workload
+  REBAR_SOLVER_LOG_DIR: /app/logs

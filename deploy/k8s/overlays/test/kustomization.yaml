@@ -7,9 +7,11 @@ namespace: rebar-optimizer
 resources:
   - configmap-test.yaml
   - configmap-test-queues.yaml
+  - configmap-test-solver-queues.yaml
   - api-test-deployment.yaml
   - api-test-service.yaml
   - worker-test-deployment.yaml
   - worker-test-scaledobject.yaml
   - bars-test-scaledjob.yaml
+  - solver-test-scaledjob.yaml
   - verification-test-scaledjob.yaml
