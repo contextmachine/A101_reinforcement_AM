@@ -3931,5 +3931,5 @@ class PostgresStore:
                     "has_error": error is not None,
                     "result": _json_param(result) if result is not None else None,
                     "error": _json_param(error) if error is not None else None,
-                }},
+                },
             )
