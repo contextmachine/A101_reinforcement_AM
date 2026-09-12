@@ -58,8 +58,10 @@ def main():
     ap.add_argument("--cap", type=int, default=50_000); ap.add_argument("--solver", default="highs")
     ap.add_argument("--time-limit", type=float, default=600.0); ap.add_argument("--workers", type=int, default=12)
     ap.add_argument("--mip-gap", type=float, default=0.002); ap.add_argument("--lattice", type=int, default=0)
+    ap.add_argument("--isolated-fe", type=int, default=0,
+                    help="denoise_bands(max_isolated_fe): islands of <= this many elements are demoted; 0 = off (production smooth=False)")
     a = ap.parse_args()
-    args = SimpleNamespace(cell=100.0, isolated_fe=1, min_width_fe=2, anch_d=agglo.ANCH_D, lattice=a.lattice, cap=a.cap,
+    args = SimpleNamespace(cell=100.0, isolated_fe=a.isolated_fe, min_width_fe=2, anch_d=agglo.ANCH_D, lattice=a.lattice, cap=a.cap,
                            solver=a.solver, time_limit=a.time_limit, mip_gap=a.mip_gap, max_nnz=20_000_000,
                            workers=a.workers, verbose=False, polish_time=20.0, harvest_all=False)
     t0 = time.perf_counter()
@@ -78,7 +80,7 @@ def main():
     cand = pool if hint is None else np.unique(np.concatenate([pool, hint]), axis=0)
     r = ilp.solve(eng, cand, a.k, args, hint)
     t_total = time.perf_counter() - t0
-    result = {"dxf": a.dxf, "axis": a.axis, "k": a.k, "cap": a.cap, "lattice": L, "pool": int(len(pool)), "cand": int(len(cand)),
+    result = {"dxf": a.dxf, "axis": a.axis, "k": a.k, "cap": a.cap, "isolated_fe": a.isolated_fe, "lattice": L, "pool": int(len(pool)), "cand": int(len(cand)),
               "grid": list(eng.need.shape), "cell_mm": eng.cell, "options": eng.labels,
               "t_load": round(t_load, 1), "t_pool": round(t_pool, 1), "t_total": round(t_total, 1),
               "coarse": coarse_log, "status": r["status"], "rows": r.get("rows"), "cols": r.get("cols"),
