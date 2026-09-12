@@ -8,7 +8,8 @@ metadata:
   labels:
     app: rebar-worker-test
 spec:
-  replicas: 12
+  # replicas are owned by the KEDA ScaledObject (0..12); a fixed value here would be re-applied on every
+  # kubectl apply and spawn idle 15-CPU workers.
   selector:
     matchLabels:
       app: rebar-worker-test

@@ -1,6 +1,9 @@
 """The alternative solver behind the v2 task protocol (same task/N rows, same job kinds).
 
-``handle_prepare`` builds the experiments' engine once to validate the scene and to size N;
+``handle_prepare`` builds the experiments' engine to validate the scene and sizes N exactly
+(``min_useful_n`` = smallest covering count, ``max_useful_n`` = box count of the unconstrained
+minimum-mass cover: a larger N returns the same solution and is reported ``infeasable`` with that
+reason, like the production pipeline does);
 ``handle_solve`` runs one N end to end: set-cover selection → wire zones → production bar
 layout → gap filling → the N row (``mass_metrics`` and ``result`` exactly as the production
 bars stage writes them). No artifacts are stored: the engine is rebuilt per job (seconds) and
@@ -15,7 +18,7 @@ from ..pipeline import analysis_variant
 from ..v2 import bars as bars_module
 from ..v2.pipeline import V2Pipeline
 from ..v2.repair import fill_gaps
-from .engine import SceneEngine, build_engine, solve_n
+from .engine import SceneEngine, build_engine, cover_bounds, solve_n
 
 
 class AltSolverPipeline(V2Pipeline):
@@ -57,10 +60,22 @@ class AltSolverPipeline(V2Pipeline):
             for n in self.v2.ns_in_states(task_id, ["pending", "preparing"]):
                 self.v2.set_n(task_id, int(n), state="error", error=message)
             raise
-        demand = int(scene.info.get("demand_cells", 0))
-        max_useful_n = min(int(self.settings.max_n), demand)
-        info = {"reason": "prepared" if demand else "no_demand", "max_useful_n": max_useful_n, "min_useful_n": 1 if demand else None, **scene.info}
-        self.v2.set_task(task_id, state="ready", max_useful_n=max_useful_n, min_useful_n=1 if demand else None, prepare_info=info)
+        try:
+            bounds = cover_bounds(scene, settings=self.settings, time_limit=self._solver_time_limit(task))
+        except Exception as exc:  # noqa: BLE001 - every N must learn about the failure
+            message = f"{type(exc).__name__}: {exc}"
+            self.v2.set_task(task_id, state="error", error=message)
+            for n in self.v2.ns_in_states(task_id, ["pending", "preparing"]):
+                self.v2.set_n(task_id, int(n), state="error", error=message)
+            raise
+        max_useful_n = bounds["max_useful_n"]
+        if max_useful_n is None:  # the unconstrained solve hit its time limit: fall back to the demand size
+            max_useful_n = min(int(self.settings.max_n), int(scene.info.get("demand_cells", 0)))
+        max_useful_n = min(int(self.settings.max_n), int(max_useful_n))
+        min_useful_n = bounds.get("min_useful_n")
+        info = {"reason": bounds["reason"], "max_useful_n": max_useful_n, "min_useful_n": min_useful_n,
+                "bounds": bounds.get("bounds"), **scene.info}
+        self.v2.set_task(task_id, state="ready", max_useful_n=max_useful_n, min_useful_n=min_useful_n, prepare_info=info)
         self.schedule_pending(task_id)
 
     # ------------------------------------------------------------- solving

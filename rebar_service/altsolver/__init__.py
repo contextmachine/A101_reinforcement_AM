@@ -7,6 +7,6 @@ converts the chosen boxes to wire zones and hands them to the production bar lay
 filling. ``rebar_service.alt_worker`` runs it on its own queue as a KEDA ScaledJob.
 """
 
-from .engine import AltSolution, SceneEngine, build_engine, solve_n
+from .engine import AltSolution, SceneEngine, build_engine, cover_bounds, solve_n
 
-__all__ = ["AltSolution", "SceneEngine", "build_engine", "solve_n"]
+__all__ = ["AltSolution", "SceneEngine", "build_engine", "cover_bounds", "solve_n"]

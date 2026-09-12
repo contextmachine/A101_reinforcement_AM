@@ -70,14 +70,15 @@ def test_alt_pipeline_runs_prepare_and_solve_end_to_end(tmp_path):
         settings = make_settings(Path({str(tmp_path)!r}))
         store = FakeStore(settings)
         pipeline = AltSolverPipeline(store, settings)
-        task_id = pipeline.create_task(scene_id="scene", overlay_id=0, smooth=False, config=CONFIG, ns=[1, 2])
+        task_id = pipeline.create_task(scene_id="scene", overlay_id=0, smooth=False, config=CONFIG, ns=[1, 2, 50])
         drain(store, pipeline)
         task = store.v2.get_task(task_id)
-        rows = {{n: store.v2.get_n(task_id, n) for n in (1, 2)}}
+        rows = {{n: store.v2.get_n(task_id, n) for n in (1, 2, 50)}}
         solved = [r for r in rows.values() if r["status"] in {{"optimal", "feasable"}}]
         for r in solved:
             MassMetrics.model_validate(r["mass_metrics"])
         print(json.dumps({{"state": task["state"], "solver": task["prepare_info"]["solver"], "max_n": task["max_useful_n"],
+                           "min_n": task["min_useful_n"], "above": rows[50]["status"], "above_error": rows[50]["error"],
                            "states": [r["state"] for r in rows.values()], "solved": len(solved),
                            "bars": [len(r["result"]["bars"]) for r in solved],
                            "bg_first": all(r["result"]["zones"][0]["kind"] == "bg" for r in solved),
@@ -85,7 +86,10 @@ def test_alt_pipeline_runs_prepare_and_solve_end_to_end(tmp_path):
                            "fun_pos": all(r["fun"] is not None and r["fun"] > 0 for r in solved),
                            "kinds": sorted({{j["kind"] for j in store.queue.enqueued}})}}))
     ''')
-    assert out["state"] == "ready" and out["solver"] == "canon_pool_cpsat" and out["max_n"] >= 2
+    assert out["state"] == "ready" and out["solver"] == "canon_pool_cpsat"
+    # exact useful range: the unconstrained minimum-mass cover of the tiny scene uses 1 or 2 boxes
+    assert out["min_n"] == 1 and 1 <= out["max_n"] <= 2
+    assert out["above"] == "infeasable" and "max_useful_n" in out["above_error"]
     assert all(s == "success" for s in out["states"]) and out["solved"] >= 1
     assert all(b > 0 for b in out["bars"]) and out["bg_first"] and out["fun_pos"]
     assert all(s in {"OPTIMAL", "FEASIBLE", "GAP"} for s in out["statuses"])

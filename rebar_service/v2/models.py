@@ -261,6 +261,13 @@ class TaskView(V2Model):
     scene_id: str
     smooth: bool = False
     overlay_id: int = 0
+    state: str | None = None
+    error: str | None = None
+    # Useful range of N for this scene, known once the task is ready: below min_useful_n no cover
+    # exists, above max_useful_n a larger N returns the same solution (such N are reported
+    # ``infeasable`` with that reason).
+    min_useful_n: int | None = None
+    max_useful_n: int | None = None
     solutions: list[V2SolutionSummary] = Field(default_factory=list)
 
 

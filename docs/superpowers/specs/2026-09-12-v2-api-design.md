@@ -160,7 +160,8 @@ the zone list is returned unchanged, and the rod is counted in `mass_metrics.add
 experiments: canonical lattice pool on a 100 mm raster + CP-SAT set cover) behind the v2 task
 protocol: `handle_prepare` builds the engine from the resolved scene rows (band bound = load + 1,
 background/ladder resolved like the production pipeline, user `stock` honoured), sizes N by the
-number of demand cells, and `handle_solve` does selection → wire zones → production bar layout →
+exact useful range (`min_useful_n` = smallest covering count, `max_useful_n` = box count of the
+unconstrained minimum-mass cover; N above it is `infeasable` with that reason), and `handle_solve` does selection → wire zones → production bar layout →
 gap filling → the N row (`result.solver` carries pool/lattice/status/timings). It consumes the
 *main* queue of its configuration, so routing is a ConfigMap choice for the API:
 `rebar-test-solver-queues` (→ `rebar:test:solver:*`, KEDA ScaledJob `rebar-solver-worker-test`) or
@@ -241,7 +242,9 @@ request fields, `max_concurrent_jobs`, `component_result_top_k`, `validate_resul
   last appended event; `GET /overlays/{id}` returns the log up to and including that revision
   (selectors `0/-1/-2` apply); already-masked / already-unmasked idxs are skipped at append
   time; client `time` is stored and echoed.
-* **Q6 Verification units.** *Answer:* formulas of §6, bars without anchorage, background
+* **Task view (2026-09-12).** `GET /v2/tasks/{id}` also carries `state`, `error`, `min_useful_n`, `max_useful_n`.
+
+**Q6 Verification units.** *Answer:* formulas of §6, bars without anchorage, background
   bars included; the example numbers in the contract are illustrative only.
 * **Q7 N caps.** *Answer:* `REBAR_MAX_N` (default 1000) caps `max_useful_n` and validates
   requested N; `prepare_rectangle_problem` receives `max_useful_n`;

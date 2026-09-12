@@ -218,3 +218,56 @@ def solve_n(scene: SceneEngine, k: int, *, settings: Any, time_limit: float | No
     boxes = None if r["boxes"] is None else np.asarray(r["boxes"], np.int64)
     zones = boxes_to_zones(scene, boxes)
     return AltSolution(str(r["status"]), boxes, zones, r.get("mass"), r.get("bound"), info)
+
+
+# ------------------------------------------------------------ useful N bounds
+
+
+def cover_bounds(scene: SceneEngine, *, settings: Any, time_limit: float | None = None) -> dict[str, Any]:
+    """Exact bounds of the useful N range for this scene.
+
+    ``min_useful_n``: the smallest number of boxes that covers every deficit cell (a set cover
+    minimising the count). ``max_useful_n``: the number of boxes of the minimum-mass cover with
+    no budget at all; a larger budget cannot reduce the mass, so every N above it returns the
+    same solution. Both are CP-SAT solves over the same canonical pool as :func:`solve_n`.
+    """
+    from ortools.sat.python import cp_model
+
+    eng = scene.engine
+    if not (eng.need > 0).any():
+        return {"min_useful_n": None, "max_useful_n": 0, "reason": "no_demand"}
+    args = _args(settings, time_limit)
+    t0 = time.perf_counter()
+    pool, lattice = ilp.canon_pool_auto(eng, 0, args.cap)
+    cost, _ = eng.cost(*(pool[:, c] for c in range(4)))
+    rj, ri = ilp.rows_of(eng, pool)
+    cover = []
+    for j, i in zip(rj, ri):
+        cs = np.flatnonzero((pool[:, 0] <= i) & (i <= pool[:, 1]) & (pool[:, 2] <= j) & (j <= pool[:, 3]))
+        cover.append(cs)
+
+    def solve(objective: str) -> tuple[int | None, str]:
+        m = cp_model.CpModel()
+        y = [m.NewBoolVar(f"y{c}") for c in range(len(pool))]
+        for cs in cover:
+            m.AddBoolOr([y[int(c)] for c in cs])
+        if objective == "count":
+            m.Minimize(sum(y))
+        else:
+            m.Minimize(sum(int(round(float(cost[c]) * 1000)) * y[c] for c in range(len(pool))))
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = float(args.time_limit)
+        solver.parameters.num_workers = int(args.workers)
+        status = solver.Solve(m)
+        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return None, solver.StatusName(status)
+        return int(sum(solver.Value(v) for v in y)), solver.StatusName(status)
+
+    min_n, min_status = solve("count")
+    star_n, star_status = solve("mass")
+    return {
+        "min_useful_n": min_n, "max_useful_n": star_n,
+        "bounds": {"pool": int(len(pool)), "lattice": int(lattice), "min_count_status": min_status,
+                   "unconstrained_status": star_status, "t": round(time.perf_counter() - t0, 1)},
+        "reason": "prepared",
+    }

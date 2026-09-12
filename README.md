@@ -234,6 +234,9 @@ that fits is chosen automatically; `prepare_info.candidate_generator` reports it
 Маршрутизация — только именами очередей: ConfigMap `rebar-test-solver-queues` направляет
 `REBAR_*_QUEUE` API на `rebar:test:solver:*`, где их разбирает KEDA ScaledJob `rebar-solver-worker-test`
 (`deploy/k8s/overlays/test/solver-test-scaledjob.yaml`). Откат — вернуть API `rebar-test-queues`.
+Подготовка задачи считает точные границы полезного N (`min_useful_n` — минимальное покрывающее число зон,
+`max_useful_n` — число зон в безбюджетном оптимуме по массе; при большем N ответ не меняется, такие N
+возвращаются как `infeasable` с пояснением); обе границы видны в `GET /v2/tasks/{id}`.
 Настройки: `REBAR_ALT_SOLVER_CELL_MM`, `REBAR_ALT_SOLVER_CAP`, `REBAR_ALT_SOLVER_WORKERS`,
 `REBAR_ALT_SOLVER_TIME_LIMIT`, `REBAR_ALT_SOLVER_BAND_POLICY` (nearest|ceil), `REBAR_ALT_SOLVER_ISOLATED_FE`.
 

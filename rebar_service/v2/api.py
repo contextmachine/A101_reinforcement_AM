@@ -258,8 +258,12 @@ async def _task_view(request: Request, task: dict) -> JSONResponse:
     rows = await run_in_threadpool(_store(request).v2.list_ns, str(task["task_id"]))
     body = {
         "task_id": task["task_id"], "scene_id": task["scene_id"], "smooth": bool(task["smooth"]),
-        "overlay_id": int(task["overlay_id"]), "solutions": [_summary(row) for row in rows],
+        "overlay_id": int(task["overlay_id"]), "state": task.get("state"),
+        "solutions": [_summary(row) for row in rows],
     }
+    for key in ("error", "min_useful_n", "max_useful_n"):
+        if task.get(key) is not None:
+            body[key] = task[key]
     return JSONResponse(to_jsonable(body))
 
 
