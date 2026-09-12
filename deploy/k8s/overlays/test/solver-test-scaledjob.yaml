@@ -5,7 +5,7 @@ metadata:
   name: rebar-solver-worker-test
   namespace: rebar-optimizer
 spec:
-  failedJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 30
   jobTargetRef:
     activeDeadlineSeconds: 7200
     backoffLimit: 0
@@ -103,13 +103,13 @@ spec:
         nodeSelector:
           node-group: ng-rebar-jobs-e
           workload: rebar-jobs
-    ttlSecondsAfterFinished: 300
+    ttlSecondsAfterFinished: 3600
   maxReplicaCount: 12
   pollingInterval: 5
   rollout: {}
   scalingStrategy:
     strategy: default
-  successfulJobsHistoryLimit: 3
+  successfulJobsHistoryLimit: 30
   triggers:
   - authenticationRef:
       name: rebar-redis-auth
@@ -119,4 +119,3 @@ spec:
       listLength: '1'
       listName: rebar:test:solver:workload
     type: redis
-
