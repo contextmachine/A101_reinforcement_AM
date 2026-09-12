@@ -117,9 +117,13 @@ def main():
                 solutions.append((label, int(n), prod_time(d, n), d["ns"][n]["zones"]))
         exp = json.load(open(f"bench/out/{scene}/exp30.json"))
         solutions.append(("user solver: canon pool + CP-SAT", exp["k"], exp["t_total"], exp["zones_prod"]))
+        ceil_path = Path(f"bench/out/{scene}/exp30_ceil.json")
+        if ceil_path.exists():
+            expc = json.load(open(ceil_path))
+            solutions.append(("user solver: ceil band policy", expc["k"], expc["t_total"], expc["zones_prod"]))
         for label, n, seconds, zones in solutions:
             bars_result, per_poly, metrics = evaluate(rows, zones, axis)
-            stem = f"{scene}_N{n}_" + label.split(",")[0].split(":")[0].replace(" ", "_")
+            stem = f"{scene}_N{n}_" + label.split(",")[0].split(":")[0].replace(" ", "_") + ("_ceil" if "ceil" in label else "")
             if "lattice" in label:
                 stem += "_lattice_L" + label.split("(L=")[1].rstrip(")")
             if bars_result is None:

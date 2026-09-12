@@ -58,6 +58,8 @@ def main():
     ap.add_argument("--cap", type=int, default=50_000); ap.add_argument("--solver", default="highs")
     ap.add_argument("--time-limit", type=float, default=600.0); ap.add_argument("--workers", type=int, default=12)
     ap.add_argument("--mip-gap", type=float, default=0.002); ap.add_argument("--lattice", type=int, default=0)
+    ap.add_argument("--band-policy", choices=("nearest", "ceil"), default="nearest",
+                    help="map_bands policy: nearest = rung closest to the band bound (may undershoot), ceil = first rung covering it")
     ap.add_argument("--isolated-fe", type=int, default=0,
                     help="denoise_bands(max_isolated_fe): islands of <= this many elements are demoted; 0 = off (production smooth=False)")
     a = ap.parse_args()
@@ -65,7 +67,17 @@ def main():
                            solver=a.solver, time_limit=a.time_limit, mip_gap=a.mip_gap, max_nnz=20_000_000,
                            workers=a.workers, verbose=False, polish_time=20.0, harvest_all=False)
     t0 = time.perf_counter()
-    eng = ilp.load_engine(Path(a.dxf), args)
+    if a.band_policy == "nearest":
+        eng = ilp.load_engine(Path(a.dxf), args)
+    else:  # ilp.load_engine hard-codes policy="nearest"; replicate it with the requested policy
+        from a101_reinforcement.catalog import map_bands, resolve_background
+        from a101_reinforcement.dxf_io import read_mosaic
+        from a101_reinforcement.grid import build_grid, denoise_bands
+        mosaic = read_mosaic(Path(a.dxf))
+        scale = sorted(mosaic.scale, key=lambda b: b[1])
+        mapping, warnings = map_bands(mosaic.scale, resolve_background(scale[0][2]), policy=a.band_policy)
+        bands = denoise_bands(mosaic, args.isolated_fe)
+        eng = agglo.Engine(build_grid(mosaic, bands, mapping, cell_mm=args.cell), min_width_fe=args.min_width_fe, anch_d=args.anch_d)
     t_load = time.perf_counter() - t0
     pool, L = ilp.canon_pool_auto(eng, args.lattice, args.cap)
     t_pool = time.perf_counter() - t0 - t_load
@@ -80,7 +92,7 @@ def main():
     cand = pool if hint is None else np.unique(np.concatenate([pool, hint]), axis=0)
     r = ilp.solve(eng, cand, a.k, args, hint)
     t_total = time.perf_counter() - t0
-    result = {"dxf": a.dxf, "axis": a.axis, "k": a.k, "cap": a.cap, "isolated_fe": a.isolated_fe, "lattice": L, "pool": int(len(pool)), "cand": int(len(cand)),
+    result = {"dxf": a.dxf, "axis": a.axis, "k": a.k, "cap": a.cap, "isolated_fe": a.isolated_fe, "band_policy": a.band_policy, "lattice": L, "pool": int(len(pool)), "cand": int(len(cand)),
               "grid": list(eng.need.shape), "cell_mm": eng.cell, "options": eng.labels,
               "t_load": round(t_load, 1), "t_pool": round(t_pool, 1), "t_total": round(t_total, 1),
               "coarse": coarse_log, "status": r["status"], "rows": r.get("rows"), "cols": r.get("cols"),
