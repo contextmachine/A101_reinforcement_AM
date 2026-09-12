@@ -3573,7 +3573,7 @@ class PostgresStore:
                 text(
                     """
                     UPDATE v2_tasks SET
-                        preparation_state=:state,
+                        preparation_state=CAST(:state AS varchar),
                         max_useful_n=:max_useful_n,
                         preparation_error=CAST(:error AS jsonb),
                         prepared_at=CASE WHEN :is_success THEN now() ELSE prepared_at END,
@@ -3582,8 +3582,7 @@ class PostgresStore:
                     """
                 ),
                 {
-                    "task_id": str(task_id),
-                    "state": str(state),
+                    "task_id": str(task_id), "state": str(state),
                     "is_success": state == "success",
                     "max_useful_n": None if max_useful_n is None else int(max_useful_n),
                     "error": _json_param(error) if error is not None else None,
@@ -3593,14 +3592,14 @@ class PostgresStore:
                 n_state = "preparing" if state == "preparing" else state
                 conn.execute(
                     text(
-                        """UPDATE v2_task_n SET state=:n_state, updated_at=now(),
-                                error=CASE WHEN :is_error THEN CAST(:error AS jsonb) ELSE error END
-                            WHERE task_id=:task_id AND state IN ('pending','preparing')
+                        """
+                        UPDATE v2_task_n SET state=CAST(:n_state AS varchar), updated_at=now(),
+                            error=CASE WHEN :is_error THEN CAST(:error AS jsonb) ELSE error END
+                        WHERE task_id=:task_id AND state IN ('pending','preparing')
                         """
                     ),
                     {
-                        "task_id": str(task_id),
-                        "n_state": n_state,
+                        "task_id": str(task_id), "n_state": n_state,
                         "is_error": n_state == "error",
                         "error": _json_param(error) if error is not None else None,
                     },
@@ -3697,13 +3696,8 @@ class PostgresStore:
             raise ValueError(f"invalid v2 status: {status}")
         clauses = ["task_id=:task_id", "n=:n"]
         params: dict[str, Any] = {
-            "task_id": str(task_id),
-            "n": int(n),
-            "state": str(state),
-            "status": status,
-            "fun": fun,
-            "mass_kg": mass_kg,
-            "mass_bg_kg": mass_bg_kg,
+            "task_id": str(task_id), "n": int(n), "state": str(state), "status": status,
+            "fun": fun, "mass_kg": mass_kg, "mass_bg_kg": mass_bg_kg,
             "has_result": result is not None,
             "has_error": error is not None,
             "result": _json_param(result) if result is not None else None,
@@ -3722,15 +3716,10 @@ class PostgresStore:
                         fun=COALESCE(CAST(:fun AS double precision), fun),
                         mass_kg=COALESCE(CAST(:mass_kg AS double precision), mass_kg),
                         mass_bg_kg=COALESCE(CAST(:mass_bg_kg AS double precision), mass_bg_kg),
-                        result=CASE
-                            WHEN :has_result THEN CAST(:result AS jsonb)
-                            ELSE result
-                        END,
-                        error=CASE
-                            WHEN :has_error THEN CAST(:error AS jsonb)
-                            ELSE error
-                        END,
+                        result=CASE WHEN :has_result THEN CAST(:result AS jsonb) ELSE result END,
+                        error=CASE WHEN :has_error THEN CAST(:error AS jsonb) ELSE error END,
                         updated_at=now()
+                    WHERE {' AND '.join(clauses)}
                     """
                 ),
                 params,
@@ -3910,23 +3899,15 @@ class PostgresStore:
             conn.execute(
                 text(
                     f"""
-                    UPDATE {table} SET
-                        state=CAST(:state AS varchar),
-                        result=CASE
-                            WHEN :has_result THEN CAST(:result AS jsonb)
-                            ELSE result
-                        END,
-                        error=CASE
-                            WHEN :has_error THEN CAST(:error AS jsonb)
-                            ELSE error
-                        END,
+                    UPDATE {table} SET state=CAST(:state AS varchar),
+                        result=CASE WHEN :has_result THEN CAST(:result AS jsonb) ELSE result END,
+                        error=CASE WHEN :has_error THEN CAST(:error AS jsonb) ELSE error END,
                         updated_at=now()
                     WHERE id=:id
                     """
                 ),
                 {
-                    "id": str(request_id),
-                    "state": str(state),
+                    "id": str(request_id), "state": str(state),
                     "has_result": result is not None,
                     "has_error": error is not None,
                     "result": _json_param(result) if result is not None else None,

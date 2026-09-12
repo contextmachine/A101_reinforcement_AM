@@ -168,7 +168,7 @@ def test_v2_keda_scaledobjects_watch_only_their_stage_workload_queues():
         for stage in ("preparing", "solving", "fitting", "baring", "validation"):
             row = scaled[f"rebar-v2-{stage}"]
             assert row["spec"]["scaleTargetRef"]["name"] == f"rebar-v2-{stage}"
-            assert row["spec"]["triggers"][0]["metadata"]["listName"] == f"rebar:v2:{stage}:workload"
+            assert row["spec"]["triggers"][0]["metadata"]["listName"] == f"rebar:v2:api-v2:{stage}:workload"
             assert int(row["spec"]["maxReplicaCount"]) >= 32
 
 
@@ -202,3 +202,30 @@ def test_prod_private_patches_image_pull_secret_for_all_v2_workers():
         assert doc["spec"]["template"]["spec"]["imagePullSecrets"] == [{"name": "ghcr-pull"}]
     kust = yaml.safe_load((root / "deploy/k8s/overlays/prod-private/kustomization.yaml").read_text(encoding="utf-8"))
     assert any(row.get("path") == "v2-workers-image-pull-secret-patch.yaml" for row in kust.get("patches", []))
+
+
+def test_side_by_side_v2_api_manifest_has_dedicated_name_config_and_startup_probe():
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "deploy/k8s/base/rebar-v2-api.yaml").read_text(encoding="utf-8")
+    assert "name: rebar-v2-api" in text
+    assert "app: rebar-v2-api" in text
+    assert "name: rebar-config-v2" in text
+    assert "startupProbe:" in text
+
+
+def test_v2_redis_policy_allows_api_and_all_worker_stages():
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "deploy/k8s/base/rebar-v2-redis-networkpolicy.yaml").read_text(encoding="utf-8")
+    for app in (
+        "rebar-v2-api", "rebar-v2-preparing", "rebar-v2-solving",
+        "rebar-v2-fitting", "rebar-v2-baring", "rebar-v2-validation",
+    ):
+        assert f"- {app}" in text
+    assert "port: 6379" in text
+
+
+def test_v2_worker_scaledobjects_keep_completed_pods_observable_longer():
+    root = Path(__file__).resolve().parents[1]
+    for overlay in ("dev", "prod"):
+        text = (root / f"deploy/k8s/overlays/{overlay}/v2-worker-scaledobjects.yaml").read_text(encoding="utf-8")
+        assert text.count("cooldownPeriod: 600") == 5

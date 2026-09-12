@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     max_jobs_per_task: int = 28_031_998
     max_concurrent_solvers_per_task: int = 32
     v2_worker_stage: str | None = None
+    worker_log_level: str = "INFO"
+    worker_log_dir: str | None = None
+    log_status_poll_requests: bool = False
     schedule_window_factor: int = 1
 
     default_solver_threads: int = 1

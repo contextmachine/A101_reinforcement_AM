@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+import logging
 import numpy as np
 from shapely.geometry import Polygon, box
 from shapely.ops import unary_union
@@ -11,6 +12,9 @@ from A101.max_n_milp import estimate_max_useful_n
 from .config import Settings
 from .pipeline import overlay_polygon_sets, polygons_from_input
 from .v2_jobs import V2Job
+
+
+logger = logging.getLogger("rebar.v2_pipeline")
 
 
 def _arm_pair(value: Mapping[str, Any] | None) -> tuple[float, float] | None:
@@ -532,6 +536,7 @@ class V2Pipeline:
         if task is None:
             raise KeyError(job.task_id)
         self.store.set_v2_preparation_state(job.task_id, "preparing")
+        logger.info("prepare_context task_id=%s", job.task_id)
         context = build_v2_field_context(self.store, task)
         self.store.save_v2_artifact(job.task_id, "field_context", "field_context", context)
         if not context["component"].get("polygons"):
@@ -553,6 +558,7 @@ class V2Pipeline:
             hard_cap=int(self.settings.effective_prepare_max_n()),
         )
         max_n = int(max_result.get("max_useful_n") or 0)
+        logger.info("prepare_max_useful_n task_id=%s max_useful_n=%s feasible=%s", job.task_id, max_n, bool(max_result.get("feasible")))
         if not bool(max_result.get("feasible")) or max_n <= 0:
             raise RuntimeError(f"Unable to compute positive max_useful_n: {max_result}")
 
@@ -561,6 +567,7 @@ class V2Pipeline:
         self.store.save_v2_artifact(job.task_id, "max_n", "max_n", max_result)
         self.store.set_v2_preparation_state(job.task_id, "success", max_useful_n=max_n)
         self.schedule_ready_n(job.task_id)
+        logger.info("prepare_done task_id=%s max_useful_n=%s", job.task_id, max_n)
 
     def handle_solve(self, job: V2Job) -> None:
         if job.n is None:
@@ -601,6 +608,10 @@ class V2Pipeline:
             result["solver_log_key"] = capture.object_key
         if capture is not None and capture.upload_error:
             result["solver_log_upload_error"] = capture.upload_error
+        logger.info(
+            "solve_result task_id=%s n=%s attempt=%s state=%s feasible=%s optimal=%s",
+            job.task_id, n, attempt, result.get("solve_state"), bool(result.get("is_feasible")), bool(result.get("is_optimal")),
+        )
         if not self._n_job_is_current(job.task_id, n, attempt, "solving"):
             return
         key = f"solver:n:{n}:attempt:{attempt}"
@@ -653,6 +664,7 @@ class V2Pipeline:
         self.store.enqueue_v2_job(V2Job(
             stage="baring", kind="task_bars", task_id=job.task_id, n=n, attempt=attempt
         ).to_dict())
+        logger.info("fit_done task_id=%s n=%s attempt=%s zones=%s", job.task_id, n, attempt, len(zones))
 
     def handle_task_bars(self, job: V2Job) -> None:
         if job.n is None:
@@ -693,6 +705,11 @@ class V2Pipeline:
             fun=None if fun is None else float(fun), mass_kg=float(bars["mass_kg"]),
             mass_bg_kg=float(bars["mass_bg_kg"]), result=final,
         )
+        logger.info(
+            "baring_done task_id=%s n=%s attempt=%s status=%s mass_kg=%s mass_bg_kg=%s bars=%s",
+            job.task_id, n, attempt, status, bars.get("mass_kg"), bars.get("mass_bg_kg"),
+            len(dict(bars.get("bar_layout", {})).get("bars", []) or []),
+        )
 
     def handle_bars_request(self, job: V2Job) -> None:
         if not job.request_id:
@@ -715,6 +732,10 @@ class V2Pipeline:
             },
         }
         self.store.set_v2_request_state("bars", job.request_id, "success", result=public)
+        logger.info(
+            "bars_request_done request_id=%s bars=%s",
+            job.request_id, len(dict(public.get("bar_layout", {})).get("bars", []) or []),
+        )
 
     def handle_verification(self, job: V2Job) -> None:
         if not job.request_id:
@@ -728,3 +749,4 @@ class V2Pipeline:
         bars = build_v2_bars_for_request(self.store, request, self.settings)
         result = verify_v2_request(self.store, request, bars)
         self.store.set_v2_request_state("verification", job.request_id, "success", result=result)
+        logger.info("verification_done request_id=%s polygons=%s", job.request_id, len(result))

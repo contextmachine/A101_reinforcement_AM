@@ -14,7 +14,7 @@ CONFIG_EXAMPLE = {
     "steel_density_kg_m3": 7850, "anchor_factor": 40, "axis": "x",
 }
 
-TAGS = [
+LEGACY_OPERATION_GROUPS = [
     {"name": "1. Загрузка", "description": "Создание задач из DXF, таблиц XLSX, JSON или pickle. Форматы разделены по ручкам."},
     {"name": "2. Задача и полигоны", "description": "Состояние задачи и исходные полигоны raw/smooth."},
     {"name": "3. Оверлеи", "description": "Неизменяемый журнал исключения/возврата полигонов. Ревизия выбирается через overlay."},
@@ -24,6 +24,15 @@ TAGS = [
     {"name": "7. События", "description": "Прогресс и причины ошибок. events — курсор по id, component-events — смещение OFFSET."},
     {"name": "8. Состояние сервиса", "description": "Проверки процесса API и доступности хранилищ."},
 ]
+
+V2_TAGS = [
+    {"name": "1. V2 — Загрузка", "description": "Создание чистых v2-сцен из DXF, JSON и XLSX."},
+    {"name": "2. V2 — Сцены и overlays", "description": "Полигоны сцены и append-only overlays."},
+    {"name": "3. V2 — Задачи", "description": "Whole-field pipeline: создать задачу, добавить/отменить N и читать состояние."},
+    {"name": "4. V2 — Bars и verification", "description": "Асинхронная раскладка стержней и проверка армирования."},
+]
+SERVICE_TAG = {"name": "5. Состояние сервиса", "description": "Проверки процесса API и доступности PostgreSQL/Redis."}
+V2_INTRO = "Минималистичный whole-field API v2. Legacy `/v1` скрыт из обычного Swagger и доступен отдельно через `/docs/legacy`."
 
 INTRO = """## Рекомендуемый сценарий работы
 1. Создайте reusable-сцену через `POST /v1/scenes/dxf_upload`, `json_upload`, `tables_upload` или `pkl_upload`. API синхронно разбирает источник и строит raw/smooth; расчётные компоненты на уровне scene не создаются. Успешный ответ содержит `scene_id` и `state=ready`.
@@ -60,6 +69,76 @@ N одного solver-запуска ограничен **100** и всегда 
 `completed` означает отсутствие дальнейших jobs, но не гарантирует наличие допустимого решения. Корректный solver-result `infeasible` для отдельного N не является `job_failed` и не ломает компоненту; `job_failed` используется для исключений/инфраструктурных ошибок. Причины глобально невозможной постановки смотрите в `analysis_infeasible`. `feasible` — допустимый вариант; `optimal`/`is_optimal` отражают флаги решённых подзадач, а не доказательство глобального минимума физической массы после layout.
 `/v1/tasks/{task_id}/ws` отправляет сначала `snapshot`, затем события. Для новых task WebSocket использует сохранённый immutable-контекст; legacy параметры сохраняются для совместимости. Пауза и полная отмена относятся ко всей задаче; отмена не прерывает синхронный solver мгновенно.
 """
+
+LEGACY_TAG = {
+    "name": "99. Legacy v1",
+    "description": INTRO,
+}
+
+V2_PATH_ORDER = [
+    "/v2/dxf_upload",
+    "/v2/json_upload",
+    "/v2/tables_upload",
+    "/v2/scenes/{scene_id}/polygons",
+    "/v2/scenes/{scene_id}/overlays",
+    "/v2/scenes/{scene_id}/overalys/{overlay_id}",
+    "/v2/tasks",
+    "/v2/tasks/{task_id}/n",
+    "/v2/tasks/{task_id}/cancel",
+    "/v2/tasks/{task_id}",
+    "/v2/tasks/{task_id}/{n}",
+    "/v2/bars",
+    "/v2/bars/{bars_id}",
+    "/v2/verification",
+    "/v2/verification/{verification_id}",
+    "/health/live",
+    "/health/ready",
+]
+
+
+def _tag_for_path(path: str, legacy_group: int) -> str:
+    if path.startswith("/v1/"):
+        return LEGACY_TAG["name"]
+    if path.startswith("/v2/dxf_upload") or path.startswith("/v2/json_upload") or path.startswith("/v2/tables_upload"):
+        return V2_TAGS[0]["name"]
+    if path.startswith("/v2/scenes/"):
+        return V2_TAGS[1]["name"]
+    if path.startswith("/v2/tasks"):
+        return V2_TAGS[2]["name"]
+    if path.startswith("/v2/bars") or path.startswith("/v2/verification"):
+        return V2_TAGS[3]["name"]
+    if path.startswith("/health/"):
+        return SERVICE_TAG["name"]
+    return LEGACY_OPERATION_GROUPS[legacy_group]["name"]
+
+
+def _ordered_paths(paths: dict[str, Any], *, v2_only: bool = False) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for path in V2_PATH_ORDER:
+        if path in paths:
+            out[path] = paths[path]
+    if not v2_only:
+        for path, value in paths.items():
+            if path not in out and not path.startswith("/v1/"):
+                out[path] = value
+        for path, value in paths.items():
+            if path.startswith("/v1/"):
+                out[path] = value
+    return out
+
+
+def build_v2_openapi_schema(app: FastAPI) -> dict[str, Any]:
+    cached = getattr(app.state, "v2_openapi_schema", None)
+    if cached is not None:
+        return cached
+    schema = deepcopy(app.openapi())
+    schema["info"]["title"] = "rebar-v2-api"
+    schema["info"]["description"] = V2_INTRO
+    schema["paths"] = _ordered_paths(schema.get("paths", {}), v2_only=True)
+    schema["tags"] = deepcopy(V2_TAGS + [SERVICE_TAG])
+    app.state.v2_openapi_schema = schema
+    return schema
+
 
 _UPLOAD = """\n\nMultipart: `file` — исходный файл, `config` — JSON-строка параметров (пример есть у поля). При `start=true` config с n обязателен.
 При `start=false` config можно не передавать: API разбирает исходник и сохраняет готовые raw/smooth, solver не запускается.
@@ -240,8 +319,8 @@ def install_russian_docs(app: FastAPI) -> None:
         schema = original_openapi()
         if decorated:
             return schema
-        schema["info"].update(title="A101 — раскладка дополнительного армирования", description=INTRO)
-        schema["tags"] = deepcopy(TAGS)
+        schema["info"].update(title="rebar-v2-api", description=V2_INTRO)
+        schema["tags"] = deepcopy(V2_TAGS + [SERVICE_TAG, LEGACY_TAG])
         schemas = schema.setdefault("components", {}).setdefault("schemas", {})
         config_schema = _references(TaskParameters.model_json_schema())
         definitions = config_schema.pop("$defs", {})
@@ -287,7 +366,7 @@ def install_russian_docs(app: FastAPI) -> None:
             group, summary, description = spec
             for method in route.methods:
                 op = schema["paths"][route.path_format][method.lower()]
-                op.update(summary=summary, description=description, tags=[TAGS[group]["name"]])
+                op.update(summary=summary, description=description, tags=[_tag_for_path(route.path_format, group)])
                 for p in op.get("parameters", []):
                     name = p["name"]
                     desc = PARAMETERS.get(name)
@@ -315,6 +394,8 @@ def install_russian_docs(app: FastAPI) -> None:
                     op["responses"]["503"] = {"description": "PostgreSQL или Redis недоступен"}
                 if route.name == "append_overlays":
                     op["requestBody"]["content"]["application/json"]["example"] = [{"type": "clean", "idxs": [3, 7], "id": 67689, "real": True}]
+        schema["paths"] = _ordered_paths(schema.get("paths", {}), v2_only=False)
+        app.state.v2_openapi_schema = None
         decorated = True
         return schema
 

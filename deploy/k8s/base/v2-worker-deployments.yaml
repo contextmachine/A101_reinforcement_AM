@@ -33,13 +33,14 @@ spec:
       - name: worker
         image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
         imagePullPolicy: Always
+        terminationMessagePolicy: FallbackToLogsOnError
         command:
         - python
         - -m
         - rebar_service.v2_worker
         envFrom:
         - configMapRef:
-            name: rebar-config
+            name: rebar-config-v2
         - secretRef:
             name: rebar-secrets
         env:
@@ -118,13 +119,14 @@ spec:
       - name: worker
         image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
         imagePullPolicy: Always
+        terminationMessagePolicy: FallbackToLogsOnError
         command:
         - python
         - -m
         - rebar_service.v2_worker
         envFrom:
         - configMapRef:
-            name: rebar-config
+            name: rebar-config-v2
         - secretRef:
             name: rebar-secrets
         env:
@@ -203,13 +205,14 @@ spec:
       - name: worker
         image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
         imagePullPolicy: Always
+        terminationMessagePolicy: FallbackToLogsOnError
         command:
         - python
         - -m
         - rebar_service.v2_worker
         envFrom:
         - configMapRef:
-            name: rebar-config
+            name: rebar-config-v2
         - secretRef:
             name: rebar-secrets
         env:
@@ -288,13 +291,14 @@ spec:
       - name: worker
         image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
         imagePullPolicy: Always
+        terminationMessagePolicy: FallbackToLogsOnError
         command:
         - python
         - -m
         - rebar_service.v2_worker
         envFrom:
         - configMapRef:
-            name: rebar-config
+            name: rebar-config-v2
         - secretRef:
             name: rebar-secrets
         env:
@@ -373,13 +377,14 @@ spec:
       - name: worker
         image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
         imagePullPolicy: Always
+        terminationMessagePolicy: FallbackToLogsOnError
         command:
         - python
         - -m
         - rebar_service.v2_worker
         envFrom:
         - configMapRef:
-            name: rebar-config
+            name: rebar-config-v2
         - secretRef:
             name: rebar-secrets
         env:

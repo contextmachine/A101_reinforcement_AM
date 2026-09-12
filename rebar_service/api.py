@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -11,7 +13,8 @@ from urllib.parse import quote
 from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
@@ -76,13 +79,51 @@ workflow = PipelineWorkflow(store, settings)
 v2_workflow = V2Pipeline(store, settings)
 
 
+class StatusPollAccessFilter(logging.Filter):
+    _STATUS_PATH = re.compile(r"^/v2/tasks/[^/?]+(?:/\d+)?(?:\?.*)?$")
+
+    def __init__(self, *, enabled: bool) -> None:
+        super().__init__()
+        self.enabled = bool(enabled)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if self.enabled:
+            return True
+        args = record.args
+        if not isinstance(args, tuple) or len(args) < 5:
+            return True
+        method = str(args[1]).upper()
+        path = str(args[2])
+        try:
+            status = int(args[4])
+        except (TypeError, ValueError):
+            return True
+        return not (method == "GET" and status < 400 and self._STATUS_PATH.match(path))
+
+
+def _install_access_log_filter() -> None:
+    access_logger = logging.getLogger("uvicorn.access")
+    if any(isinstance(item, StatusPollAccessFilter) for item in access_logger.filters):
+        return
+    access_logger.addFilter(StatusPollAccessFilter(enabled=settings.log_status_poll_requests))
+
+
+_install_access_log_filter()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await run_in_threadpool(store.ping)
     yield
 
 
-app = FastAPI(title="Rebar Optimizer API", version="2.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="rebar-v2-api",
+    version="2.0.0",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.add_middleware(
     CORSMiddleware,
@@ -91,6 +132,31 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/openapi-v2.json", include_in_schema=False)
+def openapi_v2() -> JSONResponse:
+    from .api_docs_ru import build_v2_openapi_schema
+
+    return JSONResponse(build_v2_openapi_schema(app))
+
+
+@app.get("/docs", include_in_schema=False, response_class=HTMLResponse)
+def swagger_v2() -> HTMLResponse:
+    return get_swagger_ui_html(
+        openapi_url="/openapi-v2.json",
+        title="rebar-v2-api — Swagger",
+        swagger_ui_parameters={"docExpansion": "list", "defaultModelsExpandDepth": -1},
+    )
+
+
+@app.get("/docs/legacy", include_in_schema=False, response_class=HTMLResponse)
+def swagger_legacy() -> HTMLResponse:
+    return get_swagger_ui_html(
+        openapi_url=app.openapi_url or "/openapi.json",
+        title="rebar-v2-api — v2 + legacy v1",
+        swagger_ui_parameters={"docExpansion": "none"},
+    )
 
 
 def _build_task(

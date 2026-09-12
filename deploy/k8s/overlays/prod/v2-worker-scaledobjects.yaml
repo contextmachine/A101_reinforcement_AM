@@ -6,7 +6,7 @@ spec:
   scaleTargetRef:
     name: rebar-v2-preparing
   pollingInterval: 5
-  cooldownPeriod: 300
+  cooldownPeriod: 600
   minReplicaCount: 0
   maxReplicaCount: 28031998
   advanced:
@@ -18,7 +18,7 @@ spec:
   - type: redis
     metadata:
       address: rebar-redis.rebar-optimizer.svc.cluster.local:6379
-      listName: rebar:v2:preparing:workload
+      listName: rebar:v2:api-v2:preparing:workload
       listLength: '1'
       activationListLength: '0'
     authenticationRef:
@@ -32,7 +32,7 @@ spec:
   scaleTargetRef:
     name: rebar-v2-solving
   pollingInterval: 5
-  cooldownPeriod: 300
+  cooldownPeriod: 600
   minReplicaCount: 0
   maxReplicaCount: 28031998
   advanced:
@@ -44,7 +44,7 @@ spec:
   - type: redis
     metadata:
       address: rebar-redis.rebar-optimizer.svc.cluster.local:6379
-      listName: rebar:v2:solving:workload
+      listName: rebar:v2:api-v2:solving:workload
       listLength: '1'
       activationListLength: '0'
     authenticationRef:
@@ -58,7 +58,7 @@ spec:
   scaleTargetRef:
     name: rebar-v2-fitting
   pollingInterval: 5
-  cooldownPeriod: 300
+  cooldownPeriod: 600
   minReplicaCount: 0
   maxReplicaCount: 28031998
   advanced:
@@ -70,7 +70,7 @@ spec:
   - type: redis
     metadata:
       address: rebar-redis.rebar-optimizer.svc.cluster.local:6379
-      listName: rebar:v2:fitting:workload
+      listName: rebar:v2:api-v2:fitting:workload
       listLength: '1'
       activationListLength: '0'
     authenticationRef:
@@ -84,7 +84,7 @@ spec:
   scaleTargetRef:
     name: rebar-v2-baring
   pollingInterval: 5
-  cooldownPeriod: 300
+  cooldownPeriod: 600
   minReplicaCount: 0
   maxReplicaCount: 28031998
   advanced:
@@ -96,7 +96,7 @@ spec:
   - type: redis
     metadata:
       address: rebar-redis.rebar-optimizer.svc.cluster.local:6379
-      listName: rebar:v2:baring:workload
+      listName: rebar:v2:api-v2:baring:workload
       listLength: '1'
       activationListLength: '0'
     authenticationRef:
@@ -110,7 +110,7 @@ spec:
   scaleTargetRef:
     name: rebar-v2-validation
   pollingInterval: 5
-  cooldownPeriod: 300
+  cooldownPeriod: 600
   minReplicaCount: 0
   maxReplicaCount: 28031998
   advanced:
@@ -122,7 +122,7 @@ spec:
   - type: redis
     metadata:
       address: rebar-redis.rebar-optimizer.svc.cluster.local:6379
-      listName: rebar:v2:validation:workload
+      listName: rebar:v2:api-v2:validation:workload
       listLength: '1'
       activationListLength: '0'
     authenticationRef:

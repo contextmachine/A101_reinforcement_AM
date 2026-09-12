@@ -41,12 +41,13 @@ def test_multipart_config_has_valid_json_example_not_a_python_dict():
 
 def test_mass_and_async_rules_are_in_openapi_and_schema_is_cached():
     s = app.openapi()
-    assert "with_anchorage_unclipped_kg" in s["info"]["description"]
+    legacy = next(tag for tag in s["tags"] if tag["name"].startswith("99."))
+    assert "with_anchorage_unclipped_kg" in legacy["description"]
     upload_description = s["paths"]["/v1/tasks/upload"]["post"]["description"]
     assert "API" in upload_description
     assert "materialize_source" not in upload_description
     assert "OFFSET" in s["paths"]["/v1/tasks/{task_id}/component-events"]["get"]["description"]
-    assert "WebSocket" in s["info"]["description"]
+    assert "WebSocket" in legacy["description"]
     assert s is app.openapi()
 
 
@@ -73,7 +74,8 @@ def test_openapi_and_swagger_are_served_and_local_references_resolve():
 
 
 def test_swagger_documents_scene_snapshot_overlay_selectors_and_new_solver_contract():
-    description = app.openapi()["info"]["description"]
+    schema = app.openapi()
+    description = next(tag for tag in schema["tags"] if tag["name"].startswith("99."))["description"]
     assert "scene_id" in description
     assert "PUT /v1/tasks" in description
     assert "overlay=-1" in description
