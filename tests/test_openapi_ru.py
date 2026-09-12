@@ -138,3 +138,31 @@ def test_v1_operations_replaced_by_v2_are_marked_deprecated():
     assert not paths["/v1/tasks/{task_id}/cancel"]["post"].get("deprecated")
     assert not paths["/v1/tasks/{task_id}"]["get"].get("deprecated")
     assert not paths["/v1/scenes/pkl_upload"]["post"].get("deprecated")
+
+
+def test_v2_schemas_carry_v2_examples_and_descriptions_only():
+    from rebar_service.v2 import models as v2_models
+    from rebar_service.models import TaskCreate as V1TaskCreate
+
+    s = app.openapi()
+    comps = s["components"]["schemas"]
+    v2_names = {
+        v.__name__ for v in vars(v2_models).values()
+        if isinstance(v, type) and issubclass(v, v2_models.V2Model) and v is not v2_models.V2Model
+    }
+    assert v2_names <= set(comps) | {"V2Model"}, sorted(v2_names - set(comps))
+    for name in sorted(v2_names & set(comps)):
+        for key, prop in comps[name].get("properties", {}).items():
+            assert re.search("[А-Яа-я]", prop.get("description", "")), (name, key)
+            assert "coarse_step" not in prop.get("description", ""), (name, key)
+    body = s["paths"]["/v2/tasks"]["put"]["requestBody"]["content"]["application/json"]["schema"]
+    assert body["$ref"].endswith("/V2TaskCreate")
+    example = comps["V2TaskCreate"]["examples"][0]
+    assert "input" not in example and example["config"]["back_grid"] == {"d": 18.0, "step": 300.0}
+    v2_models.V2TaskCreate.model_validate(example)
+    v2_models.BarsRequest.model_validate(comps["BarsRequest"]["examples"][0])
+    v2_models.VerificationRequest.model_validate(comps["VerificationRequest"]["examples"][0])
+    v2_models.OverlaysPost.model_validate(comps["OverlaysPost"]["examples"][0])
+    # the v1 example still belongs to the v1 model only
+    V1TaskCreate.model_validate(comps["TaskCreate"]["examples"][0])
+    assert "input" in comps["TaskCreate"]["examples"][0]

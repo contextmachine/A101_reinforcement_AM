@@ -260,14 +260,35 @@ V2_MODEL_FIELDS = {
     "result": "Результат операции; заполняется только при state=success.",
     "verification_id": "Идентификатор задачи проверки армирования.",
     "t": "Толщина плиты, мм. Нужна для перевода армирования в кг/м³.",
+    "n": "Непустой список положительных N — число прямоугольных зон дополнительного армирования на всё поле; каждое N считается отдельно.",
+    "id": "Идентификатор зоны; уникален в пределах запроса и сохраняется в ответе.",
+    "kind": "Тип зоны: bg — фоновое армирование всего поля, additional — дополнительная зона.",
+    "type": "clean — наложить маску на элементы idxs, unclean — снять её; повторное применение к элементу пропускается.",
+    "idxs": "Индексы исходных полигонов сцены (source_index).",
+    "real": "true — элемент остаётся в поле с нулевой нагрузкой (стержни можно класть); false — проём, стержни подрезаются.",
+    "points": "Вершины полигона [[x,y],...] в мм, не меньше трёх.",
+    "load": "Требуемое армирование полигона, см²/м.",
+    "start": "Начало отрезка [x,y] в мм или длина анкеровки со стороны начала, мм.",
+    "state": "Состояние операции: pending, preparing, solving, fitting, bars, success, error, cancelled; у задач раскладки/проверки — pending, running, success, error.",
+    "status": "Итог solver для N: optimal, feasable (найдено допустимое), infeasable (решения нет).",
+    "task_id": "Идентификатор задачи.",
+    "max_layers": "Максимальное число слоёв дополнительного армирования.",
+    "axis": "Направление стержней: x или y.",
+    "anchor_factor": "Анкеровка с каждой стороны зоны/стержня = anchor_factor × d, если не задана явно.",
+    "min_width_mm": "Минимальная ширина зоны дополнительного армирования, мм.",
+    "max_snap_mm": "Максимальное смещение зоны при подгонке к физическим позициям, мм.",
+    "min_bar_gap_mm": "Минимальное расстояние между соседними стержнями при раскладке, мм; null — серверное REBAR_MIN_INTERNAL_STEP.",
+    "steel_density_kg_m3": "Плотность стали для расчёта масс, кг/м³.",
+    "back_grid": "Фоновое армирование {d, step}, мм.",
+    "stock": "Доступные варианты дополнительного армирования [{d, step}, ...], мм.",
+    "solver": "Параметры solver; единственное клиентское поле — solver_time_limit.",
+    "solver_time_limit": "Время, которое HiGHS может потратить на одно N, с; null — серверное REBAR_SOLVER_TIME_LIMIT.",
     "config": "Параметры расчёта; всё, что относится к развёртыванию (потоки, лимиты worker), берётся только из ConfigMap.",
     "need_load_sm2/m": "Требуемое армирование полигона, см²/м. Для real — 0, для empty — null.",
     "fact_load_sm2/m": "Фактическое армирование полигона по осям стержней, см²/м.",
     "need_load_kg/m3": "Требуемое армирование, кг/м³, пересчитанное через плотность стали и толщину t.",
     "fact_load_kg/m3": "Фактическое армирование, кг/м³.",
 }
-for _key, _value in V2_MODEL_FIELDS.items():
-    MODEL_FIELDS.setdefault(_key, _value)
 
 
 def _references(value: Any) -> Any:
@@ -299,12 +320,27 @@ def install_russian_docs(app: FastAPI) -> None:
             schemas.setdefault(name, definition)
         schemas["TaskParameters"] = config_schema
         config_json = json.dumps(CONFIG_EXAMPLE, ensure_ascii=False, indent=2)
+        from .v2 import models as v2_models
+
+        v2_names = {
+            value.__name__
+            for value in vars(v2_models).values()
+            if isinstance(value, type) and issubclass(value, v2_models.V2Model)
+        }
         for name, model in schemas.items():
             fields = model.get("properties", {})
+            is_v2 = name in v2_names or name.startswith("Body_v2_")
             for key, field in fields.items():
-                desc = BODY_FIELDS.get(key) if name.startswith("Body_") else MODEL_FIELDS.get(key)
+                if name.startswith("Body_"):
+                    desc = BODY_FIELDS.get(key)
+                else:
+                    desc = V2_MODEL_FIELDS.get(key) if is_v2 else MODEL_FIELDS.get(key)
                 if desc:
                     field["description"] = desc
+            if is_v2:
+                if name in V2_EXAMPLES:
+                    model["examples"] = [deepcopy(V2_EXAMPLES[name])]
+                continue
             if name.startswith("Body_") and "config" in fields:
                 fields["config"]["examples"] = [config_json]
             if name == "ComponentNRequest":
@@ -417,4 +453,38 @@ DEPRECATED_REPLACEMENTS = {
     "add_n": "PUT /v2/tasks/{task_id}/n",
     "pause_task": "PUT /v2/tasks/{task_id}/cancel (паузы в v2 нет; отменённые N можно добавить заново)",
     "resume_task": "PUT /v2/tasks/{task_id}/n (паузы в v2 нет; отменённые N можно добавить заново)",
+}
+
+# Request examples for /v2 schemas, in the shape of payload-v2-am-aa.md.
+_V2_ZONES_EXAMPLE = [
+    {"id": 0, "kind": "bg", "arm": {"d": 18.0, "step": 300.0}, "anchorage": {"start": 800.0, "end": 800.0}},
+    {"id": 1, "kind": "additional", "arm": {"d": 20.0, "step": 150.0}, "left": 10, "right": 5, "length": 1730.0,
+     "anchorage": {"start": 800.0, "end": 800.0}, "origin": [4860.0, 700.0], "direction": [0.0, -1.0]},
+]
+V2_EXAMPLES = {
+    "V2TaskCreate": {
+        "scene_id": "c8f8c9048259477294bb583b5523f059", "overlay_id": 0, "smooth": False, "n": [10, 20, 133],
+        "config": {
+            "max_layers": 2, "axis": "x", "anchor_factor": 40, "min_width_mm": 300, "max_snap_mm": 600,
+            "min_bar_gap_mm": 50, "steel_density_kg_m3": 7850, "back_grid": {"d": 18.0, "step": 300.0},
+            "stock": [{"d": 18.0, "step": 300.0}, {"d": 20.0, "step": 150.0}, {"d": 20.0, "step": 100.0},
+                      {"d": 25.0, "step": 150.0}, {"d": 25.0, "step": 100.0}],
+            "solver": {"solver_time_limit": None},
+        },
+    },
+    "V2NMutation": {"n": [1, 2, 3, 4]},
+    "V2CancelMutation": {"n": [1, 2, 3, 4]},
+    "OverlaysPost": {"overlays": [{"type": "clean", "idxs": [3, 56, 78], "real": True, "time": 12345654},
+                                  {"type": "unclean", "idxs": [4, 7], "real": False, "time": 12345667}]},
+    "FEPolygon": {"load": 5.7, "color": 181, "points": [[100, 0], [200, 340], [100, 406.25]]},
+    "BarsRequest": {"scene_id": "a2b8259ba85a4c15a673a4ed4c5369b1", "smooth": False, "overlay_id": 0,
+                    "config": {"axis": "x", "anchor_factor": 40, "min_bar_gap_mm": 50}, "zones": _V2_ZONES_EXAMPLE},
+    "VerificationRequest": {"scene_id": "a2b8259ba85a4c15a673a4ed4c5369b1", "smooth": False, "overlay_id": 0,
+                            "config": {"axis": "x", "anchor_factor": 40, "steel_density_kg_m3": 7850, "t": 600,
+                                       "min_bar_gap_mm": 50},
+                            "zones": _V2_ZONES_EXAMPLE},
+    "ZoneBase": _V2_ZONES_EXAMPLE[0],
+    "ZoneAdditional": _V2_ZONES_EXAMPLE[1],
+    "Bar": {"zone_id": 0, "start": [100.0, 50.001], "end": [14200.0, 50.001], "d": 18.0,
+            "anchorage": {"start": 800.0, "end": 800.0}},
 }

@@ -8,16 +8,16 @@ from rebar_service.v2.models import (
     Bar,
     BarsConfig,
     BarsRequest,
-    CancelMutation,
+    V2CancelMutation,
     FEPolygon,
     FEPolygonOut,
-    NMutation,
+    V2NMutation,
     OverlayIn,
     OverlayOut,
     OverlaysPost,
     RcVariant,
     TaskConfig,
-    TaskCreate,
+    V2TaskCreate,
     VerificationConfig,
     VerificationRequest,
     VerificationRow,
@@ -96,22 +96,22 @@ def test_zone_defaults_keep_geometry_without_anchorage():
 
 
 def test_task_create_deduplicates_n_and_requires_positive_values():
-    task = TaskCreate.model_validate({"scene_id": "s", "n": [3, 1, 3, 2, 1]})
+    task = V2TaskCreate.model_validate({"scene_id": "s", "n": [3, 1, 3, 2, 1]})
     assert task.n == [3, 1, 2]
     assert task.overlay_id == 0 and task.smooth is False
     assert task.config.axis == "y" and task.config.anchor_factor == 40
     assert task.config.solver.solver_time_limit is None
     for bad in ([], [0], [1, -2]):
         with pytest.raises(ValidationError):
-            TaskCreate.model_validate({"scene_id": "s", "n": bad})
+            V2TaskCreate.model_validate({"scene_id": "s", "n": bad})
 
 
 def test_n_mutation_and_cancel_mutation_share_the_n_rules():
-    assert NMutation.model_validate({"n": [2, 2, 1]}).n == [2, 1]
-    assert CancelMutation.model_validate({}).n is None
-    assert CancelMutation.model_validate({"n": [4, 4]}).n == [4]
+    assert V2NMutation.model_validate({"n": [2, 2, 1]}).n == [2, 1]
+    assert V2CancelMutation.model_validate({}).n is None
+    assert V2CancelMutation.model_validate({"n": [4, 4]}).n == [4]
     with pytest.raises(ValidationError):
-        NMutation.model_validate({"n": []})
+        V2NMutation.model_validate({"n": []})
 
 
 def test_task_config_accepts_the_contract_example():

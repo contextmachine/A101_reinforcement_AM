@@ -182,7 +182,7 @@ class OverlayCreated(V2Model):
     overlay_id: int
 
 
-class SceneCreated(V2Model):
+class V2SceneCreated(V2Model):
     scene_id: str
     state: str
 
@@ -207,7 +207,7 @@ class TaskConfig(V2Model):
     solver: SolverConfig = Field(default_factory=SolverConfig)
 
 
-class TaskCreate(V2Model):
+class V2TaskCreate(V2Model):
     scene_id: str = Field(min_length=1)
     overlay_id: int = 0
     smooth: bool = False
@@ -220,11 +220,11 @@ class TaskCreate(V2Model):
         return _positive_unique_ns(value)
 
 
-class TaskCreated(V2Model):
+class V2TaskCreated(V2Model):
     task_id: str
 
 
-class NMutation(V2Model):
+class V2NMutation(V2Model):
     task_id: str | None = None
     n: list[int] = Field(min_length=1)
 
@@ -234,7 +234,7 @@ class NMutation(V2Model):
         return _positive_unique_ns(value)
 
 
-class CancelMutation(V2Model):
+class V2CancelMutation(V2Model):
     task_id: str | None = None
     n: list[int] | None = None
 
@@ -246,7 +246,7 @@ class CancelMutation(V2Model):
         return _positive_unique_ns(value)
 
 
-class SolutionSummary(V2Model):
+class V2SolutionSummary(V2Model):
     n: int
     state: str
     fun: float | None = None
@@ -259,10 +259,10 @@ class TaskView(V2Model):
     scene_id: str
     smooth: bool = False
     overlay_id: int = 0
-    solutions: list[SolutionSummary] = Field(default_factory=list)
+    solutions: list[V2SolutionSummary] = Field(default_factory=list)
 
 
-class SolutionView(SolutionSummary):
+class SolutionView(V2SolutionSummary):
     task_id: str
     bars: list[Bar] | None = None
     zones: list[Zone] | None = None

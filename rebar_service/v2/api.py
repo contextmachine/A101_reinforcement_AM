@@ -22,17 +22,17 @@ from .models import (
     BarsCreated,
     BarsRequest,
     BarsView,
-    CancelMutation,
+    V2CancelMutation,
     FEPolygon,
     FEPolygonOut,
-    NMutation,
+    V2NMutation,
     OverlayCreated,
     OverlayOut,
     OverlaysPost,
-    SceneCreated,
+    V2SceneCreated,
     SolutionView,
-    TaskCreate,
-    TaskCreated,
+    V2TaskCreate,
+    V2TaskCreated,
     TaskView,
     VerificationCreated,
     VerificationRequest,
@@ -63,14 +63,14 @@ def _store(request: Request | None = None) -> Any:
     return _api_module(request).store
 
 
-async def _create_scene_response(request: Request, input_obj: dict) -> SceneCreated:
+async def _create_scene_response(request: Request, input_obj: dict) -> V2SceneCreated:
     """Persist a parsed source; source-parsing failures are a synchronous 422."""
 
     try:
         created = await run_in_threadpool(lambda: scenes.create_scene(_store(request), input_obj))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return SceneCreated.model_validate(created)
+    return V2SceneCreated.model_validate(created)
 
 
 def _scene_http_error(exc: Exception) -> HTTPException:
@@ -88,7 +88,7 @@ def _scene_http_error(exc: Exception) -> HTTPException:
 # ------------------------------------------------------------------- uploads
 
 
-@router.post("/dxf_upload", response_model=SceneCreated)
+@router.post("/dxf_upload", response_model=V2SceneCreated)
 async def v2_create_scene_dxf(request: Request, file: UploadFile = File(...)):
     """Parse one DXF synchronously and create a ready reusable scene."""
 
@@ -96,7 +96,7 @@ async def v2_create_scene_dxf(request: Request, file: UploadFile = File(...)):
     return await _create_scene_response(request, input_obj)
 
 
-@router.post("/json_upload", response_model=SceneCreated)
+@router.post("/json_upload", response_model=V2SceneCreated)
 async def v2_create_scene_json(request: Request, polygons: list[FEPolygon]):
     """Create a ready scene from a bare ``FEPolygon[]`` JSON body."""
 
@@ -109,7 +109,7 @@ async def v2_create_scene_json(request: Request, polygons: list[FEPolygon]):
     return await _create_scene_response(request, input_obj)
 
 
-@router.post("/tables_upload", response_model=SceneCreated)
+@router.post("/tables_upload", response_model=V2SceneCreated)
 async def v2_create_scene_tables(request: Request,
     nodes_file: UploadFile = File(...),
     elements_file: UploadFile = File(...),
@@ -263,8 +263,8 @@ async def _task_view(request: Request, task: dict) -> JSONResponse:
     return JSONResponse(to_jsonable(body))
 
 
-@router.put("/tasks", response_model=TaskCreated)
-async def v2_create_task(request: Request, body: TaskCreate):
+@router.put("/tasks", response_model=V2TaskCreated)
+async def v2_create_task(request: Request, body: V2TaskCreate):
     """Create a whole-field optimisation task for the given N values."""
 
     await _ready_scene(request, body.scene_id)
@@ -274,7 +274,7 @@ async def v2_create_task(request: Request, body: TaskCreate):
         scene_id=body.scene_id, overlay_id=overlay_id, smooth=bool(body.smooth),
         config=body.config.model_dump(mode="python"), ns=ns,
     ))
-    return TaskCreated(task_id=task_id)
+    return V2TaskCreated(task_id=task_id)
 
 
 @router.get("/tasks/{task_id}", response_model=TaskView)
@@ -285,7 +285,7 @@ async def v2_get_task(request: Request, task_id: str):
 
 
 @router.put("/tasks/{task_id}/n", response_model=TaskView)
-async def v2_add_task_ns(request: Request, task_id: str, mutation: NMutation):
+async def v2_add_task_ns(request: Request, task_id: str, mutation: V2NMutation):
     """Add N values to an existing task."""
 
     task = await _task_or_404(request, task_id)
@@ -297,7 +297,7 @@ async def v2_add_task_ns(request: Request, task_id: str, mutation: NMutation):
 
 
 @router.put("/tasks/{task_id}/cancel", response_model=TaskView)
-async def v2_cancel_task(request: Request, task_id: str, mutation: CancelMutation | None = None):
+async def v2_cancel_task(request: Request, task_id: str, mutation: V2CancelMutation | None = None):
     """Cancel the listed N values, or the whole task when no N is given."""
 
     task = await _task_or_404(request, task_id)
