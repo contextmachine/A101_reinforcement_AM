@@ -807,7 +807,7 @@ async def append_overlays(task_id: str, mutations: list[OverlayEventMutation]):
 
 
 # ---------- component / solution API ----------
-@app.get("/v1/tasks/{task_id}/components")
+@app.get("/v1/tasks/{task_id}/components",deprecated=True)
 async def list_components(task_id: str, smooth: bool | None = Query(None), overlay: int | None = Query(None)):
     meta, variant, selected_smooth, selected_overlay = await _read_task_context(
         task_id, smooth=smooth, overlay=overlay
@@ -830,7 +830,7 @@ async def list_components(task_id: str, smooth: bool | None = Query(None), overl
     }))
 
 
-@app.get("/v1/tasks/{task_id}/components/{component_id}")
+@app.get("/v1/tasks/{task_id}/components/{component_id}",deprecated=True)
 async def get_component(task_id: str, component_id: int, smooth: bool | None = Query(None), overlay: int | None = Query(None)):
     meta, variant, selected_smooth, selected_overlay = await _read_task_context(
         task_id, smooth=smooth, overlay=overlay
@@ -874,7 +874,7 @@ async def get_component(task_id: str, component_id: int, smooth: bool | None = Q
     }))
 
 
-@app.post("/v1/tasks/{task_id}/components/{component_id}/n", status_code=202)
+@app.post("/v1/tasks/{task_id}/components/{component_id}/n", status_code=202,deprecated=True)
 async def schedule_component_n(task_id: str, component_id: int, body: ComponentNRequest, smooth: bool | None = Query(None), overlay: int | None = Query(None)):
     meta, variant, selected_smooth, selected_overlay = await _read_task_context(
         task_id, smooth=smooth, overlay=overlay
@@ -898,7 +898,7 @@ async def schedule_component_n(task_id: str, component_id: int, body: ComponentN
     }
 
 
-@app.get("/v1/tasks/{task_id}/components/{component_id}/results")
+@app.get("/v1/tasks/{task_id}/components/{component_id}/results",deprecated=True)
 async def list_component_results(task_id: str, component_id: int, smooth: bool | None = Query(None), overlay: int | None = Query(None)):
     meta, variant, selected_smooth, selected_overlay = await _read_task_context(
         task_id, smooth=smooth, overlay=overlay
@@ -929,7 +929,7 @@ async def list_component_results(task_id: str, component_id: int, smooth: bool |
     }
 
 
-@app.get("/v1/tasks/{task_id}/components/{component_id}/results/{n}")
+@app.get("/v1/tasks/{task_id}/components/{component_id}/results/{n}",deprecated=True)
 async def get_component_result(task_id: str, component_id: int, n: int, smooth: bool | None = Query(None), overlay: int | None = Query(None)):
     meta, variant, selected_smooth, selected_overlay = await _read_task_context(
         task_id, smooth=smooth, overlay=overlay
@@ -956,7 +956,7 @@ async def get_component_result(task_id: str, component_id: int, n: int, smooth: 
     return JSONResponse(public_value(body))
 
 
-@app.get("/v1/tasks/{task_id}/solutions")
+@app.get("/v1/tasks/{task_id}/solutions",deprecated=True)
 async def list_solutions(
     task_id: str,
     total_n: int | None = Query(None),
@@ -994,7 +994,7 @@ async def list_solutions(
     }
 
 
-@app.get("/v1/tasks/{task_id}/solutions/{solution_id}")
+@app.get("/v1/tasks/{task_id}/solutions/{solution_id}",deprecated=True)
 async def get_solution(task_id: str, solution_id: str, overlay: int | None = Query(None)):
     meta, variant, selected_smooth, selected_overlay = await _read_task_context(
         task_id, overlay=overlay
@@ -1032,7 +1032,7 @@ async def component_events(task_id: str, start: int = 0, overlay: int | None = Q
 
 
 # ---------- historical frontend-compatible result API ----------
-@app.get("/v1/tasks/{task_id}/results")
+@app.get("/v1/tasks/{task_id}/results",deprecated=True)
 async def list_results(task_id: str, smooth: bool | None = Query(None), overlay: int | None = Query(None)):
     meta = await run_in_threadpool(store.get_meta, task_id)
     if meta is None:
@@ -1070,7 +1070,7 @@ async def list_results(task_id: str, smooth: bool | None = Query(None), overlay:
     return JSONResponse(to_jsonable(enriched))
 
 
-@app.get("/v1/tasks/{task_id}/results/{n}")
+@app.get("/v1/tasks/{task_id}/results/{n}",deprecated=True)
 async def get_result(task_id: str, n: int, smooth: bool | None = Query(None), overlay: int | None = Query(None)):
     meta = await run_in_threadpool(store.get_meta, task_id)
     if meta is None:
@@ -1096,7 +1096,7 @@ async def get_result(task_id: str, n: int, smooth: bool | None = Query(None), ov
     return JSONResponse(to_jsonable(body))
 
 
-@app.get("/v1/tasks/{task_id}/results/{n}/dxf")
+@app.get("/v1/tasks/{task_id}/results/{n}/dxf",deprecated=True)
 async def get_result_dxf(task_id: str, n: int, smooth: bool | None = Query(None), overlay: int | None = Query(None)):
     meta = await run_in_threadpool(store.get_meta, task_id)
     if meta is None:
@@ -1140,7 +1140,7 @@ async def get_events(task_id: str, after: str = "0-0", count: int = 200, overlay
     )
 
 
-@app.post("/v1/tasks/{task_id}/n")
+@app.post("/v1/tasks/{task_id}/n",deprecated=True)
 async def add_n(task_id: str, mutation: NMutation, smooth: bool | None = Query(None), overlay: int | None = Query(None)):
     meta, variant, selected_smooth, selected_overlay = await _read_task_context(
         task_id, smooth=smooth, overlay=overlay
@@ -1188,7 +1188,7 @@ async def cancel(task_id: str, mutation: CancelMutation, smooth: bool | None = Q
     return await run_in_threadpool(store.snapshot, task_id)
 
 
-@app.post("/v1/tasks/{task_id}/pause")
+@app.post("/v1/tasks/{task_id}/pause",deprecated=True)
 async def pause_task(task_id: str):
     try:
         meta, variant, selected_smooth, selected_overlay = await _read_task_context(task_id)
@@ -1206,7 +1206,7 @@ async def pause_task(task_id: str):
         raise HTTPException(status_code=404, detail="Task not found") from exc
 
 
-@app.post("/v1/tasks/{task_id}/resume")
+@app.post("/v1/tasks/{task_id}/resume",deprecated=True)
 async def resume_task(task_id: str):
     try:
         meta, variant, selected_smooth, selected_overlay = await _read_task_context(task_id)
