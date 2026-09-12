@@ -8,9 +8,11 @@ rod is inserted into the widest gap of parallel rods crossing it.  The pass repe
 is short by more than ``tol_cm2_m`` (or no rod can be added), so the result is covering by the
 validator's own measure.
 
-The inserted rods are returned as extra one-bar ``additional`` zones (so the zone list stays a
-faithful description of the bars, and a second layout reproduces them) and as extra ``Bar``
-rows; ``mass_metrics.additional`` is increased by their mass.
+An inserted rod is a spacing shift inside the zone it was inserted into, like the 100/200
+alternation of a 150 mm zone on the 300 mm background: it carries that zone's ``zone_id`` and the
+zone list is returned unchanged (zones generate bars, never the other way round; the filler is
+part of the bar generation, so zones → bars is still deterministic).  ``mass_metrics.additional``
+is increased by the rods' mass.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from typing import Any, Mapping, Sequence
 from shapely.geometry import LineString, MultiLineString
 from shapely.ops import unary_union
 
-from .bars import _canonical_direction, _frame, physical_polygons, zone_to_box
+from .bars import _frame, physical_polygons, zone_to_box
 from .verification import bar_reach_mm, polygon_geometry, reinforcement_rows, wire_overlay_state
 
 
@@ -40,7 +42,6 @@ def fill_gaps(
     """Return a copy of ``layout_out`` (bars, zones, mass_metrics) with gap-filling rods added."""
     axis = "x" if str(axis).lower() == "x" else "y"
     cross, long = _frame(axis)
-    direction = _canonical_direction(axis)
     density = float(steel_density_kg_m3)
     bars = [dict(b) for b in layout_out.get("bars", []) or []]
     zones = [dict(z) for z in layout_out.get("zones", []) or []]
@@ -50,10 +51,9 @@ def fill_gaps(
         polygon_geometry(r) if wire_overlay_state(r.get("overlay_state")) != "empty" else None for r in resolved_rows
     ]
     additional_boxes = [
-        (zone_to_box(z, axis=axis)["bounds"], float(z["arm"]["d"]), float(z["arm"]["step"]), float(z["origin"][cross]))
+        (zone_to_box(z, axis=axis)["bounds"], float(z["arm"]["d"]), float(z["arm"]["step"]), float(z["origin"][cross]), int(z["id"]))
         for z in zones if z.get("kind") == "additional"
     ]
-    next_id = max([int(z["id"]) for z in zones] + [0]) + 1
     report: dict[str, Any] = {"passes": 0, "rods_added": 0, "added_kg": 0.0, "short_before": None, "short_after": None}
     for _pass in range(int(max_passes)):
         verification = reinforcement_rows(
@@ -79,16 +79,15 @@ def fill_gaps(
         if not new_rods:
             break
         added = 0
-        for c_pos, l_lo, l_hi, d in new_rods:
+        for c_pos, l_lo, l_hi, d, zone_id in new_rods:
             if report["rods_added"] >= max_rods:
                 break
             anchor = float(anchor_factor) * d
             # the rod runs the full length of the zone it belongs to (an infinite line clipped to the
             # zone box and the field); without a zone it spans the short elements only
-            for (bx0, by0, bx1, by1), zd, _zs, _zo in additional_boxes:
+            for (bx0, by0, bx1, by1), zd, _zs, _zo, zid in additional_boxes:
                 lo_b, hi_b = (bx0, bx1) if long == 0 else (by0, by1)
-                c_lo_b, c_hi_b = (by0, by1) if long == 0 else (bx0, bx1)
-                if zd == d and c_lo_b - 1.0 <= c_pos <= c_hi_b + 1.0 and lo_b <= l_hi and hi_b >= l_lo:
+                if zid == zone_id and lo_b <= l_hi and hi_b >= l_lo:
                     l_lo, l_hi = min(l_lo, lo_b), max(l_hi, hi_b)
             c_pos = _clear_position(c_pos, d, bars, l_lo, l_hi, cross, long)
             if c_pos is None:
@@ -101,13 +100,8 @@ def fill_gaps(
                 start[cross] = end[cross] = c_pos
                 start[long], end[long] = s_lo, s_hi
                 length = s_hi - s_lo
-                bars.append({"zone_id": next_id, "start": start, "end": end, "d": d,
+                bars.append({"zone_id": int(zone_id), "start": start, "end": end, "d": d,
                              "anchorage": {"start": anchor, "end": anchor}})
-                origin = list(start) if _bar_sign(direction, long) > 0 else list(end)
-                zones.append({"id": next_id, "kind": "additional", "arm": {"d": d, "step": 100.0}, "left": 0, "right": 0,
-                              "length": float(length), "anchorage": {"start": anchor, "end": anchor},
-                              "origin": [float(origin[0]), float(origin[1])],
-                              "direction": [float(direction[0]), float(direction[1])]})
                 unit = density * pi * (d / 2.0) ** 2 * 1e-9  # kg per mm
                 add = metrics.setdefault("additional", {})
                 add["without_anchorage_kg"] = add.get("without_anchorage_kg", 0.0) + unit * length
@@ -116,7 +110,6 @@ def fill_gaps(
                 add["with_anchorage_unclipped_kg"] = add.get("with_anchorage_unclipped_kg", 0.0) + unit * (length + 2 * anchor)
                 report["added_kg"] += unit * (length + 2 * anchor)
                 report["rods_added"] += 1
-                next_id += 1
                 added += 1
         if added == 0:
             break
@@ -126,14 +119,8 @@ def fill_gaps(
     report["short_after"] = {"polygons": sum(1 for s in residual if s > tol_cm2_m), "worst_cm2_m": round(max(residual, default=0.0), 2)}
     report["added_kg"] = round(report["added_kg"], 1)
     out = dict(layout_out)
-    out.update({"bars": bars, "zones": zones, "mass_metrics": metrics, "repair": report})
+    out.update({"bars": bars, "zones": zones, "mass_metrics": metrics, "repair": report})  # zones unchanged
     return out
-
-
-def _bar_sign(direction: Sequence[float], long: int) -> float:
-    # the bar runs 90° counter-clockwise from ``direction``
-    bar = (-direction[1], direction[0])
-    return 1.0 if bar[long] >= 0 else -1.0
 
 
 def _propose_rod(polygon, bars, additional_boxes, *, axis: str, cover_mm: float):
@@ -150,10 +137,11 @@ def _propose_rod(polygon, bars, additional_boxes, *, axis: str, cover_mm: float)
     # diameter: the additional zone under the polygon, else the largest additional rod nearby, else nothing to do
     d = None
     grid = None  # (origin, step) of the strongest additional zone under the polygon
-    for (bx0, by0, bx1, by1), zd, zstep, zorigin in additional_boxes:
+    zone_id = None
+    for (bx0, by0, bx1, by1), zd, zstep, zorigin, zid in additional_boxes:
         if bx0 - 1.0 <= cpt[0] <= bx1 + 1.0 and by0 - 1.0 <= cpt[1] <= by1 + 1.0:
             if d is None or zd > d:
-                d, grid = zd, (zorigin, zstep)
+                d, grid, zone_id = zd, (zorigin, zstep), zid
     # parallel rods crossing the polygon's longitudinal span, by cross position
     rods = []
     for b in bars:
@@ -167,10 +155,10 @@ def _propose_rod(polygon, bars, additional_boxes, *, axis: str, cover_mm: float)
             continue
         rods.append((pos, float(b["d"]), int(b.get("zone_id", 0))))
     if d is None:
-        add_ds = [rd for _, rd, zid in rods if zid != 0]
-        if not add_ds:
+        strongest = max(((rd, zid) for _, rd, zid in rods if zid != 0), default=None)
+        if strongest is None:
             return None
-        d = max(add_ds)
+        d, zone_id = strongest
     rods.sort()
     # candidate gaps are measured between rods at least as strong as the zone: a thin background
     # bar inside a ø25 zone does not fill the zone's gap
@@ -198,7 +186,7 @@ def _propose_rod(polygon, bars, additional_boxes, *, axis: str, cover_mm: float)
         candidate = origin + k * step
         if a + d <= candidate <= b - d:
             position = candidate
-    return (position, l_lo, l_hi, d)
+    return (position, l_lo, l_hi, d, int(zone_id))
 
 
 def _clear_position(position, d, bars, l_lo, l_hi, cross, long):
@@ -228,13 +216,13 @@ def _clear_position(position, d, bars, l_lo, l_hi, cross, long):
 def _merge_proposals(proposals, *, cross: int, long: int):
     """Merge proposals that share a cross position (within a diameter) and overlap/touch along the bars."""
     merged = []
-    for c_pos, l_lo, l_hi, d in sorted(proposals):
+    for c_pos, l_lo, l_hi, d, zone_id in sorted(proposals):
         for m in merged:
             if abs(m[0] - c_pos) <= max(d, m[3]) and l_lo <= m[2] + 2 * 40 * d and l_hi >= m[1] - 2 * 40 * d:
                 m[1], m[2], m[3] = min(m[1], l_lo), max(m[2], l_hi), max(m[3], d)
                 break
         else:
-            merged.append([c_pos, l_lo, l_hi, d])
+            merged.append([c_pos, l_lo, l_hi, d, zone_id])
     return [tuple(m) for m in merged]
 
 

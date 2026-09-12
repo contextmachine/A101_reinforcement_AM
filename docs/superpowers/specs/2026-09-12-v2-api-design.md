@@ -132,7 +132,7 @@ horizontal bars use `direction=(0,-1)` and the origin is the start of the base b
   (`_shift_zones_off_background`), so its step stays uniform; only residual collisions are
   repaired bar by bar.
 * Zones are the source of the bars and are never re-derived from them: the `zones` of a bars /
-  task result are the input zones, normalised (plus one-bar zones for gap-filling rods). Overlaying
+  task result are the input zones, normalised (gap-filling rods carry their zone's id). Overlaying
   a zone on the background grid legitimately shifts individual bars (a 150 mm step on a 300 mm
   background reads 100/200/100/200; a bar sharing a guide with a background bar moves by the
   clearance) and those shifts do not propagate back, so zones → bars → zones is stable.
@@ -148,9 +148,11 @@ and `/v2/verification` check every polygon with the verification model of §6 an
 short by more than 0.5 cm²/m, insert one rod (diameter of the additional zone under the polygon)
 into the widest gap of parallel rods crossing it, merged along the bars for neighbouring short
 elements, clipped to the field, with `anchor_factor·d` anchorage; the pass repeats until nothing
-is short. Inserted rods are returned as one-bar `additional` zones and counted in
-`mass_metrics.additional`; the `repair` field of the result reports `passes`, `rods_added`,
-`added_kg`, `short_before`, `short_after`.
+is short. An inserted rod is a spacing shift inside the zone it was inserted into (like the
+100/200 alternation of a 150 mm zone on the 300 mm background): it carries that zone's `zone_id`,
+the zone list is returned unchanged, and the rod is counted in `mass_metrics.additional`; the
+`repair` field of the result reports `passes`, `rods_added`, `added_kg`, `short_before`,
+`short_after`.
 
 ## 6. Verification
 

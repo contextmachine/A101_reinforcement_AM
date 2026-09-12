@@ -67,9 +67,8 @@ def test_missing_bar_gap_is_closed_with_one_rod():
     assert rod["d"] == 25.0 and abs(rod["start"][0] - 1550.0) < 26.0  # middle of the 200 mm gap
     assert rod["anchorage"] == {"start": 1000.0, "end": 1000.0}
     assert rod["start"][1] >= 0.0 and rod["end"][1] <= FIELD  # clipped to the field
-    zone = fixed["zones"][-1]
-    assert zone["kind"] == "additional" and zone["left"] == zone["right"] == 0 and zone["arm"]["d"] == 25.0
-    assert zone["id"] not in {z["id"] for z in out["zones"]}
+    assert rod["zone_id"] == 1  # a spacing shift inside the zone it was inserted into
+    assert fixed["zones"] == out["zones"]  # zones are never modified by the filler
     added = fixed["mass_metrics"]["additional"]["with_anchorage_kg"] - out["mass_metrics"]["additional"]["with_anchorage_kg"]
     assert added == pytest.approx(RHO * pi * 12.5 ** 2 * 1e-9 * (rod["end"][1] - rod["start"][1] + 2000.0), rel=1e-6)
     assert fixed["repair"]["short_after"]["polygons"] == 0
