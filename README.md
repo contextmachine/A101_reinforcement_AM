@@ -216,6 +216,13 @@ GET  /v1/tasks/{task_id}/solutions/{solution_id}
 
 ## API v2 (whole-field)
 
+Large v2 artifacts (the prepared problem, per-N solver and fit rows) are written to `REBAR_ARTIFACT_DIR`
+(`/app/artifacts`, a second subPath of the csi-s3 PVC mounted in every solver worker) with a per-pod cache in
+`REBAR_ARTIFACT_CACHE_DIR`; Postgres keeps only a reference row. Leave `REBAR_ARTIFACT_DIR` empty to store
+them inline in Postgres (only sensible for small scenes). `REBAR_HIGHS_OPTIONS` (a JSON object) adds HiGHS
+options to every solving stage, for example `{"presolve": "off"}`.
+
+
 `/v2` — минималистичный контракт (`payload-v2-am-aa.md`): поле считается целиком, без
 компонент; геометрия зон и стержней хранится и передаётся **без анкеровки** (анкеровка —
 числа `anchorage.{start,end}` на каждой зоне/стержне, по умолчанию `anchor_factor * d`).

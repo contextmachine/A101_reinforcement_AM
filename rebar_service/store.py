@@ -18,7 +18,15 @@ class Store(PostgresStore):
         self.bars_queue = RedisQueue(settings, names=QueueNames.bars(settings))
         self.verification_queue = RedisQueue(settings, names=QueueNames.verification(settings))
         # /v2 tables (v2_tasks, v2_task_ns, v2_artifacts, v2_bar_tasks, v2_verification_tasks).
-        self.v2 = V2Store(self.database)
+        backend = None
+        if settings.artifact_path is not None:
+            from .v2.artifacts import FileArtifactBackend
+
+            backend = FileArtifactBackend(
+                settings.artifact_path, settings.artifact_cache_path,
+                cache_ttl_seconds=float(settings.artifact_cache_ttl_seconds),
+            )
+        self.v2 = V2Store(self.database, artifact_backend=backend)
 
     @property
     def redis(self):

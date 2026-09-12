@@ -39,6 +39,11 @@ data:
   REBAR_FIT_MILP_BACKEND: auto
   REBAR_FIT_TIME_LIMIT: 'none'
   REBAR_SOLVER_LOG_DIR: /app/logs
+  # Large v2 artifacts on the shared csi-s3 volume (workers mount it at /app/artifacts).
+  REBAR_ARTIFACT_DIR: /app/artifacts
+  REBAR_ARTIFACT_CACHE_DIR: /tmp/rebar-cache/artifacts
+  # Extra HiGHS options for the solving stage as a JSON object, e.g. '{"presolve": "off"}'.
+  REBAR_HIGHS_OPTIONS: '{}'
   REBAR_CORS_ORIGINS: '*'
   REBAR_SCHEDULER_BATCH_SIZE: '256'
   REBAR_COMBINE_BATCH_SIZE: '256'

@@ -348,7 +348,8 @@ class V2Pipeline:
                 solver_time_limit=self._solver_time_limit(task),
                 threads=int(self.settings.solver_threads), backend=str(self.settings.solver_backend),
                 require_optimal=bool(self.settings.require_optimal), return_best_on_timeout=True,
-                raise_errors=True, highs_options=highs_log_options(log_file),
+                raise_errors=True,
+                highs_options={**self.settings.highs_option_overrides, **highs_log_options(log_file)},
             )
         except Exception as exc:  # noqa: BLE001 - keep the subprocess failure reason (e.g. OOM kill)
             if self._cancelled(task_id, n):

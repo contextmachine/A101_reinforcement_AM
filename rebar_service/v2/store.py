@@ -48,8 +48,10 @@ def _jsonb(value: Any) -> str | None:
 class V2Store:
     """Durable storage for v2 tasks, per-N rows, artifacts and worker tasks."""
 
-    def __init__(self, database: Database):
+    def __init__(self, database: Database, *, artifact_backend: Any = None):
         self.database = database
+        # Optional FileArtifactBackend: bytes go to a shared directory, Postgres keeps a reference.
+        self.artifact_backend = artifact_backend
 
     # ---------- connection helpers ----------
     @contextmanager
@@ -365,9 +367,26 @@ class V2Store:
         return bool(row["cancelled"]) if row is not None else False
 
     # ---------- artifacts ----------
+    FILE_CODEC = "fileref"
+
+    def inline_artifact_keys(self, *, conn: Any = None) -> list[tuple[str, str]]:
+        """(task_id, key) of artifacts still stored as bytea rows, largest first."""
+        with self._read(conn) as connection:
+            rows = connection.execute(
+                text(
+                    "SELECT task_id, key FROM v2_artifacts WHERE codec <> :codec "
+                    "ORDER BY pg_column_size(payload) DESC"
+                ),
+                {"codec": self.FILE_CODEC},
+            ).mappings().all()
+        return [(str(row["task_id"]), str(row["key"])) for row in rows]
+
     def save_artifact(self, task_id: str, key: str, value: Any, *, conn: Any = None) -> None:
         payload, codec = encode_object(value)
         digest = sha256(payload)
+        if self.artifact_backend is not None:
+            relative = self.artifact_backend.write(task_id, str(key), payload)
+            payload, codec = relative.encode("utf-8"), self.FILE_CODEC
         with self._write(conn) as connection:
             connection.execute(
                 text(
@@ -385,22 +404,31 @@ class V2Store:
     def load_artifact(self, task_id: str, key: str, *, conn: Any = None) -> Any | None:
         with self._read(conn) as connection:
             row = connection.execute(
-                text("SELECT payload, sha256 FROM v2_artifacts WHERE task_id=:task_id AND key=:key"),
+                text("SELECT codec, payload, sha256 FROM v2_artifacts WHERE task_id=:task_id AND key=:key"),
                 {"task_id": task_id, "key": str(key)},
             ).mappings().first()
         if row is None:
             return None
         payload = bytes(row["payload"])
-        if sha256(payload) != str(row["sha256"]):
+        if str(row["codec"]) == self.FILE_CODEC:
+            if self.artifact_backend is None:
+                raise IOError(f"артефакт {key} хранится в файле, но REBAR_ARTIFACT_DIR не задан")
+            payload = self.artifact_backend.read(payload.decode("utf-8"), str(row["sha256"]))
+        elif sha256(payload) != str(row["sha256"]):
             raise IOError(f"артефакт {key} повреждён")
         return decode_object(payload)
 
     def delete_artifact(self, task_id: str, key: str, *, conn: Any = None) -> None:
         with self._write(conn) as connection:
-            connection.execute(
-                text("DELETE FROM v2_artifacts WHERE task_id=:task_id AND key=:key"),
+            row = connection.execute(
+                text(
+                    "DELETE FROM v2_artifacts WHERE task_id=:task_id AND key=:key "
+                    "RETURNING codec, payload, sha256"
+                ),
                 {"task_id": task_id, "key": str(key)},
-            )
+            ).mappings().first()
+        if row is not None and str(row["codec"]) == self.FILE_CODEC and self.artifact_backend is not None:
+            self.artifact_backend.delete(bytes(row["payload"]).decode("utf-8"), str(row["sha256"]))
 
     # ---------- isolated worker tasks ----------
     def _create_worker_task(

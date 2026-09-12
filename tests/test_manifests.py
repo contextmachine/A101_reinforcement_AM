@@ -176,6 +176,8 @@ def test_solver_log_pvc_is_declared_in_base_and_mounted_only_by_the_main_worker(
     assert len(mounts) == 1
     assert mounts[0]["subPath"] == "rebar-optimizer/logs"
     assert mounts[0]["name"] == "solver-logs"
+    artifacts = [m for m in container["volumeMounts"] if m["mountPath"] == "/app/artifacts"]
+    assert artifacts and artifacts[0]["name"] == "solver-logs" and artifacts[0]["subPath"] == "rebar-optimizer/artifacts"
     volumes = {v["name"]: v for v in pod["volumes"]}
     assert volumes["solver-logs"]["persistentVolumeClaim"]["claimName"] == "rebar-solver-logs"
 

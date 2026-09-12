@@ -78,6 +78,14 @@ class Settings(BaseSettings):
     # Directory that receives HiGHS logs as {task_id}/{n}/{worker-id}.log.
     # Empty string means ``<app-directory>/logs``.
     solver_log_dir: str = ""
+    # Large v2 artifacts (prepared problem, solver/fit rows) live here when set (shared RWX
+    # volume mounted in every solver worker); empty keeps them as bytea rows in Postgres.
+    artifact_dir: str = ""
+    # Per-pod read cache for file artifacts; empty -> <tempdir>/rebar-artifact-cache.
+    artifact_cache_dir: str = ""
+    artifact_cache_ttl_seconds: float = 43200.0
+    # JSON object of extra HiGHS options for the solving stage, e.g. {"presolve": "off"}.
+    highs_options: str = ""
 
     grid_size: float = 300.0
     fill_notches: float = 1000.0
@@ -124,6 +132,32 @@ class Settings(BaseSettings):
         if self.cors_origins.strip() == "*":
             return ["*"]
         return [x.strip() for x in self.cors_origins.split(",") if x.strip()]
+
+    @property
+    def artifact_path(self) -> Path | None:
+        value = (self.artifact_dir or "").strip()
+        return Path(value) if value else None
+
+    @property
+    def artifact_cache_path(self) -> Path:
+        value = (self.artifact_cache_dir or "").strip()
+        if value:
+            return Path(value)
+        import tempfile
+
+        return Path(tempfile.gettempdir()) / "rebar-artifact-cache"
+
+    @property
+    def highs_option_overrides(self) -> dict:
+        raw = (self.highs_options or "").strip()
+        if not raw:
+            return {}
+        import json
+
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise ValueError("REBAR_HIGHS_OPTIONS должен быть JSON-объектом")
+        return {str(k): v for k, v in parsed.items()}
 
     @property
     def solver_log_path(self) -> Path:

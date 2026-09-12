@@ -89,6 +89,9 @@ spec:
             - name: solver-logs
               mountPath: /app/logs
               subPath: rebar-optimizer/logs
+            - name: solver-logs
+              mountPath: /app/artifacts
+              subPath: rebar-optimizer/artifacts
       volumes:
         - name: tmp
           emptyDir: {}

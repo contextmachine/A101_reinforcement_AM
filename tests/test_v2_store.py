@@ -343,15 +343,15 @@ def test_artifacts_round_trip_through_the_codec_with_a_sha256_guard():
     assert params["sha256"] == sha256(params["payload"])
     assert params["codec"].startswith("pickle+")
 
-    loader, _ = _store([("SELECT payload, sha256 FROM v2_artifacts",
-                         _Result([{"payload": params["payload"], "sha256": params["sha256"]}]))])
+    loader, _ = _store([("SELECT codec, payload, sha256 FROM v2_artifacts",
+                         _Result([{"codec": params["codec"], "payload": params["payload"], "sha256": params["sha256"]}]))])
     assert loader.load_artifact("task1", "field") == value
 
 
 def test_load_artifact_rejects_a_corrupted_payload():
     payload, _ = encode_object({"a": 1})
-    store, _ = _store([("SELECT payload, sha256 FROM v2_artifacts",
-                        _Result([{"payload": payload, "sha256": "0" * 64}]))])
+    store, _ = _store([("SELECT codec, payload, sha256 FROM v2_artifacts",
+                        _Result([{"codec": "pickle+zlib", "payload": payload, "sha256": "0" * 64}]))])
     with pytest.raises(IOError):
         store.load_artifact("task1", "problem")
 
@@ -516,3 +516,54 @@ def test_memory_store_keeps_artifacts_and_worker_tasks():
     store.set_verification_task("v", state="error", error="boom")
     assert store.get_verification_task("v")["error"] == "boom"
     assert store.get_verification_task("missing") is None
+
+
+def test_file_backed_artifacts_keep_only_a_reference_row(tmp_path):
+    from rebar_service.v2.artifacts import FileArtifactBackend
+
+    backend = FileArtifactBackend(tmp_path / "shared", tmp_path / "cache")
+    store, database = _store([])
+    store.artifact_backend = backend
+    value = {"matrix": [[1, 2], [3, 4]]}
+    store.save_artifact("task1", "problem", value)
+    sql, params = database.matching("INSERT INTO v2_artifacts")[0]
+    assert params["codec"] == "fileref" and params["payload"] == b"task1/problem.bin"
+    raw = (tmp_path / "shared" / "task1" / "problem.bin").read_bytes()
+    assert params["sha256"] == sha256(raw)
+
+    loader, _ = _store([("SELECT codec, payload, sha256 FROM v2_artifacts",
+                         _Result([{"codec": "fileref", "payload": b"task1/problem.bin", "sha256": params["sha256"]}]))])
+    loader.artifact_backend = backend
+    assert loader.load_artifact("task1", "problem") == value
+
+    deleter, _ = _store([("DELETE FROM v2_artifacts",
+                          _Result([{"codec": "fileref", "payload": b"task1/problem.bin", "sha256": params["sha256"]}]))])
+    deleter.artifact_backend = backend
+    deleter.delete_artifact("task1", "problem")
+    assert not (tmp_path / "shared" / "task1" / "problem.bin").exists()
+
+    without_backend, _ = _store([("SELECT codec, payload, sha256 FROM v2_artifacts",
+                                  _Result([{"codec": "fileref", "payload": b"task1/problem.bin", "sha256": "x"}]))])
+    with pytest.raises(IOError):
+        without_backend.load_artifact("task1", "problem")
+
+
+def test_migration_moves_inline_artifacts_to_files_one_at_a_time(tmp_path):
+    from rebar_service.codec import encode_object
+    from rebar_service.v2.artifacts import FileArtifactBackend
+    from rebar_service.v2.artifacts_migrate import migrate_inline_artifacts
+
+    payload, codec = encode_object({"big": list(range(100))})
+    store, database = _store([
+        ("SELECT task_id, key FROM v2_artifacts WHERE codec", _Result([{"task_id": "t1", "key": "problem"}])),
+        ("SELECT codec, payload, sha256 FROM v2_artifacts",
+         _Result([{"codec": codec, "payload": payload, "sha256": sha256(payload)}])),
+    ])
+    store.artifact_backend = FileArtifactBackend(tmp_path / "shared", None)
+    assert migrate_inline_artifacts(store, log=lambda _: None) == 1
+    sql, params = database.matching("INSERT INTO v2_artifacts")[0]
+    assert params["codec"] == "fileref" and params["payload"] == b"t1/problem.bin"
+    assert (tmp_path / "shared" / "t1" / "problem.bin").exists()
+
+    with pytest.raises(RuntimeError):
+        migrate_inline_artifacts(_store([])[0])
