@@ -29,7 +29,7 @@ spec:
             key: workload
             operator: Equal
             value: heavy-jobs
-        terminationGracePeriodSeconds: 1800
+        terminationGracePeriodSeconds: 120
         securityContext:
           runAsNonRoot: true
           runAsUser: 10001
