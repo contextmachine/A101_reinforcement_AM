@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 from urllib.parse import quote
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -33,6 +33,22 @@ from .models import (
     TaskCreated,
     TaskParameters,
     WsCommand,
+    V2TaskStart,
+    V2NMutation,
+    V2SourcePolygon,
+    V2OverlayRequest,
+    V2BarsRequest,
+    V2VerificationRequest,
+    V2TaskCreatedResponse,
+    V2TaskResponse,
+    V2TaskDetailResponse,
+    V2BarsCreatedResponse,
+    V2BarsResultResponse,
+    V2VerificationCreatedResponse,
+    V2VerificationResultResponse,
+    V2ScenePolygonResponse,
+    V2OverlayCreatedResponse,
+    V2OverlayResponse,
 )
 from .pipeline import (
     AnalysisNotPreparedError,
@@ -50,11 +66,14 @@ from .source_polygons import (
     source_polygons_from_input,
 )
 from .store import Store
+from .v2_jobs import V2Job
+from .v2_pipeline import V2Pipeline
 
 
 settings = get_settings()
 store = Store(settings)
 workflow = PipelineWorkflow(store, settings)
+v2_workflow = V2Pipeline(store, settings)
 
 
 @asynccontextmanager
@@ -88,7 +107,7 @@ def _build_task(
     validate_n_request_limits(
         parameters.n,
         max_values=settings.max_planned_n_values,
-        max_n=min(int(settings.max_n_value), 250),
+        max_n=min(int(settings.max_n_value), int(settings.legacy_task_request_max_n)),
     )
     validate_solver_limits(
         parameters.solver.model_dump(mode="python"),
@@ -113,7 +132,7 @@ def _build_task(
     ):
         params.pop(control_key, None)
     prepared_max_n = params.get("solver", {}).get("prepared_max_n")
-    hard_max_n = min(int(settings.max_n_value), 100)
+    hard_max_n = min(int(settings.max_n_value), int(settings.legacy_prepared_max_n_override))
     if prepared_max_n is not None and int(prepared_max_n) > hard_max_n:
         raise ValueError(
             f"prepared_max_n={prepared_max_n} превышает лимит одного solver-запуска {hard_max_n}"
@@ -333,6 +352,205 @@ def _apply_upload_overrides(
     return TaskParameters.model_validate({**parameters.model_dump(mode="python"), **updates})
 
 
+
+def _v2_summary_row(row: dict) -> dict:
+    out = {"n": int(row["n"]), "state": str(row["state"])}
+    for key in ("fun", "mass_kg", "mass_bg_kg", "status"):
+        if row.get(key) is not None:
+            out[key] = row[key]
+    return out
+
+
+def _v2_detail_row(task_id: str, row: dict) -> dict:
+    out = {"task_id": task_id, "n": int(row["n"]), "state": str(row["state"])}
+    for key in ("fun", "mass_kg", "mass_bg_kg", "status"):
+        if row.get(key) is not None:
+            out[key] = row[key]
+    result = row.get("result")
+    if isinstance(result, dict):
+        for key, value in result.items():
+            if key not in {"task_id", "attempt", "state", "status", "fun", "mass_kg", "mass_bg_kg"}:
+                out[key] = value
+    if row.get("error") is not None:
+        out["error"] = row["error"]
+    return out
+
+
+@app.put("/v2/tasks", response_model=V2TaskCreatedResponse)
+async def start_v2_task(request: V2TaskStart):
+    scene = await run_in_threadpool(store.get_scene, request.scene_id)
+    if scene is None:
+        raise HTTPException(status_code=404, detail="Scene not found")
+    if str(scene.get("state")) != "ready":
+        raise HTTPException(status_code=409, detail="Scene is not ready")
+    if any(int(n) > settings.effective_solver_max_n() for n in request.n):
+        raise HTTPException(status_code=422, detail=f"N exceeds server solver limit {settings.effective_solver_max_n()}")
+    try:
+        settings.effective_solver_time_limit(request.config.solver.solver_time_limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        overlay_id = await run_in_threadpool(
+            lambda: store.resolve_scene_overlay_id(request.scene_id, request.overlay_id)
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    task_id = uuid.uuid4().hex
+    await run_in_threadpool(
+        lambda: store.create_v2_task(
+            task_id,
+            scene_id=request.scene_id,
+            overlay_id=int(overlay_id),
+            smooth=bool(request.smooth),
+            config=request.config.model_dump(mode="python"),
+            ns=request.n,
+        )
+    )
+    await run_in_threadpool(
+        lambda: store.enqueue_v2_job(V2Job(stage="preparing", kind="prepare", task_id=task_id).to_dict())
+    )
+    return {"task_id": task_id}
+
+
+@app.put("/v2/tasks/{task_id}/n")
+async def add_v2_task_n(task_id: str, request: V2NMutation):
+    if request.task_id is not None and request.task_id != task_id:
+        raise HTTPException(status_code=422, detail="task_id in body must match path")
+    if any(int(n) > settings.effective_solver_max_n() for n in request.n):
+        raise HTTPException(status_code=422, detail=f"N exceeds server solver limit {settings.effective_solver_max_n()}")
+    task = await run_in_threadpool(store.get_v2_task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    result = await run_in_threadpool(lambda: store.add_v2_ns(task_id, request.n))
+    if str(task.get("preparation_state")) == "success":
+        await run_in_threadpool(v2_workflow.schedule_ready_n, task_id)
+    return {"task_id": task_id, **result}
+
+
+@app.put("/v2/tasks/{task_id}/cancel")
+async def cancel_v2_task_n(task_id: str, request: V2NMutation):
+    if request.task_id is not None and request.task_id != task_id:
+        raise HTTPException(status_code=422, detail="task_id in body must match path")
+    if await run_in_threadpool(store.get_v2_task, task_id) is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    cancelled = await run_in_threadpool(lambda: store.cancel_v2_ns(task_id, request.n))
+    return {"task_id": task_id, "n": cancelled}
+
+
+@app.get("/v2/tasks/{task_id}", response_model=V2TaskResponse, response_model_exclude_none=True)
+async def get_v2_task(task_id: str):
+    task = await run_in_threadpool(store.get_v2_task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {
+        "task_id": task_id,
+        "scene_id": task["scene_id"],
+        "smooth": bool(task.get("smooth", False)),
+        "overlay_id": int(task.get("overlay_id", 0)),
+        "solutions": [_v2_summary_row(dict(row)) for row in task.get("solutions", [])],
+    }
+
+
+@app.get("/v2/tasks/{task_id}/{n}", response_model=V2TaskDetailResponse, response_model_exclude_none=True, response_model_exclude_defaults=True)
+async def get_v2_task_n(task_id: str, n: int):
+    if await run_in_threadpool(store.get_v2_task, task_id) is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    row = await run_in_threadpool(lambda: store.get_v2_n(task_id, int(n)))
+    if row is None:
+        raise HTTPException(status_code=404, detail="N not found")
+    return _v2_detail_row(task_id, dict(row))
+
+
+@app.post("/v2/bars", response_model=V2BarsCreatedResponse)
+async def start_v2_bars(request: V2BarsRequest):
+    scene = await run_in_threadpool(store.get_scene, request.scene_id)
+    if scene is None:
+        raise HTTPException(status_code=404, detail="Scene not found")
+    if str(scene.get("state")) != "ready":
+        raise HTTPException(status_code=409, detail="Scene is not ready")
+    try:
+        overlay_id = await run_in_threadpool(
+            lambda: store.resolve_scene_overlay_id(request.scene_id, request.overlay_id)
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    request_id = uuid.uuid4().hex
+    created = await run_in_threadpool(
+        lambda: store.create_v2_request(
+            "bars", request_id, scene_id=request.scene_id, overlay_id=int(overlay_id),
+            smooth=bool(request.smooth), config=request.config.model_dump(mode="python"),
+            zones=[row.model_dump(mode="python") for row in request.zones],
+        )
+    )
+    await run_in_threadpool(
+        lambda: store.enqueue_v2_job(V2Job(
+            stage="baring", kind="bars_request", task_id=request_id, request_id=request_id
+        ).to_dict())
+    )
+    return {"bars_id": request_id, "state": str(created.get("state", "pending"))}
+
+
+@app.get("/v2/bars/{bars_id}", response_model=V2BarsResultResponse, response_model_exclude_none=True, response_model_exclude_defaults=True)
+async def get_v2_bars(bars_id: str):
+    row = await run_in_threadpool(lambda: store.get_v2_request("bars", bars_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Bars request not found")
+    out = {"bars_id": bars_id, "state": str(row["state"])}
+    if isinstance(row.get("result"), dict):
+        out.update(row["result"])
+    if row.get("error") is not None:
+        out["error"] = row["error"]
+    return out
+
+
+@app.post("/v2/verification", response_model=V2VerificationCreatedResponse)
+async def start_v2_verification(request: V2VerificationRequest):
+    scene = await run_in_threadpool(store.get_scene, request.scene_id)
+    if scene is None:
+        raise HTTPException(status_code=404, detail="Scene not found")
+    if str(scene.get("state")) != "ready":
+        raise HTTPException(status_code=409, detail="Scene is not ready")
+    try:
+        overlay_id = await run_in_threadpool(
+            lambda: store.resolve_scene_overlay_id(request.scene_id, request.overlay_id)
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    request_id = uuid.uuid4().hex
+    created = await run_in_threadpool(
+        lambda: store.create_v2_request(
+            "verification", request_id, scene_id=request.scene_id, overlay_id=int(overlay_id),
+            smooth=bool(request.smooth), config=request.config.model_dump(mode="python"),
+            zones=[row.model_dump(mode="python") for row in request.zones],
+        )
+    )
+    await run_in_threadpool(
+        lambda: store.enqueue_v2_job(V2Job(
+            stage="validation", kind="verification", task_id=request_id, request_id=request_id
+        ).to_dict())
+    )
+    return {"verification_id": request_id, "state": str(created.get("state", "pending"))}
+
+
+@app.get("/v2/verification/{verification_id}", response_model=V2VerificationResultResponse, response_model_exclude_none=True)
+async def get_v2_verification(verification_id: str):
+    row = await run_in_threadpool(lambda: store.get_v2_request("verification", verification_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Verification request not found")
+    out = {"verification_id": verification_id, "state": str(row["state"])}
+    if row.get("result") is not None:
+        out["result"] = row["result"]
+    if row.get("error") is not None:
+        out["error"] = row["error"]
+    return out
+
+
 @app.get("/health/live")
 def live():
     return {"status": "ok"}
@@ -345,6 +563,138 @@ def ready():
         return {"status": "ready"}
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/v2/dxf_upload", response_model=SceneCreated)
+async def v2_create_scene_dxf_upload(file: UploadFile = File(...)):
+    input_obj = await _read_upload_input(file, dxf_only=True)
+    return await _create_scene_response(input_obj)
+
+
+@app.post("/v2/json_upload", response_model=SceneCreated)
+async def v2_create_scene_json_upload(
+    polygons: list[V2SourcePolygon] = Body(...),
+):
+    input_obj = {
+        "kind": "polygons",
+        "units": "mm",
+        "polygons": [row.model_dump(mode="python", exclude_none=True) for row in polygons],
+    }
+    return await _create_scene_response(input_obj)
+
+
+@app.post("/v2/tables_upload", response_model=SceneCreated)
+async def v2_create_scene_tables_upload(
+    nodes_file: UploadFile = File(...),
+    elements_file: UploadFile = File(...),
+    loads_file: UploadFile = File(...),
+    load_column: Annotated[int, Form(ge=1, le=4)] = 1,
+):
+    nodes_content, elements_content, loads_content = await asyncio.gather(
+        _read_xlsx_file(nodes_file, label="nodes_file"),
+        _read_xlsx_file(elements_file, label="elements_file"),
+        _read_xlsx_file(loads_file, label="loads_file"),
+    )
+    bundle = await run_in_threadpool(
+        pack_xlsx_tables_bundle, nodes_content, elements_content, loads_content
+    )
+    input_obj = {
+        "kind": "xlsx_tables",
+        "filename": "tables.zip",
+        "content": bundle,
+        "load_column": int(load_column),
+        "nodes_filename": nodes_file.filename or "nodes.xlsx",
+        "elements_filename": elements_file.filename or "elements.xlsx",
+        "loads_filename": loads_file.filename or "loads.xlsx",
+    }
+    return await _create_scene_response(input_obj)
+
+
+@app.get("/v2/scenes/{scene_id}/polygons", response_model=list[V2ScenePolygonResponse], response_model_exclude_none=True)
+async def v2_scene_polygons(
+    scene_id: str,
+    smooth: bool = Query(False),
+    overlay_id: int = Query(0),
+):
+    scene = await run_in_threadpool(store.get_scene, scene_id)
+    if scene is None:
+        raise HTTPException(status_code=404, detail="Scene not found")
+    if str(scene.get("state")) != "ready":
+        raise HTTPException(status_code=409, detail="Scene is not ready")
+    try:
+        selected = await run_in_threadpool(
+            lambda: store.resolve_scene_overlay_id(scene_id, overlay_id)
+        )
+        rows = await run_in_threadpool(
+            lambda: store.resolved_scene_polygons(
+                scene_id, variant=analysis_variant(smooth), overlay_id=selected
+            )
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    public = [
+        {
+            key: row[key]
+            for key in ("load", "color", "points", "overlay_state", "source_index")
+            if key in row
+        }
+        for row in rows
+    ]
+    return public
+
+
+@app.post("/v2/scenes/{scene_id}/overlays", response_model=V2OverlayCreatedResponse)
+async def v2_append_scene_overlays(scene_id: str, request: V2OverlayRequest):
+    if request.scene_id != scene_id:
+        raise HTTPException(status_code=422, detail="scene_id in path and body must match")
+    if await run_in_threadpool(store.get_scene, scene_id) is None:
+        raise HTTPException(status_code=404, detail="Scene not found")
+    try:
+        result = await run_in_threadpool(
+            lambda: store.append_v2_scene_overlays(
+                scene_id, [row.model_dump(mode="python") for row in request.overlays]
+            )
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"scene_id": scene_id, "overlay_id": int(result["overlay_id"])}
+
+
+@app.get("/v2/scenes/{scene_id}/overalys/{overlay_id}", response_model=list[V2OverlayResponse])
+async def v2_get_scene_overlay(scene_id: str, overlay_id: int):
+    if await run_in_threadpool(store.get_scene, scene_id) is None:
+        raise HTTPException(status_code=404, detail="Scene not found")
+    try:
+        selected = await run_in_threadpool(
+            lambda: store.resolve_scene_overlay_id(scene_id, overlay_id)
+        )
+        rows = await run_in_threadpool(store.scene_overlay_events, scene_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if int(selected) == 0:
+        selected_seq = 0
+    else:
+        selected_row = next((row for row in rows if int(row.get("id", 0)) == int(selected)), None)
+        if selected_row is None:
+            raise HTTPException(status_code=404, detail="Overlay snapshot not found")
+        selected_seq = int(selected_row.get("seq", 0))
+    visible = []
+    for row in rows:
+        if int(row.get("seq", 0)) > selected_seq:
+            continue
+        visible.append({
+            "type": str(row["type"]),
+            "idxs": [int(x) for x in row.get("idxs", [])],
+            "id": int(row["id"]),
+            "real": bool(row.get("real", False)),
+        })
+    return visible
 
 
 @app.post("/v1/scenes/dxf_upload", response_model=SceneCreated)

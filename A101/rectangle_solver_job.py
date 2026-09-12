@@ -777,13 +777,18 @@ def _run_worker(call: dict[str, Any], timeout: float | None) -> tuple[str, Any, 
                 try:
                     status, payload = parent.recv()
                 except EOFError:
+                    process.join(timeout=2)
                     status, payload = "error", f"worker exited with code {process.exitcode}"
-                process.join(timeout=2)
+                else:
+                    process.join(timeout=2)
                 if process.is_alive():
                     _kill_process_tree(process)
                 return status, payload, time.monotonic() - started
 
             if not process.is_alive():
+                # Join first so multiprocessing has finalized the real exitcode
+                # before we report a native crash / SIGKILL to the caller.
+                process.join(timeout=1)
                 if parent.poll(0):
                     try:
                         status, payload = parent.recv()
@@ -791,7 +796,6 @@ def _run_worker(call: dict[str, Any], timeout: float | None) -> tuple[str, Any, 
                         status, payload = "error", f"worker exited with code {process.exitcode}"
                 else:
                     status, payload = "error", f"worker exited with code {process.exitcode}"
-                process.join(timeout=1)
                 return status, payload, time.monotonic() - started
     finally:
         parent.close()

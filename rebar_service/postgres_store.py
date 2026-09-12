@@ -2151,6 +2151,66 @@ class PostgresStore:
             raise
         return self.scene_overlay_events(scene_id)
 
+    def append_v2_scene_overlays(
+        self, scene_id: str, events: Sequence[Mapping[str, Any]]
+    ) -> dict[str, Any]:
+        """Append v2 overlay mutations with server-assigned monotonic ids.
+
+        Each mutation is an immutable event/snapshot step. The returned overlay_id
+        is the id after the last mutation in this request.
+        """
+        if self.get_scene(scene_id) is None:
+            raise KeyError(scene_id)
+        polygon_count = len(self.load_scene_variant_polygons(scene_id, variant="raw"))
+        normalized: list[dict[str, Any]] = []
+        for raw in events:
+            event_type = str(raw.get("type", "")).lower()
+            if event_type not in {"clean", "unclean"}:
+                raise ValueError("overlay type must be 'clean' or 'unclean'")
+            idxs = list(dict.fromkeys(int(x) for x in (raw.get("idxs", []) or [])))
+            invalid = [idx for idx in idxs if idx < 0 or idx >= polygon_count]
+            if invalid:
+                raise ValueError(f"source polygon indices out of range: {invalid}")
+            normalized.append({
+                "type": event_type,
+                "idxs": idxs,
+                "real": bool(raw.get("real", False)),
+            })
+        if not normalized:
+            current = self.resolve_scene_overlay_id(scene_id, -1)
+            return {"overlay_id": int(current), "rows": self.scene_overlay_events(scene_id)}
+
+        with self.database.begin() as conn:
+            scene = conn.execute(
+                text("SELECT id FROM scenes WHERE id=:scene_id FOR UPDATE"),
+                {"scene_id": scene_id},
+            ).first()
+            if scene is None:
+                raise KeyError(scene_id)
+            current = conn.execute(
+                text("SELECT COALESCE(MAX(overlay_id), 0) FROM scene_overlay_events WHERE scene_id=:scene_id"),
+                {"scene_id": scene_id},
+            ).scalar_one()
+            next_id = int(current or 0)
+            for row in normalized:
+                next_id += 1
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO scene_overlay_events (scene_id, overlay_id, event_type, idxs, real)
+                        VALUES (:scene_id, :overlay_id, :event_type, :idxs, :real)
+                        """
+                    ),
+                    {
+                        "scene_id": scene_id,
+                        "overlay_id": next_id,
+                        "event_type": row["type"],
+                        "idxs": row["idxs"],
+                        "real": row["real"],
+                    },
+                )
+        return {"overlay_id": next_id, "rows": self.scene_overlay_events(scene_id)}
+
     def resolve_scene_overlay_id(self, scene_id: str, selector: int | str | None = 0) -> int:
         if self.get_scene(scene_id) is None:
             raise KeyError(scene_id)
@@ -3394,3 +3454,457 @@ class PostgresStore:
             meta = self.patch_meta(task_id, state=state)
             self.publish_event(task_id, "task_state", {"state": state})
         return meta
+
+    # ---------- API v2 durable whole-field pipeline ----------
+    def create_v2_task(
+        self,
+        task_id: str,
+        *,
+        scene_id: str,
+        overlay_id: int,
+        smooth: bool,
+        config: Mapping[str, Any],
+        ns: Sequence[int],
+    ) -> dict[str, Any]:
+        values = list(dict.fromkeys(int(n) for n in ns if int(n) > 0))
+        if not values:
+            raise ValueError("v2 task requires at least one positive N")
+        with self.database.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO v2_tasks (id, scene_id, overlay_id, smooth, config, preparation_state)
+                    VALUES (:id, :scene_id, :overlay_id, :smooth, CAST(:config AS jsonb), 'pending')
+                    """
+                ),
+                {
+                    "id": str(task_id),
+                    "scene_id": str(scene_id),
+                    "overlay_id": int(overlay_id),
+                    "smooth": bool(smooth),
+                    "config": _json_param(config),
+                },
+            )
+            for position, n in enumerate(values):
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO v2_task_n (task_id, n, position, attempt, state)
+                        VALUES (:task_id, :n, :position, 1, 'preparing')
+                        """
+                    ),
+                    {"task_id": str(task_id), "n": int(n), "position": int(position)},
+                )
+        return {
+            "task_id": str(task_id), "scene_id": str(scene_id), "overlay_id": int(overlay_id),
+            "smooth": bool(smooth), "preparation_state": "pending", "requested_n": values,
+        }
+
+    def get_v2_task(self, task_id: str) -> dict[str, Any] | None:
+        with self.database.connect() as conn:
+            task = conn.execute(
+                text(
+                    """
+                    SELECT id, scene_id, overlay_id, smooth, config, preparation_state,
+                           max_useful_n, preparation_error, created_at, updated_at, prepared_at
+                    FROM v2_tasks WHERE id=:task_id
+                    """
+                ),
+                {"task_id": str(task_id)},
+            ).mappings().first()
+            if task is None:
+                return None
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT n, position, attempt, state, status, fun, mass_kg, mass_bg_kg,
+                           result, error, created_at, updated_at
+                    FROM v2_task_n WHERE task_id=:task_id ORDER BY position, n
+                    """
+                ),
+                {"task_id": str(task_id)},
+            ).mappings().all()
+        result = {
+            "task_id": str(task["id"]),
+            "scene_id": str(task["scene_id"]),
+            "overlay_id": int(task["overlay_id"]),
+            "smooth": bool(task["smooth"]),
+            "config": dict(_json_value(task["config"], {}) or {}),
+            "preparation_state": str(task["preparation_state"]),
+            "max_useful_n": None if task["max_useful_n"] is None else int(task["max_useful_n"]),
+            "preparation_error": _json_value(task["preparation_error"]),
+            "created_at": _epoch(task["created_at"]),
+            "updated_at": _epoch(task["updated_at"]),
+            "prepared_at": None if task["prepared_at"] is None else _epoch(task["prepared_at"]),
+            "solutions": [],
+        }
+        for row in rows:
+            item = {
+                "n": int(row["n"]), "position": int(row["position"]), "attempt": int(row["attempt"]),
+                "state": str(row["state"]), "updated_at": _epoch(row["updated_at"]),
+            }
+            for key in ("status", "fun", "mass_kg", "mass_bg_kg"):
+                if row[key] is not None:
+                    item[key] = row[key]
+            if row["result"] is not None:
+                item["result"] = _json_value(row["result"], {})
+            if row["error"] is not None:
+                item["error"] = _json_value(row["error"], {})
+            result["solutions"].append(item)
+        return result
+
+    def set_v2_preparation_state(
+        self,
+        task_id: str,
+        state: str,
+        *,
+        max_useful_n: int | None = None,
+        error: Mapping[str, Any] | None = None,
+    ) -> None:
+        from .v2_state import normalize_v2_state
+
+        if state not in {"pending", "preparing", "success", "error", "cancelled"}:
+            raise ValueError(f"invalid v2 preparation state: {state}")
+        # Validate shared labels where they overlap public N state labels.
+        if state != "success" or state in {"pending", "preparing", "error", "cancelled"}:
+            normalize_v2_state(state)
+        with self.database.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE v2_tasks SET
+                        preparation_state=:state,
+                        max_useful_n=:max_useful_n,
+                        preparation_error=CAST(:error AS jsonb),
+                        prepared_at=CASE WHEN :state='success' THEN now() ELSE prepared_at END,
+                        updated_at=now()
+                    WHERE id=:task_id
+                    """
+                ),
+                {
+                    "task_id": str(task_id), "state": str(state),
+                    "max_useful_n": None if max_useful_n is None else int(max_useful_n),
+                    "error": _json_param(error) if error is not None else None,
+                },
+            )
+            if state in {"preparing", "error", "cancelled"}:
+                n_state = "preparing" if state == "preparing" else state
+                conn.execute(
+                    text(
+                        """
+                        UPDATE v2_task_n SET state=:n_state, updated_at=now(),
+                            error=CASE WHEN :n_state='error' THEN CAST(:error AS jsonb) ELSE error END
+                        WHERE task_id=:task_id AND state IN ('pending','preparing')
+                        """
+                    ),
+                    {
+                        "task_id": str(task_id), "n_state": n_state,
+                        "error": _json_param(error) if error is not None else None,
+                    },
+                )
+            elif state == "success":
+                conn.execute(
+                    text(
+                        """
+                        UPDATE v2_task_n SET state='pending', updated_at=now()
+                        WHERE task_id=:task_id AND state='preparing'
+                        """
+                    ),
+                    {"task_id": str(task_id)},
+                )
+
+    def add_v2_ns(self, task_id: str, ns: Sequence[int]) -> dict[str, list[int]]:
+        from .v2_state import next_n_action
+
+        requested = list(dict.fromkeys(int(n) for n in ns if int(n) > 0))
+        if not requested:
+            raise ValueError("n must contain positive values")
+        created: list[int] = []
+        retried: list[int] = []
+        kept: list[int] = []
+        with self.database.begin() as conn:
+            task = conn.execute(
+                text("SELECT preparation_state FROM v2_tasks WHERE id=:task_id FOR UPDATE"),
+                {"task_id": str(task_id)},
+            ).mappings().first()
+            if task is None:
+                raise KeyError(task_id)
+            rows = conn.execute(
+                text("SELECT n, state, attempt FROM v2_task_n WHERE task_id=:task_id FOR UPDATE"),
+                {"task_id": str(task_id)},
+            ).mappings().all()
+            current = {int(row["n"]): row for row in rows}
+            next_position = int(conn.execute(
+                text("SELECT COALESCE(MAX(position), -1) + 1 FROM v2_task_n WHERE task_id=:task_id"),
+                {"task_id": str(task_id)},
+            ).scalar_one())
+            target_state = "pending" if str(task["preparation_state"]) == "success" else "preparing"
+            for n in requested:
+                row = current.get(n)
+                action = next_n_action(None if row is None else str(row["state"]))
+                if action == "keep":
+                    kept.append(n)
+                    continue
+                if action == "create":
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO v2_task_n (task_id, n, position, attempt, state)
+                            VALUES (:task_id, :n, :position, 1, :state)
+                            """
+                        ),
+                        {"task_id": str(task_id), "n": n, "position": next_position, "state": target_state},
+                    )
+                    next_position += 1
+                    created.append(n)
+                    continue
+                attempt = int(row["attempt"]) + 1
+                conn.execute(
+                    text(
+                        """
+                        UPDATE v2_task_n SET
+                            attempt=:attempt, state=:state, status=NULL, fun=NULL, mass_kg=NULL,
+                            mass_bg_kg=NULL, result=NULL, error=NULL, updated_at=now()
+                        WHERE task_id=:task_id AND n=:n
+                        """
+                    ),
+                    {"task_id": str(task_id), "n": n, "attempt": attempt, "state": target_state},
+                )
+                retried.append(n)
+        return {"created": created, "retried": retried, "kept": kept}
+
+    def set_v2_n_state(
+        self,
+        task_id: str,
+        n: int,
+        state: str,
+        *,
+        attempt: int | None = None,
+        status: str | None = None,
+        fun: float | None = None,
+        mass_kg: float | None = None,
+        mass_bg_kg: float | None = None,
+        result: Mapping[str, Any] | None = None,
+        error: Mapping[str, Any] | None = None,
+    ) -> bool:
+        from .v2_state import normalize_v2_state
+
+        normalize_v2_state(state)
+        if status is not None and status not in {"optimal", "feasible", "infeasible"}:
+            raise ValueError(f"invalid v2 status: {status}")
+        clauses = ["task_id=:task_id", "n=:n"]
+        params: dict[str, Any] = {
+            "task_id": str(task_id), "n": int(n), "state": str(state), "status": status,
+            "fun": fun, "mass_kg": mass_kg, "mass_bg_kg": mass_bg_kg,
+            "result": _json_param(result) if result is not None else None,
+            "error": _json_param(error) if error is not None else None,
+        }
+        if attempt is not None:
+            clauses.append("attempt=:attempt")
+            params["attempt"] = int(attempt)
+        with self.database.begin() as conn:
+            response = conn.execute(
+                text(
+                    f"""
+                    UPDATE v2_task_n SET
+                        state=:state,
+                        status=COALESCE(:status, status),
+                        fun=COALESCE(:fun, fun),
+                        mass_kg=COALESCE(:mass_kg, mass_kg),
+                        mass_bg_kg=COALESCE(:mass_bg_kg, mass_bg_kg),
+                        result=CASE WHEN :result IS NULL THEN result ELSE CAST(:result AS jsonb) END,
+                        error=CASE WHEN :error IS NULL THEN error ELSE CAST(:error AS jsonb) END,
+                        updated_at=now()
+                    WHERE {' AND '.join(clauses)}
+                    """
+                ),
+                params,
+            )
+        return bool(getattr(response, "rowcount", 1))
+
+    def get_v2_n(self, task_id: str, n: int) -> dict[str, Any] | None:
+        with self.database.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT n, position, attempt, state, status, fun, mass_kg, mass_bg_kg,
+                           result, error, created_at, updated_at
+                    FROM v2_task_n WHERE task_id=:task_id AND n=:n
+                    """
+                ),
+                {"task_id": str(task_id), "n": int(n)},
+            ).mappings().first()
+        if row is None:
+            return None
+        out = {
+            "n": int(row["n"]), "position": int(row["position"]), "attempt": int(row["attempt"]),
+            "state": str(row["state"]), "created_at": _epoch(row["created_at"]), "updated_at": _epoch(row["updated_at"]),
+        }
+        for key in ("status", "fun", "mass_kg", "mass_bg_kg"):
+            if row[key] is not None:
+                out[key] = row[key]
+        if row["result"] is not None:
+            out["result"] = _json_value(row["result"], {})
+        if row["error"] is not None:
+            out["error"] = _json_value(row["error"], {})
+        return out
+
+    def cancel_v2_ns(self, task_id: str, ns: Sequence[int]) -> list[int]:
+        targets = list(dict.fromkeys(int(n) for n in ns if int(n) > 0))
+        if not targets:
+            return []
+        with self.database.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE v2_task_n SET state='cancelled', updated_at=now()
+                    WHERE task_id=:task_id AND n = ANY(:ns)
+                      AND state IN ('pending','preparing','solving','fitting','baring','error')
+                    """
+                ),
+                {"task_id": str(task_id), "ns": targets},
+            )
+        return targets
+
+    def save_v2_artifact(
+        self,
+        task_id: str,
+        artifact_key: str,
+        artifact_type: str,
+        value: Any,
+        *,
+        n: int | None = None,
+        attempt: int | None = None,
+    ) -> None:
+        payload, codec = encode_object(value)
+        digest = sha256(payload)
+        with self.database.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO v2_runtime_artifacts
+                        (task_id, artifact_key, artifact_type, n, attempt, codec, payload, sha256)
+                    VALUES (:task_id, :artifact_key, :artifact_type, :n, :attempt, :codec, :payload, :sha256)
+                    ON CONFLICT (task_id, artifact_key) DO UPDATE SET
+                        artifact_type=EXCLUDED.artifact_type, n=EXCLUDED.n, attempt=EXCLUDED.attempt,
+                        codec=EXCLUDED.codec, payload=EXCLUDED.payload, sha256=EXCLUDED.sha256, updated_at=now()
+                    """
+                ),
+                {
+                    "task_id": str(task_id), "artifact_key": str(artifact_key), "artifact_type": str(artifact_type),
+                    "n": None if n is None else int(n), "attempt": None if attempt is None else int(attempt),
+                    "codec": codec, "payload": payload, "sha256": digest,
+                },
+            )
+
+    def load_v2_artifact(self, task_id: str, artifact_key: str) -> Any:
+        with self.database.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT codec, payload, sha256 FROM v2_runtime_artifacts
+                    WHERE task_id=:task_id AND artifact_key=:artifact_key
+                    """
+                ),
+                {"task_id": str(task_id), "artifact_key": str(artifact_key)},
+            ).mappings().first()
+        if row is None:
+            return None
+        payload = bytes(row["payload"])
+        if sha256(payload) != str(row["sha256"]):
+            raise ValueError(f"Corrupt v2 artifact {artifact_key}")
+        return decode_object(payload, str(row["codec"]))
+
+    @staticmethod
+    def _v2_request_table(kind: str) -> str:
+        if kind == "bars":
+            return "v2_bars_requests"
+        if kind == "verification":
+            return "v2_verification_requests"
+        raise ValueError(f"unknown v2 request kind: {kind}")
+
+    def create_v2_request(
+        self,
+        kind: str,
+        request_id: str,
+        *,
+        scene_id: str,
+        overlay_id: int,
+        smooth: bool,
+        config: Mapping[str, Any],
+        zones: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        table = self._v2_request_table(kind)
+        with self.database.begin() as conn:
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {table} (id, scene_id, overlay_id, smooth, config, zones, state)
+                    VALUES (:id, :scene_id, :overlay_id, :smooth, CAST(:config AS jsonb), CAST(:zones AS jsonb), 'pending')
+                    """
+                ),
+                {
+                    "id": str(request_id), "scene_id": str(scene_id), "overlay_id": int(overlay_id),
+                    "smooth": bool(smooth), "config": _json_param(config), "zones": _json_param(list(zones)),
+                },
+            )
+        return {f"{kind if kind == 'bars' else 'verification'}_id": str(request_id), "state": "pending"}
+
+    def get_v2_request(self, kind: str, request_id: str) -> dict[str, Any] | None:
+        table = self._v2_request_table(kind)
+        with self.database.connect() as conn:
+            row = conn.execute(
+                text(
+                    f"""
+                    SELECT id, scene_id, overlay_id, smooth, config, zones, state, result, error,
+                           created_at, updated_at
+                    FROM {table} WHERE id=:id
+                    """
+                ),
+                {"id": str(request_id)},
+            ).mappings().first()
+        if row is None:
+            return None
+        key = "bars_id" if kind == "bars" else "verification_id"
+        out = {
+            key: str(row["id"]), "scene_id": str(row["scene_id"]), "overlay_id": int(row["overlay_id"]),
+            "smooth": bool(row["smooth"]), "config": _json_value(row["config"], {}),
+            "zones": _json_value(row["zones"], []), "state": str(row["state"]),
+            "created_at": _epoch(row["created_at"]), "updated_at": _epoch(row["updated_at"]),
+        }
+        if row["result"] is not None:
+            out["result"] = _json_value(row["result"], {})
+        if row["error"] is not None:
+            out["error"] = _json_value(row["error"], {})
+        return out
+
+    def set_v2_request_state(
+        self,
+        kind: str,
+        request_id: str,
+        state: str,
+        *,
+        result: Mapping[str, Any] | Sequence[Any] | None = None,
+        error: Mapping[str, Any] | None = None,
+    ) -> None:
+        table = self._v2_request_table(kind)
+        allowed = {"pending", "baring", "success", "error"} if kind == "bars" else {"pending", "validation", "success", "error"}
+        if state not in allowed:
+            raise ValueError(f"invalid {kind} state: {state}")
+        with self.database.begin() as conn:
+            conn.execute(
+                text(
+                    f"""
+                    UPDATE {table} SET state=:state,
+                        result=CASE WHEN :result IS NULL THEN result ELSE CAST(:result AS jsonb) END,
+                        error=CASE WHEN :error IS NULL THEN error ELSE CAST(:error AS jsonb) END,
+                        updated_at=now()
+                    WHERE id=:id
+                    """
+                ),
+                {
+                    "id": str(request_id), "state": str(state),
+                    "result": _json_param(result) if result is not None else None,
+                    "error": _json_param(error) if error is not None else None,
+                },
+            )

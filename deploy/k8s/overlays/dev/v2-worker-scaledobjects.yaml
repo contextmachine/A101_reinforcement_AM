@@ -1,0 +1,129 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: rebar-v2-preparing
+spec:
+  scaleTargetRef:
+    name: rebar-v2-preparing
+  pollingInterval: 5
+  cooldownPeriod: 300
+  minReplicaCount: 0
+  maxReplicaCount: 28031998
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+  triggers:
+  - type: redis
+    metadata:
+      address: rebar-redis.rebar-optimizer.svc.cluster.local:6379
+      listName: rebar:v2:preparing:workload
+      listLength: '1'
+      activationListLength: '0'
+    authenticationRef:
+      name: rebar-redis-auth
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: rebar-v2-solving
+spec:
+  scaleTargetRef:
+    name: rebar-v2-solving
+  pollingInterval: 5
+  cooldownPeriod: 300
+  minReplicaCount: 0
+  maxReplicaCount: 28031998
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+  triggers:
+  - type: redis
+    metadata:
+      address: rebar-redis.rebar-optimizer.svc.cluster.local:6379
+      listName: rebar:v2:solving:workload
+      listLength: '1'
+      activationListLength: '0'
+    authenticationRef:
+      name: rebar-redis-auth
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: rebar-v2-fitting
+spec:
+  scaleTargetRef:
+    name: rebar-v2-fitting
+  pollingInterval: 5
+  cooldownPeriod: 300
+  minReplicaCount: 0
+  maxReplicaCount: 28031998
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+  triggers:
+  - type: redis
+    metadata:
+      address: rebar-redis.rebar-optimizer.svc.cluster.local:6379
+      listName: rebar:v2:fitting:workload
+      listLength: '1'
+      activationListLength: '0'
+    authenticationRef:
+      name: rebar-redis-auth
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: rebar-v2-baring
+spec:
+  scaleTargetRef:
+    name: rebar-v2-baring
+  pollingInterval: 5
+  cooldownPeriod: 300
+  minReplicaCount: 0
+  maxReplicaCount: 28031998
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+  triggers:
+  - type: redis
+    metadata:
+      address: rebar-redis.rebar-optimizer.svc.cluster.local:6379
+      listName: rebar:v2:baring:workload
+      listLength: '1'
+      activationListLength: '0'
+    authenticationRef:
+      name: rebar-redis-auth
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: rebar-v2-validation
+spec:
+  scaleTargetRef:
+    name: rebar-v2-validation
+  pollingInterval: 5
+  cooldownPeriod: 300
+  minReplicaCount: 0
+  maxReplicaCount: 28031998
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+  triggers:
+  - type: redis
+    metadata:
+      address: rebar-redis.rebar-optimizer.svc.cluster.local:6379
+      listName: rebar:v2:validation:workload
+      listLength: '1'
+      activationListLength: '0'
+    authenticationRef:
+      name: rebar-redis-auth

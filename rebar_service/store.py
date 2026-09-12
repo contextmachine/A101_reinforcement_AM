@@ -13,6 +13,25 @@ class Store(PostgresStore):
     def __init__(self, settings: Settings):
         super().__init__(settings)
         self.queue = RedisQueue(settings)
+        self._v2_queues: dict[str, RedisQueue] = {}
+
+    def v2_queue(self, stage: str) -> RedisQueue:
+        stage = str(stage).lower()
+        queue = self._v2_queues.get(stage)
+        if queue is None:
+            ready, processing, workload = self.settings.v2_queue_names(stage)
+            queue = RedisQueue(
+                self.settings,
+                ready_queue=ready,
+                processing_queue=processing,
+                workload_queue=workload,
+                track_task_slots=(stage == "solving"),
+            )
+            self._v2_queues[stage] = queue
+        return queue
+
+    def enqueue_v2_job(self, job: Mapping[str, Any]) -> bool:
+        return self.v2_queue(str(job["stage"])).enqueue_pipeline_job(job)
 
     @property
     def redis(self):

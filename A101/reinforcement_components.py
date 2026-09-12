@@ -627,7 +627,7 @@ def _mark_matrix_voids(
     return out
 
 
-def prepare_component_problem(
+def prepare_component_matrix(
     component: Mapping[str, Any],
     *,
     load2cls: Mapping[Any, int],
@@ -636,13 +636,10 @@ def prepare_component_problem(
     diameters: Mapping[Any, float],
     anchor_factor: float = 40.0,
     axis: str = "y",
-    min_width: float = 1000.0,
     grid_size: float = 300.0,
     fill_notches_threshold: float | None = 1000.0,
     short_edge_threshold: float | None = 300.0,
     simplify_steps_threshold: float | None = 1000.0,
-    max_n: int | None = None,
-    use_mosaic: bool = True,
     preserve_demand_classes: bool = True,
     preserve_area_eps: float = 1e-6,
     strict_grid_coverage: bool = True,
@@ -656,16 +653,10 @@ def prepare_component_problem(
     physical_area_eps: float = 1e-6,
     progress: bool = False,
 ) -> dict[str, Any]:
-    """Build the existing prepared solver model for one demand component."""
-
-    # Heavy solver modules stay lazy: decomposition/frontier tests need only Shapely.
-    from .cells_merging import reduce_mosaic
+    """Build geometry/grid/work-matrix only, before any solver candidates exist."""
     from .grid_work import clean_poly, resolve_overlaps
-    from .linear_idea import generate_all_rectangles, relabel_rectangle_candidates
     from .poly_bbox import fill_notches, polygons_to_grid, simplify_short_edges, simplify_steps
-    from .select_min_density_rectangles_recipes import prepare_rectangle_problem
     from .axis_orientation import orient_grid
-
     from time import perf_counter
 
     component_id = int(component.get("id", 0))
@@ -716,7 +707,6 @@ def prepare_component_problem(
             return_stats=True,
         )
         refined_shape = _dense_grid_shape(grid)
-
         if (refine_mixed_cells and fallback_to_composite_cells and
                 _dense_refinement_too_large(base_dense_shape, refined_shape,
                                             max_dense_cells, max_refinement_factor)):
@@ -736,7 +726,6 @@ def prepare_component_problem(
                 "discarded_refined_shape": tuple(map(int, discarded_refined_shape)),
                 "fallback_reason": "dense refinement guard",
             })
-
         dense_shape = _dense_grid_shape(grid)
         mark("class_preservation", started, cells=len(grid), dense_shape=dense_shape[:2],
              fallback=refinement_fallback)
@@ -770,6 +759,76 @@ def prepare_component_problem(
         void=int(np.count_nonzero(work_matrix < 0)),
     )
 
+    return {
+        "component": dict(component),
+        "component_id": component_id,
+        "axis": axis,
+        "source_polygons": polygons,
+        "simple_polygons": working,
+        "grid": grid,
+        "xs": np.asarray(xs),
+        "ys": np.asarray(ys),
+        "load_matrix": load_matrix,
+        "int_matrix": int_matrix,
+        "work_matrix": work_matrix,
+        "strict_matrix_barriers": True,
+        "work_x_edges": np.asarray(work_x_edges),
+        "work_y_edges": np.asarray(work_y_edges),
+        "work_x_steps": np.asarray(work_x_steps),
+        "work_y_steps": np.asarray(work_y_steps),
+        "base_holds": base_holds,
+        "holds": holds,
+        "recipe_leaves": recipe_leaves,
+        "_prepare_stage_times": stage_times,
+        "_base_dense_shape": tuple(map(int, base_dense_shape)),
+        "_dense_shape": tuple(map(int, dense_shape)),
+        "_refinement_fallback": bool(refinement_fallback),
+        "_discarded_refined_shape": None if discarded_refined_shape is None else tuple(map(int, discarded_refined_shape)),
+        "_preserve_stats": dict(preserve_stats),
+    }
+
+
+def prepare_component_problem_from_matrix(
+    matrix_problem: Mapping[str, Any],
+    *,
+    load2cls: Mapping[Any, int],
+    recipes: Mapping[Any, Sequence[Any]] | None,
+    densities: Mapping[Any, float],
+    diameters: Mapping[Any, float],
+    anchor_factor: float = 40.0,
+    min_width: float = 1000.0,
+    max_n: int | None = None,
+    use_mosaic: bool = True,
+    progress: bool = False,
+) -> dict[str, Any]:
+    """Build candidates and the prepared solver model from an existing work matrix."""
+    from .cells_merging import reduce_mosaic
+    from .linear_idea import generate_all_rectangles, relabel_rectangle_candidates
+    from .select_min_density_rectangles_recipes import prepare_rectangle_problem
+    from time import perf_counter
+
+    recipes = _normalize_recipes(recipes)
+    densities = _normalize_class_floats(densities)
+    diameters = _normalize_class_floats(diameters)
+    component = dict(matrix_problem["component"])
+    component_id = int(matrix_problem.get("component_id", component.get("id", 0)))
+    axis = normalize_axis(str(matrix_problem["axis"]))
+    polygons = [dict(row) for row in matrix_problem["source_polygons"]]
+    work_matrix = np.asarray(matrix_problem["work_matrix"], dtype=np.int32)
+    work_x_edges = np.asarray(matrix_problem["work_x_edges"], dtype=float)
+    work_y_edges = np.asarray(matrix_problem["work_y_edges"], dtype=float)
+    work_x_steps = np.asarray(matrix_problem["work_x_steps"], dtype=float)
+    work_y_steps = np.asarray(matrix_problem["work_y_steps"], dtype=float)
+    base_holds, holds, recipe_leaves = class_holds(diameters, recipes, anchor_factor)
+    stage_times = dict(matrix_problem.get("_prepare_stage_times", {}) or {})
+
+    def mark(name, started, **meta):
+        elapsed = perf_counter() - started
+        stage_times[name] = float(elapsed)
+        if progress:
+            suffix = " ".join(f"{k}={v}" for k, v in meta.items())
+            print(f"[prepare component {component_id}] {name}: {elapsed:.3f}s" + (f"; {suffix}" if suffix else ""), flush=True)
+
     requested_min_width = max(0.0, float(min_width))
     cross_span = float(work_x_edges[-1] - work_x_edges[0]) if len(work_x_edges) >= 2 else 0.0
     if cross_span <= 0:
@@ -791,10 +850,7 @@ def prepare_component_problem(
     started = perf_counter()
     selectable = relabel_rectangle_candidates(requirement_rectangles, dict(recipes or {}))
     selectable, barrier_rejected = filter_candidates_by_matrix_barriers(selectable, work_matrix)
-    mark(
-        "relabel_rectangles", started,
-        selectable=len(selectable), barrier_rejected=barrier_rejected,
-    )
+    mark("relabel_rectangles", started, selectable=len(selectable), barrier_rejected=barrier_rejected)
     if np.any(work_matrix > 0) and not selectable:
         raise CandidateCoverInfeasible(
             f"component {component_id}: ненулевое требование, но нет допустимых кандидатов; "
@@ -805,8 +861,7 @@ def prepare_component_problem(
     started = perf_counter()
     if use_mosaic:
         work_rectangles, mosaic, mosaic_stats = reduce_mosaic(
-            work_matrix, selectable, target=np.inf, rect_target=np.inf,
-            force_reduce=False, show=False,
+            work_matrix, selectable, target=np.inf, rect_target=np.inf, force_reduce=False, show=False,
         )
     else:
         work_rectangles, mosaic, mosaic_stats = selectable, None, None
@@ -820,6 +875,7 @@ def prepare_component_problem(
         int(row.get("class", row.get("load"))) if isinstance(row, Mapping) else int(tuple(row)[-1])
         for row in work_rectangles
     }
+    preserve_stats = dict(matrix_problem.get("_preserve_stats", {}) or {})
     missing_candidate_classes = sorted(
         threshold for threshold in required_leaf_classes
         if not any(candidate >= threshold for candidate in candidate_classes)
@@ -853,23 +909,12 @@ def prepare_component_problem(
     n_bounds = component_n_bounds(prepared)
     mark("component_n_bounds", started, lower=n_bounds.get("lower_bound"), upper=n_bounds.get("nonredundant_upper_bound"))
     poly_mos = [(row["geometry"], _load_class(load2cls, row["load"])) for row in polygons]
-    return {
-        "component": dict(component),
-        "component_id": int(component.get("id", 0)),
-        "axis": axis,
-        "source_polygons": polygons,
-        "simple_polygons": working,
-        "grid": grid,
-        "xs": np.asarray(xs),
-        "ys": np.asarray(ys),
-        "load_matrix": load_matrix,
-        "int_matrix": int_matrix,
-        "work_matrix": work_matrix,
-        "strict_matrix_barriers": True,
-        "work_x_edges": np.asarray(work_x_edges),
-        "work_y_edges": np.asarray(work_y_edges),
-        "work_x_steps": np.asarray(work_x_steps),
-        "work_y_steps": np.asarray(work_y_steps),
+
+    result = {
+        key: value for key, value in dict(matrix_problem).items()
+        if not str(key).startswith("_") and key not in {"recipe_leaves"}
+    }
+    result.update({
         "work_rectangles": work_rectangles,
         "selectable_rectangles": list(selectable),
         "mosaic": mosaic,
@@ -882,10 +927,10 @@ def prepare_component_problem(
             "polygons": len(polygons),
             "grid_cells": int(np.prod(work_matrix.shape)),
             "matrix_shape": tuple(map(int, work_matrix.shape)),
-            "base_dense_shape": tuple(map(int, base_dense_shape)),
-            "dense_shape": tuple(map(int, dense_shape)),
-            "refinement_fallback": bool(refinement_fallback),
-            "discarded_refined_shape": None if discarded_refined_shape is None else tuple(map(int, discarded_refined_shape)),
+            "base_dense_shape": tuple(matrix_problem.get("_base_dense_shape", ())),
+            "dense_shape": tuple(matrix_problem.get("_dense_shape", ())),
+            "refinement_fallback": bool(matrix_problem.get("_refinement_fallback", False)),
+            "discarded_refined_shape": matrix_problem.get("_discarded_refined_shape"),
             "prepare_times_s": stage_times,
             "candidate_rectangles": len(work_rectangles),
             "matrix_barrier_rejected_candidates": int(barrier_rejected),
@@ -903,7 +948,77 @@ def prepare_component_problem(
             "candidate_classes": sorted(candidate_classes),
             **n_bounds,
         },
-    }
+    })
+    return result
+
+
+def prepare_component_problem(
+    component: Mapping[str, Any],
+    *,
+    load2cls: Mapping[Any, int],
+    recipes: Mapping[Any, Sequence[Any]] | None,
+    densities: Mapping[Any, float],
+    diameters: Mapping[Any, float],
+    anchor_factor: float = 40.0,
+    axis: str = "y",
+    min_width: float = 1000.0,
+    grid_size: float = 300.0,
+    fill_notches_threshold: float | None = 1000.0,
+    short_edge_threshold: float | None = 300.0,
+    simplify_steps_threshold: float | None = 1000.0,
+    max_n: int | None = None,
+    use_mosaic: bool = True,
+    preserve_demand_classes: bool = True,
+    preserve_area_eps: float = 1e-6,
+    strict_grid_coverage: bool = True,
+    refine_unrepresentable_cells: bool = True,
+    refine_mixed_cells: bool = False,
+    max_subcells_per_cell: int = 2000,
+    max_dense_cells: int | None = 20000,
+    max_refinement_factor: float | None = 3.0,
+    fallback_to_composite_cells: bool = True,
+    physical_geometry: Any = None,
+    physical_area_eps: float = 1e-6,
+    progress: bool = False,
+) -> dict[str, Any]:
+    """Build the prepared solver model, preserving the historical one-call API."""
+    matrix_problem = prepare_component_matrix(
+        component,
+        load2cls=load2cls,
+        recipes=recipes,
+        densities=densities,
+        diameters=diameters,
+        anchor_factor=anchor_factor,
+        axis=axis,
+        grid_size=grid_size,
+        fill_notches_threshold=fill_notches_threshold,
+        short_edge_threshold=short_edge_threshold,
+        simplify_steps_threshold=simplify_steps_threshold,
+        preserve_demand_classes=preserve_demand_classes,
+        preserve_area_eps=preserve_area_eps,
+        strict_grid_coverage=strict_grid_coverage,
+        refine_unrepresentable_cells=refine_unrepresentable_cells,
+        refine_mixed_cells=refine_mixed_cells,
+        max_subcells_per_cell=max_subcells_per_cell,
+        max_dense_cells=max_dense_cells,
+        max_refinement_factor=max_refinement_factor,
+        fallback_to_composite_cells=fallback_to_composite_cells,
+        physical_geometry=physical_geometry,
+        physical_area_eps=physical_area_eps,
+        progress=progress,
+    )
+    return prepare_component_problem_from_matrix(
+        matrix_problem,
+        load2cls=load2cls,
+        recipes=recipes,
+        densities=densities,
+        diameters=diameters,
+        anchor_factor=anchor_factor,
+        min_width=min_width,
+        max_n=max_n,
+        use_mosaic=use_mosaic,
+        progress=progress,
+    )
 
 
 def _greedy_feasible_count(prepared: Mapping[str, Any]) -> int | None:
@@ -1023,6 +1138,7 @@ def solve_component_frontier(
     return_best_on_timeout: bool = True,
     raise_errors: bool = False,
     stop_after_first_feasible: bool = False,
+    highs_options: Mapping[str, Any] | None = None,
 ) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
     """Solve requested N values in the supplied order and classify timeouts."""
 
@@ -1045,6 +1161,7 @@ def solve_component_frontier(
                 require_optimal=bool(require_optimal),
                 return_best_on_timeout=bool(return_best_on_timeout),
                 raise_worker_errors=bool(raise_errors),
+                highs_options=highs_options,
             )
             row = dict(result or {"n": n, "is_feasible": False, "error": "solver returned None"})
         except Exception as exc:

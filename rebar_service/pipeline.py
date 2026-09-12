@@ -25,9 +25,6 @@ from .planner import edge_to_middle_order, round_robin_unit_plans
 
 WHOLE_COMPONENT_ID = -1
 WHOLE_COMPONENT_KEY = "whole"
-SOLVER_HARD_MAX_N = 1000
-
-
 def component_storage_id(component_id: int | str) -> int | str:
     """Map the public pseudo-component ``-1`` to the internal whole-field key."""
     if component_id == WHOLE_COMPONENT_KEY:
@@ -738,9 +735,9 @@ class PipelineWorkflow:
         solver = self._solver(task_id)
         prepared_max_n = solver.get("prepared_max_n")
         if prepared_max_n in (None, 0, "0"):
-            prepared_max_n = SOLVER_HARD_MAX_N
+            prepared_max_n = self.settings.effective_prepare_max_n()
         else:
-            prepared_max_n = min(int(prepared_max_n), SOLVER_HARD_MAX_N)
+            prepared_max_n = min(int(prepared_max_n), self.settings.effective_prepare_max_n())
         prepared_max_n = min(int(prepared_max_n), int(self.settings.max_n_value))
         problem = prepare_component_problem(
             component,
@@ -902,7 +899,7 @@ class PipelineWorkflow:
         problem = stored["problem"]
         field = self._field(task_id, variant)
         cfg = dict(field.get("cfg", {}) or {})
-        cap = min(SOLVER_HARD_MAX_N, int(self.settings.max_n_value))
+        cap = self.settings.effective_solver_max_n()
         configured = self._solver(task_id).get("prepared_max_n")
         if configured is not None:
             cap = min(cap, int(configured))
@@ -917,7 +914,7 @@ class PipelineWorkflow:
         max_n = int(result.get("max_useful_n")) if feasible else None
         requested = self._requested_ns(task_id, variant, self._current_overlay_id())
         plan = edge_to_middle_order(
-            n for n in requested if max_n is not None and 1 <= int(n) <= min(max_n, SOLVER_HARD_MAX_N)
+            n for n in requested if max_n is not None and 1 <= int(n) <= min(max_n, self.settings.effective_solver_max_n())
         )
         result = {**dict(result), "max_useful_n": max_n}
         record.update(
@@ -1700,7 +1697,7 @@ class PipelineWorkflow:
 
         requested = self._requested_ns(task_id, variant, overlay_id)
         plan = edge_to_middle_order(
-            n for n in requested if max_n is not None and 1 <= int(n) <= min(max_n, SOLVER_HARD_MAX_N)
+            n for n in requested if max_n is not None and 1 <= int(n) <= min(max_n, self.settings.effective_solver_max_n())
         )
         result = {**dict(result), "max_useful_n": max_n}
         record.update(
@@ -1873,7 +1870,7 @@ class PipelineWorkflow:
         variant = analysis_variant(smooth)
         storage_id = component_storage_id(component_id)
         requested = list(dict.fromkeys(int(n) for n in values))
-        hard_max_n = min(int(self.settings.max_n_value), SOLVER_HARD_MAX_N)
+        hard_max_n = self.settings.effective_solver_max_n()
         invalid_basic = [n for n in requested if n < 1 or n > hard_max_n]
         if invalid_basic:
             raise ValueError(f"n вне допустимого диапазона 1..{hard_max_n}: {invalid_basic}")
@@ -2228,7 +2225,7 @@ class PipelineWorkflow:
         variant = analysis_variant(smooth)
         selected_overlay = normalize_overlay_id(overlay_id)
         requested = list(dict.fromkeys(int(n) for n in values))
-        hard_max_n = min(int(self.settings.max_n_value), SOLVER_HARD_MAX_N)
+        hard_max_n = self.settings.effective_solver_max_n()
         invalid = [n for n in requested if n < 1 or n > hard_max_n]
         if invalid:
             raise ValueError(f"n вне допустимого диапазона 1..{hard_max_n}: {invalid}")
@@ -2360,7 +2357,7 @@ class PipelineWorkflow:
         token = context.set(selected_overlay) if context is not None else None
         try:
             requested = list(dict.fromkeys(int(n) for n in values))
-            hard_max_n = min(int(self.settings.max_n_value), SOLVER_HARD_MAX_N)
+            hard_max_n = self.settings.effective_solver_max_n()
             invalid_basic = [n for n in requested if n < 1 or n > hard_max_n]
             if invalid_basic:
                 raise ValueError(f"n вне допустимого диапазона 1..{hard_max_n}: {invalid_basic}")
@@ -2491,7 +2488,7 @@ class PipelineWorkflow:
             raw_max = record.get("max_useful_n")
             if raw_max is None or int(raw_max) <= 0 or str(record.get("max_n_state", "ready")) != "ready":
                 raise ValueError("Компонента не имеет подготовленного допустимого max N")
-            max_n = min(int(raw_max), SOLVER_HARD_MAX_N)
+            max_n = min(int(raw_max), self.settings.effective_solver_max_n())
             invalid = [n for n in requested if n > max_n]
             if invalid:
                 raise ValueError(f"n вне допустимого диапазона 1..{max_n}: {invalid}")

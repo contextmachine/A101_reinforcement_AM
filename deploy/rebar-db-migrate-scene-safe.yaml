@@ -1,0 +1,71 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rebar-db-migrate-scene-safe
+  namespace: rebar-optimizer
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: rebar-db-migrate-scene-safe
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: ghcr-secret
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
+          imagePullPolicy: Always
+          workingDir: /app
+          command:
+            - python
+            - -m
+            - alembic
+          args:
+            - -c
+            - /app/alembic.ini
+            - upgrade
+            - head
+          env:
+            - name: REBAR_POSTGRES_HOST
+              value: a101-postgres
+            - name: REBAR_POSTGRES_PORT
+              value: "5432"
+            - name: REBAR_POSTGRES_DB
+              value: a101
+            - name: REBAR_POSTGRES_SCHEMA
+              value: rebar
+            - name: REBAR_POSTGRES_SSLMODE
+              value: disable
+            - name: REBAR_POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: a101-postgres-auth
+                  key: POSTGRES_USER
+            - name: REBAR_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: a101-postgres-auth
+                  key: POSTGRES_PASSWORD
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

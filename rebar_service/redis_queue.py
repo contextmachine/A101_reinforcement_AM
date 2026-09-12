@@ -29,9 +29,37 @@ class RedisQueue:
     return 1
     """
 
-    def __init__(self, settings: Settings):
-        self.settings = settings
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        ready_queue: str | None = None,
+        processing_queue: str | None = None,
+        workload_queue: str | None = None,
+        track_task_slots: bool = True,
+    ):
+        updates = {}
+        if ready_queue is not None:
+            updates["ready_queue"] = str(ready_queue)
+        if processing_queue is not None:
+            updates["processing_queue"] = str(processing_queue)
+        if workload_queue is not None:
+            updates["workload_queue"] = str(workload_queue)
+        self.settings = settings.model_copy(update=updates) if updates else settings
+        self.track_task_slots = bool(track_task_slots)
         self._redis = None
+
+    @property
+    def ready_queue(self) -> str:
+        return str(self.settings.ready_queue)
+
+    @property
+    def processing_queue(self) -> str:
+        return str(self.settings.processing_queue)
+
+    @property
+    def workload_queue(self) -> str:
+        return str(self.settings.workload_queue)
 
     @property
     def redis(self):
@@ -137,8 +165,9 @@ class RedisQueue:
         job_id = str(job["job_id"])
         task_id = str(job["task_id"])
         self.redis.set(self.job_key(job_id) + ":lease", worker_id, ex=self.settings.job_lease_seconds)
-        self.redis.zadd(self.task_key(task_id, "slots"), {job_id: time.time() + self.settings.job_lease_seconds})
-        self.redis.expire(self.task_key(task_id, "slots"), self.settings.queue_state_ttl_seconds)
+        if self.track_task_slots:
+            self.redis.zadd(self.task_key(task_id, "slots"), {job_id: time.time() + self.settings.job_lease_seconds})
+            self.redis.expire(self.task_key(task_id, "slots"), self.settings.queue_state_ttl_seconds)
 
     def ack_job(
             self,

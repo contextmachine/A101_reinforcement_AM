@@ -71,6 +71,21 @@ _METRICS = "\n\n`actual_mass_kg` включает анкеровку и подр
 
 # name: (group index, summary, description)
 OPERATIONS = {
+    "start_v2_task": (3, "Создать задачу v2 для всего поля", "Создаёт whole-field задачу без component-декомпозиции. Все исходно запрошенные N переходят в preparing; PostgreSQL хранит их фактические состояния."),
+    "add_v2_task_n": (3, "Добавить N в задачу v2", "Добавляет новые значения N. После готового preparing повторная подготовка не запускается; error/cancelled создают новый attempt, active/success не дублируются."),
+    "cancel_v2_task_n": (3, "Отменить N задачи v2", "Помечает перечисленные N cancelled. Устаревшие jobs/attempt после завершения не имеют права продолжать downstream pipeline."),
+    "get_v2_task": (3, "Получить состояния всех N задачи v2", "Возвращает все запрошенные N, включая незавершённые, с реальным persisted state из PostgreSQL."),
+    "get_v2_task_n": (5, "Получить результат одного N задачи v2", "Возвращает текущее состояние N и, когда готово, whole-field zones, visible bar layout и mass metrics без component metadata."),
+    "start_v2_bars": (5, "Запустить раскладку стержней v2", "Создаёт асинхронный bar-layout запрос по compact zones и возвращает bars_id."),
+    "get_v2_bars": (5, "Получить раскладку стержней v2", "Возвращает persisted состояние запроса bars и готовый visible bar layout/mass metrics либо лаконичную ошибку."),
+    "start_v2_verification": (5, "Запустить проверку армирования v2", "Создаёт асинхронную verification-операцию. Validation worker сам строит bar layout и проверяет исходные source polygons."),
+    "get_v2_verification": (5, "Получить проверку армирования v2", "Возвращает persisted состояние verification и требуемое/фактическое армирование в см²/м и кг/м³."),
+    "v2_create_scene_dxf_upload": (0, "Загрузить DXF-сцену v2", "Создаёт reusable scene из DXF и возвращает scene_id/state."),
+    "v2_create_scene_json_upload": (0, "Загрузить JSON-сцену v2", "Создаёт reusable scene из лаконичного массива полигонов v2."),
+    "v2_create_scene_tables_upload": (0, "Загрузить XLSX-сцену v2", "Создаёт reusable scene из таблиц nodes/elements/loads."),
+    "v2_scene_polygons": (1, "Получить полигоны сцены v2", "Возвращает лаконичные source polygons выбранного raw/smooth overlay snapshot."),
+    "v2_append_scene_overlays": (2, "Добавить overlays сцены v2", "Добавляет append-only clean/unclean операции и возвращает новый overlay_id snapshot."),
+    "v2_get_scene_overlay": (2, "Получить overlay snapshot сцены v2", "Возвращает overlay events до выбранного snapshot по append-порядку, а не по числовому сравнению id."),
     "create_scene_dxf_upload": (0, "Создать сцену из DXF", "Загружает DXF, синхронно в API формирует raw/smooth и создаёт reusable scene_id без расчётных компонентов. Компоненты появятся только после создания task с известным фоном. Успешный ответ сразу возвращает state=ready."),
     "create_scene_json_upload": (0, "Создать сцену из JSON", "Загружает JSON source-polygons и создаёт scene_id без task_id. Raw и smooth подготавливаются синхронно в API; расчётные компоненты создаются позже на уровне task. Успешный ответ сразу ready."),
     "create_scene_tables_upload": (0, "Создать сцену из трёх XLSX", "Загружает nodes/elements/loads XLSX и синхронно в API формирует source-polygons и raw/smooth. Расчётные компоненты создаются позже на уровне task после определения фонового армирования. Успешный ответ сразу содержит ready scene_id."),
@@ -115,6 +130,9 @@ OPERATIONS = {
 PARAMETERS = {
     "scene_id": "Идентификатор переиспользуемой сцены, полученный из /v1/scenes/*_upload или старой upload-ручки.",
     "task_id": "Идентификатор задачи из ответа загрузки (32 шестнадцатеричных символа).",
+    "bars_id": "Идентификатор асинхронной операции раскладки стержней из POST /v2/bars.",
+    "verification_id": "Идентификатор асинхронной операции проверки армирования из POST /v2/verification.",
+    "overlay_id": "Идентификатор/селектор snapshot overlay сцены v2: 0 — исходное состояние, положительный id — точный snapshot, отрицательные значения — snapshot с конца append-порядка.",
     "component_id": "ID реальной task-компоненты. Чтение -1 даёт aggregate-сводку; запуск N для -1 у нового task означает direct whole-field solve, а при K=1 является alias на component 0. Legacy-task сохраняет исторический whole.",
     "solution_id": "Идентификатор конкретного решения из списка solutions.",
     "n": "Число зон N, для которого читается сохранённый результат.",

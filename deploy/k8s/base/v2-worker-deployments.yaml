@@ -1,0 +1,424 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rebar-v2-preparing
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: rebar-v2-preparing
+  template:
+    metadata:
+      labels:
+        app: rebar-v2-preparing
+        rebar-worker-stage: preparing
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+      - name: ghcr-secret
+      tolerations:
+      - effect: NoSchedule
+        key: workload
+        operator: Equal
+        value: heavy-jobs
+      terminationGracePeriodSeconds: 21630
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: worker
+        image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
+        imagePullPolicy: Always
+        command:
+        - python
+        - -m
+        - rebar_service.v2_worker
+        envFrom:
+        - configMapRef:
+            name: rebar-config
+        - secretRef:
+            name: rebar-secrets
+        env:
+        - name: REBAR_V2_WORKER_STAGE
+          value: preparing
+        - name: REBAR_POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: a101-postgres-auth
+              key: POSTGRES_USER
+        - name: REBAR_POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: a101-postgres-auth
+              key: POSTGRES_PASSWORD
+        - name: REBAR_DB_POOL_SIZE
+          value: '1'
+        - name: REBAR_DB_MAX_OVERFLOW
+          value: '0'
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: cache
+          mountPath: /tmp/rebar-cache
+        resources:
+          requests:
+            cpu: '1'
+            memory: 2Gi
+          limits:
+            cpu: '4'
+            memory: 8Gi
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: cache
+        emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rebar-v2-solving
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: rebar-v2-solving
+  template:
+    metadata:
+      labels:
+        app: rebar-v2-solving
+        rebar-worker-stage: solving
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+      - name: ghcr-secret
+      tolerations:
+      - effect: NoSchedule
+        key: workload
+        operator: Equal
+        value: heavy-jobs
+      terminationGracePeriodSeconds: 21630
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: worker
+        image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
+        imagePullPolicy: Always
+        command:
+        - python
+        - -m
+        - rebar_service.v2_worker
+        envFrom:
+        - configMapRef:
+            name: rebar-config
+        - secretRef:
+            name: rebar-secrets
+        env:
+        - name: REBAR_V2_WORKER_STAGE
+          value: solving
+        - name: REBAR_POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: a101-postgres-auth
+              key: POSTGRES_USER
+        - name: REBAR_POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: a101-postgres-auth
+              key: POSTGRES_PASSWORD
+        - name: REBAR_DB_POOL_SIZE
+          value: '1'
+        - name: REBAR_DB_MAX_OVERFLOW
+          value: '0'
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: cache
+          mountPath: /tmp/rebar-cache
+        resources:
+          requests:
+            cpu: '1'
+            memory: 2Gi
+          limits:
+            cpu: '4'
+            memory: 8Gi
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: cache
+        emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rebar-v2-fitting
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: rebar-v2-fitting
+  template:
+    metadata:
+      labels:
+        app: rebar-v2-fitting
+        rebar-worker-stage: fitting
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+      - name: ghcr-secret
+      tolerations:
+      - effect: NoSchedule
+        key: workload
+        operator: Equal
+        value: heavy-jobs
+      terminationGracePeriodSeconds: 21630
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: worker
+        image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
+        imagePullPolicy: Always
+        command:
+        - python
+        - -m
+        - rebar_service.v2_worker
+        envFrom:
+        - configMapRef:
+            name: rebar-config
+        - secretRef:
+            name: rebar-secrets
+        env:
+        - name: REBAR_V2_WORKER_STAGE
+          value: fitting
+        - name: REBAR_POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: a101-postgres-auth
+              key: POSTGRES_USER
+        - name: REBAR_POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: a101-postgres-auth
+              key: POSTGRES_PASSWORD
+        - name: REBAR_DB_POOL_SIZE
+          value: '1'
+        - name: REBAR_DB_MAX_OVERFLOW
+          value: '0'
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: cache
+          mountPath: /tmp/rebar-cache
+        resources:
+          requests:
+            cpu: '1'
+            memory: 2Gi
+          limits:
+            cpu: '4'
+            memory: 8Gi
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: cache
+        emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rebar-v2-baring
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: rebar-v2-baring
+  template:
+    metadata:
+      labels:
+        app: rebar-v2-baring
+        rebar-worker-stage: baring
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+      - name: ghcr-secret
+      tolerations:
+      - effect: NoSchedule
+        key: workload
+        operator: Equal
+        value: heavy-jobs
+      terminationGracePeriodSeconds: 21630
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: worker
+        image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
+        imagePullPolicy: Always
+        command:
+        - python
+        - -m
+        - rebar_service.v2_worker
+        envFrom:
+        - configMapRef:
+            name: rebar-config
+        - secretRef:
+            name: rebar-secrets
+        env:
+        - name: REBAR_V2_WORKER_STAGE
+          value: baring
+        - name: REBAR_POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: a101-postgres-auth
+              key: POSTGRES_USER
+        - name: REBAR_POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: a101-postgres-auth
+              key: POSTGRES_PASSWORD
+        - name: REBAR_DB_POOL_SIZE
+          value: '1'
+        - name: REBAR_DB_MAX_OVERFLOW
+          value: '0'
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: cache
+          mountPath: /tmp/rebar-cache
+        resources:
+          requests:
+            cpu: '1'
+            memory: 2Gi
+          limits:
+            cpu: '4'
+            memory: 8Gi
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: cache
+        emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rebar-v2-validation
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: rebar-v2-validation
+  template:
+    metadata:
+      labels:
+        app: rebar-v2-validation
+        rebar-worker-stage: validation
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+      - name: ghcr-secret
+      tolerations:
+      - effect: NoSchedule
+        key: workload
+        operator: Equal
+        value: heavy-jobs
+      terminationGracePeriodSeconds: 21630
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: worker
+        image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
+        imagePullPolicy: Always
+        command:
+        - python
+        - -m
+        - rebar_service.v2_worker
+        envFrom:
+        - configMapRef:
+            name: rebar-config
+        - secretRef:
+            name: rebar-secrets
+        env:
+        - name: REBAR_V2_WORKER_STAGE
+          value: validation
+        - name: REBAR_POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: a101-postgres-auth
+              key: POSTGRES_USER
+        - name: REBAR_POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: a101-postgres-auth
+              key: POSTGRES_PASSWORD
+        - name: REBAR_DB_POOL_SIZE
+          value: '1'
+        - name: REBAR_DB_MAX_OVERFLOW
+          value: '0'
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: cache
+          mountPath: /tmp/rebar-cache
+        resources:
+          requests:
+            cpu: '1'
+            memory: 2Gi
+          limits:
+            cpu: '4'
+            memory: 8Gi
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: cache
+        emptyDir: {}

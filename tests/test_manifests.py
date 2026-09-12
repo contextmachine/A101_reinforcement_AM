@@ -138,3 +138,67 @@ def test_api_default_database_pool_is_bounded_for_single_postgres_pod():
     config = (root / "deploy/k8s/base/configmap.yaml").read_text(encoding="utf-8")
     assert "REBAR_DB_POOL_SIZE: '5'" in config
     assert "REBAR_DB_MAX_OVERFLOW: '5'" in config
+
+
+def test_v2_worker_deployments_are_stage_isolated_and_db_pools_are_bounded():
+    root = Path(__file__).resolve().parents[1]
+    path = root / "deploy/k8s/base/v2-worker-deployments.yaml"
+    assert path.exists()
+    docs = [doc for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")) if doc]
+    deployments = {doc["metadata"]["name"]: doc for doc in docs if doc.get("kind") == "Deployment"}
+    expected = {f"rebar-v2-{stage}" for stage in ("preparing", "solving", "fitting", "baring", "validation")}
+    assert set(deployments) == expected
+    for stage in ("preparing", "solving", "fitting", "baring", "validation"):
+        deployment = deployments[f"rebar-v2-{stage}"]
+        container = deployment["spec"]["template"]["spec"]["containers"][0]
+        assert container["command"] == ["python", "-m", "rebar_service.v2_worker"]
+        env = {row["name"]: row.get("value") for row in container.get("env", []) if "value" in row}
+        assert env["REBAR_V2_WORKER_STAGE"] == stage
+        assert env["REBAR_DB_POOL_SIZE"] == "1"
+        assert env["REBAR_DB_MAX_OVERFLOW"] == "0"
+
+
+def test_v2_keda_scaledobjects_watch_only_their_stage_workload_queues():
+    root = Path(__file__).resolve().parents[1]
+    for overlay in ("dev", "prod"):
+        path = root / f"deploy/k8s/overlays/{overlay}/v2-worker-scaledobjects.yaml"
+        assert path.exists()
+        docs = [doc for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")) if doc]
+        scaled = {doc["metadata"]["name"]: doc for doc in docs}
+        for stage in ("preparing", "solving", "fitting", "baring", "validation"):
+            row = scaled[f"rebar-v2-{stage}"]
+            assert row["spec"]["scaleTargetRef"]["name"] == f"rebar-v2-{stage}"
+            assert row["spec"]["triggers"][0]["metadata"]["listName"] == f"rebar:v2:{stage}:workload"
+            assert int(row["spec"]["maxReplicaCount"]) >= 32
+
+
+def test_configmap_centralizes_v2_runtime_limits_without_enabling_s3_logging_by_default():
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "deploy/k8s/base/configmap.yaml").read_text(encoding="utf-8")
+    for key in (
+        "REBAR_V2_QUEUE_PREFIX",
+        "REBAR_MAX_CONCURRENT_SOLVERS_PER_TASK",
+        "REBAR_SOLVER_HARD_MAX_N",
+        "REBAR_PREPARE_PROBLEM_MAX_N",
+        "REBAR_PREPARE_MAX_DENSE_CELLS",
+        "REBAR_DEFAULT_STEEL_DENSITY_KG_M3",
+    ):
+        assert f"{key}:" in text
+    # Null/absent S3 config is the feature flag: a default deploy must not create solver logs.
+    assert "REBAR_SOLVER_LOG_BUCKET:" not in text
+    assert "REBAR_SOLVER_LOG_PREFIX:" not in text
+    assert "REBAR_SOLVER_LOG_ACCESS_KEY:" not in text
+    assert "REBAR_SOLVER_LOG_SECRET_KEY:" not in text
+
+
+def test_prod_private_patches_image_pull_secret_for_all_v2_workers():
+    root = Path(__file__).resolve().parents[1]
+    path = root / "deploy/k8s/overlays/prod-private/v2-workers-image-pull-secret-patch.yaml"
+    assert path.exists()
+    docs = [doc for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")) if doc]
+    names = {doc["metadata"]["name"] for doc in docs}
+    assert names == {f"rebar-v2-{stage}" for stage in ("preparing", "solving", "fitting", "baring", "validation")}
+    for doc in docs:
+        assert doc["spec"]["template"]["spec"]["imagePullSecrets"] == [{"name": "ghcr-pull"}]
+    kust = yaml.safe_load((root / "deploy/k8s/overlays/prod-private/kustomization.yaml").read_text(encoding="utf-8"))
+    assert any(row.get("path") == "v2-workers-image-pull-secret-patch.yaml" for row in kust.get("patches", []))
