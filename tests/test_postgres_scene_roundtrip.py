@@ -76,7 +76,7 @@ def test_real_postgres_0002_to_head_preserves_history_and_storage_roundtrip(monk
                 VALUES (:t,'task_created','{"variant":"smooth"}')"""), {'t': legacy})
         command.upgrade(ac, 'head')
         with engine.connect() as c:
-            assert c.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '0004_scene_audit_repairs'
+            assert c.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '0005_v2_tasks'
             assert c.execute(text('SELECT count(*) FROM solutions WHERE solution_id=:s'), {'s': sid}).scalar_one() == 1
             assert c.execute(text("SELECT count(*) FROM solutions WHERE task_id=:t AND variant='raw' AND overlay_id=0"), {'t': legacy}).scalar_one() == 1
             assert c.execute(text("SELECT preparation_state FROM task_analyses WHERE task_id=:t AND variant='raw' AND overlay_id=0"), {'t': legacy}).scalar_one() == 'prepared'

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -43,7 +44,7 @@ from .pipeline import (
     public_value,
     to_compat_result,
 )
-from .planner import normalize_n_request, validate_n_request_limits, validate_solver_limits
+from .planner import normalize_n_request, validate_n_request_limits
 from .source_polygons import (
     SourcePolygonsError,
     pack_xlsx_tables_bundle,
@@ -65,6 +66,8 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Rebar Optimizer API", version="2.0.0", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
+# The /v2 router resolves the store/settings through the app that mounts it.
+app.state.api_module = sys.modules[__name__]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
@@ -88,18 +91,8 @@ def _build_task(
     validate_n_request_limits(
         parameters.n,
         max_values=settings.max_planned_n_values,
-        max_n=min(int(settings.max_n_value), 250),
+        max_n=settings.max_n,
     )
-    validate_solver_limits(
-        parameters.solver.model_dump(mode="python"),
-        max_threads=settings.max_solver_threads,
-        max_timeout=settings.max_solver_timeout_seconds,
-    )
-    requested_limit = parameters.max_concurrent_jobs
-    if requested_limit is not None and requested_limit > settings.max_jobs_per_task:
-        raise ValueError(
-            f"max_concurrent_jobs={requested_limit} превышает серверный лимит {settings.max_jobs_per_task}"
-        )
 
     mode, order, n_source = normalize_n_request(parameters.n)
     params = parameters.model_dump(mode="python")
@@ -109,19 +102,13 @@ def _build_task(
         "whole",
         "component_result_top_k",
         "validate_results",
-        "max_concurrent_jobs",
     ):
         params.pop(control_key, None)
-    prepared_max_n = params.get("solver", {}).get("prepared_max_n")
-    hard_max_n = min(int(settings.max_n_value), 100)
-    if prepared_max_n is not None and int(prepared_max_n) > hard_max_n:
-        raise ValueError(
-            f"prepared_max_n={prepared_max_n} превышает лимит одного solver-запуска {hard_max_n}"
-        )
 
     task_id = uuid.uuid4().hex
     now = time.time()
-    limit = int(requested_limit or settings.max_jobs_per_task)
+    # ``tasks.max_concurrent_jobs`` is NOT NULL; the ConfigMap is its only source.
+    limit = int(settings.max_jobs_per_task)
     initial_state = "queued_preparation" if start_pipeline else "uploaded"
 
     # Upload routes materialize source polygons in the API process.  Tasks then
@@ -154,7 +141,7 @@ def _build_task(
         "n_source": n_source,
         "scan_mode": parameters.scan_mode,
         "whole": bool(parameters.whole),
-        "component_result_top_k": int(parameters.component_result_top_k),
+        "component_result_top_k": int(settings.frontier_top_k),
         "validate_results": bool(parameters.validate_results),
         "max_concurrent_jobs": limit,
         "manual_mode": bool(manual_mode),
@@ -171,7 +158,7 @@ def _build_task(
         "cursor": 0,
         "paused": False,
         "exhausted": False,
-        "window": max(1, limit * settings.schedule_window_factor),
+        "window": max(1, limit),
     }
     store.create_task(task_id, meta, plan, task_input_obj)
     store.publish_event(
@@ -318,7 +305,6 @@ def _apply_upload_overrides(
     *,
     scan_mode: str | None,
     whole: bool | None,
-    component_result_top_k: int | None,
     validate_results: bool | None,
 ) -> TaskParameters:
     updates = {}
@@ -326,8 +312,6 @@ def _apply_upload_overrides(
         updates["scan_mode"] = scan_mode
     if whole is not None:
         updates["whole"] = whole
-    if component_result_top_k is not None:
-        updates["component_result_top_k"] = component_result_top_k
     if validate_results is not None:
         updates["validate_results"] = validate_results
     return TaskParameters.model_validate({**parameters.model_dump(mode="python"), **updates})
@@ -534,23 +518,21 @@ async def create_task(request: TaskCreate, smooth: bool = Query(False)):
 
 def _upload_parameters(
     config: str | None, *, start: bool, scan_mode: str | None, whole: bool | None,
-    component_result_top_k: int | None, validate_results: bool | None,
+    validate_results: bool | None,
 ) -> TaskParameters:
     parameters = _parameters_from_upload_config(config, start=bool(start))
     return _apply_upload_overrides(
-        parameters, scan_mode=scan_mode, whole=whole,
-        component_result_top_k=component_result_top_k, validate_results=validate_results,
+        parameters, scan_mode=scan_mode, whole=whole, validate_results=validate_results,
     )
 
 
 async def _finish_source_upload(
     *, config: str | None, input_obj: dict, start: bool, smooth: bool, scan_mode: str | None,
-    whole: bool | None, component_result_top_k: int | None, validate_results: bool | None,
+    whole: bool | None, validate_results: bool | None,
 ) -> TaskCreated:
     try:
         parameters = _upload_parameters(
-            config, start=start, scan_mode=scan_mode, whole=whole,
-            component_result_top_k=component_result_top_k, validate_results=validate_results,
+            config, start=start, scan_mode=scan_mode, whole=whole, validate_results=validate_results,
         )
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
@@ -574,7 +556,6 @@ async def create_task_upload(
     smooth: bool = Query(False),
     scan_mode: str | None = Query(None),
     whole: bool | None = Query(None),
-    component_result_top_k: int | None = Query(None, ge=1, le=100),
     validate_results: bool | None = Query(None),
 ):
     """Create a task from one DXF file. Source polygons are prepared in the API."""
@@ -588,7 +569,7 @@ async def create_task_upload(
     return await _finish_source_upload(
         config=config, input_obj=input_obj, start=start, smooth=smooth, scan_mode=scan_mode,
         whole=whole,
-        component_result_top_k=component_result_top_k, validate_results=validate_results,
+        validate_results=validate_results,
     )
 
 
@@ -603,7 +584,6 @@ async def create_task_tables_upload(
     smooth: bool = Query(False),
     scan_mode: str | None = Query(None),
     whole: bool | None = Query(None),
-    component_result_top_k: int | None = Query(None, ge=1, le=100),
     validate_results: bool | None = Query(None),
 ):
     """Create a task from three XLSX exports; polygons are prepared in the API."""
@@ -621,7 +601,7 @@ async def create_task_tables_upload(
     }
     return await _finish_source_upload(
         config=config, input_obj=input_obj, start=start, smooth=smooth, scan_mode=scan_mode, whole=whole,
-        component_result_top_k=component_result_top_k, validate_results=validate_results,
+        validate_results=validate_results,
     )
 
 
@@ -630,7 +610,7 @@ async def create_task_json_upload(
     config: Annotated[str | None, Form()] = None,
     file: UploadFile = File(...),
     start: bool = Query(True), smooth: bool = Query(False), scan_mode: str | None = Query(None),
-    whole: bool | None = Query(None), component_result_top_k: int | None = Query(None, ge=1, le=100),
+    whole: bool | None = Query(None),
     validate_results: bool | None = Query(None),
 ):
     if not (file.filename or "").lower().endswith(".json"):
@@ -639,7 +619,7 @@ async def create_task_json_upload(
     input_obj = {"kind": "json", "filename": file.filename or "polygons.json", "content": content}
     return await _finish_source_upload(
         config=config, input_obj=input_obj, start=start, smooth=smooth, scan_mode=scan_mode, whole=whole,
-        component_result_top_k=component_result_top_k, validate_results=validate_results,
+        validate_results=validate_results,
     )
 
 
@@ -648,7 +628,7 @@ async def create_task_pickle_upload(
     config: Annotated[str | None, Form()] = None,
     file: UploadFile = File(...),
     start: bool = Query(True), smooth: bool = Query(False), scan_mode: str | None = Query(None),
-    whole: bool | None = Query(None), component_result_top_k: int | None = Query(None, ge=1, le=100),
+    whole: bool | None = Query(None),
     validate_results: bool | None = Query(None),
 ):
     suffix = (file.filename or "").lower()
@@ -658,7 +638,7 @@ async def create_task_pickle_upload(
     input_obj = {"kind": "pickle", "filename": file.filename or "polygons.pickle", "content": content}
     return await _finish_source_upload(
         config=config, input_obj=input_obj, start=start, smooth=smooth, scan_mode=scan_mode, whole=whole,
-        component_result_top_k=component_result_top_k, validate_results=validate_results,
+        validate_results=validate_results,
     )
 
 
@@ -1338,6 +1318,10 @@ async def task_websocket(websocket: WebSocket, task_id: str, after: str = "0-0",
         for task in tasks:
             task.cancel()
 
+
+from .v2.api import router as v2_router
+
+app.include_router(v2_router)
 
 # Documentation only: request/response contracts and runtime validation stay unchanged.
 from .api_docs_ru import install_russian_docs

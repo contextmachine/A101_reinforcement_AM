@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, Iterator, Mapping
 
 from .codec import sha256
@@ -11,6 +12,36 @@ from .jsonutil import dumps, loads
 
 class RedisLockBusy(TimeoutError):
     """Redis lock уже удерживается другим процессом."""
+
+
+@dataclass(frozen=True)
+class QueueNames:
+    """One Redis queue triple: ready list, processing list and KEDA workload list."""
+
+    ready: str
+    processing: str
+    workload: str
+
+    @classmethod
+    def main(cls, settings: Settings) -> "QueueNames":
+        return cls(settings.ready_queue, settings.processing_queue, settings.workload_queue)
+
+    @classmethod
+    def bars(cls, settings: Settings) -> "QueueNames":
+        return cls(
+            settings.bars_ready_queue,
+            settings.bars_processing_queue,
+            settings.bars_workload_queue,
+        )
+
+    @classmethod
+    def verification(cls, settings: Settings) -> "QueueNames":
+        return cls(
+            settings.verification_ready_queue,
+            settings.verification_processing_queue,
+            settings.verification_workload_queue,
+        )
+
 
 class RedisQueue:
     """Redis is intentionally limited to queue and worker-coordination state."""
@@ -29,8 +60,16 @@ class RedisQueue:
     return 1
     """
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, names: QueueNames | None = None):
         self.settings = settings
+        self.names = names or QueueNames.main(settings)
+        # The main queue keeps the historical reaper lock name; isolated queues get their own
+        # lock so that a bars/verification reaper never blocks the main pipeline reaper.
+        self._reaper_lock = (
+            "queue-reaper"
+            if self.names.workload == settings.workload_queue
+            else f"queue-reaper:{self.names.workload}"
+        )
         self._redis = None
 
     @property
@@ -95,8 +134,8 @@ class RedisQueue:
                     self.ENQUEUE_LUA,
                     4,
                     dedupe,
-                    self.settings.ready_queue,
-                    self.settings.workload_queue,
+                    self.names.ready,
+                    self.names.workload,
                     pending,
                     job_id,
                     ttl,
@@ -107,8 +146,8 @@ class RedisQueue:
             if not self.redis.set(dedupe, job_id, nx=True, ex=ttl):
                 return False
             pipe = self.redis.pipeline(transaction=True)
-            pipe.lpush(self.settings.ready_queue, raw)
-            pipe.lpush(self.settings.workload_queue, job_id)
+            pipe.lpush(self.names.ready, raw)
+            pipe.lpush(self.names.workload, job_id)
             pipe.sadd(pending, job_id)
             pipe.expire(pending, ttl)
             pipe.execute()
@@ -118,13 +157,13 @@ class RedisQueue:
         return queued
 
     def claim_job(self, worker_id: str, timeout: int) -> tuple[str, dict[str, Any]] | None:
-        raw = self.redis.brpoplpush(self.settings.ready_queue, self.settings.processing_queue, timeout=int(timeout))
+        raw = self.redis.brpoplpush(self.names.ready, self.names.processing, timeout=int(timeout))
         if raw is None:
             return None
         text_value = raw.decode() if isinstance(raw, bytes) else str(raw)
         job = loads(text_value, None)
         if not isinstance(job, dict):
-            self.redis.lrem(self.settings.processing_queue, 1, raw)
+            self.redis.lrem(self.names.processing, 1, raw)
             return None
         job_id = str(job["job_id"])
         lease = self.job_key(job_id) + ":lease"
@@ -161,13 +200,13 @@ class RedisQueue:
 
         # Удаляем job из processing.
         pipe.lrem(
-            self.settings.processing_queue,
+            self.names.processing,
             1,
             raw,
         )
 
         # Одна поставленная job -> одно удаление из workload.
-        pipe.lrem(self.settings.workload_queue, 1, job_id)
+        pipe.lrem(self.names.workload, 1, job_id)
 
         # Удаляем lease.
         pipe.delete(
@@ -207,7 +246,7 @@ class RedisQueue:
     def requeue_job(self, raw: str, job: Mapping[str, Any], delay: float = 0.0) -> None:
         task_id = str(job["task_id"])
         job_id = str(job["job_id"])
-        self.redis.lrem(self.settings.processing_queue, 1, raw)
+        self.redis.lrem(self.names.processing, 1, raw)
         self.redis.delete(self.job_key(job_id) + ":lease")
         self.redis.zrem(self.task_key(task_id, "slots"), job_id)
         self.redis.set(
@@ -217,17 +256,17 @@ class RedisQueue:
         )
         if delay:
             time.sleep(delay)
-        self.redis.lpush(self.settings.ready_queue, raw)
+        self.redis.lpush(self.names.ready, raw)
 
     def requeue_stale_jobs(self, grace_seconds: float = 10.0) -> int:
         recovered = 0
 
         try:
-            with self.lock("queue-reaper", timeout=2.0):
+            with self.lock(self._reaper_lock, timeout=2.0):
                 now = time.time()
 
                 for raw in self.redis.lrange(
-                        self.settings.processing_queue,
+                        self.names.processing,
                         0,
                         -1,
                 ):
@@ -241,7 +280,7 @@ class RedisQueue:
 
                     if not isinstance(job, dict):
                         self.redis.lrem(
-                            self.settings.processing_queue,
+                            self.names.processing,
                             1,
                             raw,
                         )
@@ -282,12 +321,12 @@ class RedisQueue:
                         "failed",
                     }:
                         self.redis.lrem(
-                            self.settings.processing_queue,
+                            self.names.processing,
                             1,
                             raw,
                         )
                         self.redis.lrem(
-                            self.settings.workload_queue,
+                            self.names.workload,
                             1,
                             job_id,
                         )
@@ -296,13 +335,13 @@ class RedisQueue:
                     # Worker, который забрал job, исчез.
                     # Возвращаем job в ready.
                     self.redis.lrem(
-                        self.settings.processing_queue,
+                        self.names.processing,
                         1,
                         raw,
                     )
 
                     self.redis.rpush(
-                        self.settings.ready_queue,
+                        self.names.ready,
                         raw,
                     )
 

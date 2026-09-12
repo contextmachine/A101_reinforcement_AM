@@ -5,6 +5,8 @@ resources:
   - ../../base
   - keda-auth.yaml
   - worker-scaledobject.yaml
+  - bars-scaledjob.yaml
+  - verification-scaledjob.yaml
   - ingress.yaml
 images:
   - name: ghcr.io/contextmachine/a101_reinforcement_am

@@ -4,7 +4,8 @@ from typing import Any, Mapping
 
 from .config import Settings
 from .postgres_store import PostgresStore
-from .redis_queue import RedisQueue
+from .redis_queue import QueueNames, RedisQueue
+from .v2.store import V2Store
 
 
 class Store(PostgresStore):
@@ -13,6 +14,11 @@ class Store(PostgresStore):
     def __init__(self, settings: Settings):
         super().__init__(settings)
         self.queue = RedisQueue(settings)
+        # Isolated queues of the /v2/bars and /v2/verification workers (own KEDA ScaledJobs).
+        self.bars_queue = RedisQueue(settings, names=QueueNames.bars(settings))
+        self.verification_queue = RedisQueue(settings, names=QueueNames.verification(settings))
+        # /v2 tables (v2_tasks, v2_task_ns, v2_artifacts, v2_bar_tasks, v2_verification_tasks).
+        self.v2 = V2Store(self.database)
 
     @property
     def redis(self):

@@ -642,6 +642,7 @@ def prepare_component_problem(
     short_edge_threshold: float | None = 300.0,
     simplify_steps_threshold: float | None = 1000.0,
     max_n: int | None = None,
+    max_n_resolver: Callable[[np.ndarray, dict[str, Any]], int | None] | None = None,
     use_mosaic: bool = True,
     preserve_demand_classes: bool = True,
     preserve_area_eps: float = 1e-6,
@@ -656,7 +657,16 @@ def prepare_component_problem(
     physical_area_eps: float = 1e-6,
     progress: bool = False,
 ) -> dict[str, Any]:
-    """Build the existing prepared solver model for one demand component."""
+    """Build the existing prepared solver model for one demand component.
+
+    ``max_n_resolver`` is an optional hook ``resolver(work_matrix, context)``
+    called right after the candidate rectangles have been filtered by matrix
+    barriers and before :func:`prepare_rectangle_problem`. ``context`` carries
+    ``recipes``, ``work_x_edges``, ``work_y_edges``, ``holds`` and
+    ``component_id``. Its return value (``int`` or ``None``) replaces ``max_n``
+    for the prepared model; the effective value is exposed as ``"max_n"`` in the
+    returned mapping.
+    """
 
     # Heavy solver modules stay lazy: decomposition/frontier tests need only Shapely.
     from .cells_merging import reduce_mosaic
@@ -831,6 +841,28 @@ def prepare_component_problem(
             f"grid preservation={preserve_stats}"
         )
 
+    if max_n_resolver is not None:
+        started = perf_counter()
+        resolver_context = {
+            "recipes": dict(recipes),
+            "work_x_edges": np.asarray(work_x_edges),
+            "work_y_edges": np.asarray(work_y_edges),
+            "holds": dict(holds),
+            "component_id": component_id,
+        }
+        resolved_max_n = max_n_resolver(work_matrix, resolver_context)
+        if resolved_max_n is not None:
+            if isinstance(resolved_max_n, bool) or int(resolved_max_n) != resolved_max_n or int(resolved_max_n) < 0:
+                raise ValueError(
+                    f"component {component_id}: max_n_resolver вернул {resolved_max_n!r}; "
+                    "ожидается неотрицательное целое или None"
+                )
+            resolved_max_n = int(resolved_max_n)
+        max_n = resolved_max_n
+        mark("max_n_resolver", started, max_n=max_n)
+    elif max_n is not None:
+        max_n = int(max_n)
+
     started = perf_counter()
     solver_matrix = np.where(work_matrix < 0, 0, work_matrix)
     prepared = prepare_rectangle_problem(
@@ -875,6 +907,7 @@ def prepare_component_problem(
         "mosaic": mosaic,
         "mosaic_stats": mosaic_stats,
         "prepared": prepared,
+        "max_n": max_n,
         "poly_mos": poly_mos,
         "base_holds": base_holds,
         "holds": holds,
@@ -1023,8 +1056,14 @@ def solve_component_frontier(
     return_best_on_timeout: bool = True,
     raise_errors: bool = False,
     stop_after_first_feasible: bool = False,
+    highs_options: Mapping[str, Any] | None = None,
 ) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
-    """Solve requested N values in the supplied order and classify timeouts."""
+    """Solve requested N values in the supplied order and classify timeouts.
+
+    ``highs_options`` is forwarded verbatim to :func:`solve_rectangle_job`
+    (and from there to the HiGHS solver process); use it for ``log_file`` /
+    ``output_flag`` / ``log_to_console``.
+    """
 
     from .rectangle_solver_job import solve_rectangle_job
 
@@ -1045,6 +1084,7 @@ def solve_component_frontier(
                 require_optimal=bool(require_optimal),
                 return_best_on_timeout=bool(return_best_on_timeout),
                 raise_worker_errors=bool(raise_errors),
+                highs_options=None if highs_options is None else dict(highs_options),
             )
             row = dict(result or {"n": n, "is_feasible": False, "error": "solver returned None"})
         except Exception as exc:
@@ -1086,8 +1126,14 @@ def fit_component_frontier(
     allow_class_upgrade: bool = True,
     fit_milp_backend: str = "auto",
     fit_threads: int = 1,
+    max_distance: float | None = None,
+    highs_options: Mapping[str, Any] | None = None,
 ) -> dict[int, dict[str, Any]]:
-    """Restore, fit and anchor each feasible local solver result."""
+    """Restore, fit and anchor each feasible local solver result.
+
+    ``highs_options`` (``log_file``/``output_flag``/``log_to_console``) is passed
+    to :func:`fit_box_layout` and applied to its HiGHS instance.
+    """
 
     from .fit_box_layout import fit_box_layout
 
@@ -1137,6 +1183,8 @@ def fit_component_frontier(
             avoid_rectangles=void_rectangles,
             milp_backend=fit_milp_backend,
             threads=fit_threads,
+            max_distance=max_distance,
+            highs_options=highs_options,
         )
         if not fitted.get("is_feasible") or not fitted.get("rectangles"):
             output[int(n)] = {
@@ -1771,7 +1819,7 @@ def _solve_frontier_choice_highs(flat, owner, total_n, nogoods, threads=1, time_
     h = highspy.Highs()
     h.setOptionValue("output_flag", bool(output))
     if threads is not None:
-        h.setOptionValue("threads", max(1, int(threads)))
+        h.setOptionValue("threads", max(0, int(threads)))
     if time_limit is not None:
         h.setOptionValue("time_limit", float(time_limit))
     h.addVars(nvar, np.zeros(nvar), np.ones(nvar))

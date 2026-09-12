@@ -12,6 +12,10 @@ spec:
             matchLabels: {app: rebar-api}
         - podSelector:
             matchLabels: {app: rebar-worker}
+        - podSelector:
+            matchLabels: {app: rebar-bars-worker}
+        - podSelector:
+            matchLabels: {app: rebar-verification-worker}
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: keda

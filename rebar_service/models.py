@@ -31,36 +31,15 @@ class RangeN(BaseModel):
 NRequest = int | list[int] | RangeN
 
 
-class QuantizerOptions(BaseModel):
-    method: Literal["exact", "heuristic"] = "exact"
-    preserve_holes: bool = True
-    max_shift_fraction: float = 0.02
-    shrink_penalty: float = 30.0
-    expand_penalty: float = 1.0
-    load_gamma: float = 2.5
-    min_shrink_tol_ratio: float = 0.10
-    min_expand_tol_ratio: float = 0.50
-    coord_eps: float = 1e-6
-    target_cells_x: int | None = Field(default=None, ge=1)
-    target_cells_y: int | None = Field(default=None, ge=1)
-
-
 class SolverOptions(BaseModel):
-    backend: Literal["highs", "cbc"] = "highs"
-    timeout_seconds: float | None = Field(default=None, gt=0)
+    """The only solver knob a request may carry; everything else comes from the ConfigMap.
+
+    Unknown keys are ignored so historical payloads keep working.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
     solver_time_limit: float | None = Field(default=None, gt=0)
-    threads: int = Field(default=1, ge=1)
-    require_optimal: bool = True
-    return_best_on_timeout: bool = True
-    use_warm_start: bool = True
-    cross_n_warm_start: bool = True
-    emit_interval: float = Field(default=5.0, gt=0)
-    emit_every_nodes: int | None = Field(default=None, ge=1)
-    emit_heartbeat: bool = True
-    highs_options: dict[str, object] = Field(default_factory=dict)
-    prepared_max_n: int | None = Field(default=None, ge=0)
-    build_pulp_template: bool = False
-    postprocess_intermediate: bool = False
 
 
 class TaskParameters(BaseModel):
@@ -78,10 +57,7 @@ class TaskParameters(BaseModel):
     min_bar_gap_mm: float = Field(default=50.0, ge=0)
     scan_mode: Literal["requested", "hard"] = "requested"
     whole: bool = False
-    component_result_top_k: int = Field(default=5, ge=1, le=100)
     validate_results: bool = False
-    max_concurrent_jobs: int | None = Field(default=None, ge=1)
-    quantizer: QuantizerOptions = Field(default_factory=QuantizerOptions)
     solver: SolverOptions = Field(default_factory=SolverOptions)
 
     @field_validator("back_grid")
@@ -186,8 +162,8 @@ class AnalysisTaskStart(TaskParameters):
         values = list(dict.fromkeys(int(v) for v in value))
         if not values or any(v < 1 for v in values):
             raise ValueError("n должен содержать положительные целые значения")
-        if any(v > 250 for v in values):
-            raise ValueError("N одного solver-запуска не может превышать 250")
+        # The upper bound is REBAR_MAX_N and is enforced in api._build_task via
+        # planner.validate_n_request_limits; no literal cap lives here.
         return values
 
     @field_validator("components")

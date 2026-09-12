@@ -99,6 +99,40 @@ def _epoch(value: Any) -> float:
     return float(value or 0.0)
 
 
+# Overlay states that already carry a mask; a repeated `clean` over them is a no-op.
+_MASKED_OVERLAY_STATES = frozenset({"background_only", "removed"})
+
+
+def _overlay_event_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Wire shape of one stored overlay event (``time`` is the client clock, may be NULL)."""
+
+    client_time = row["client_time"] if "client_time" in row else None
+    return {
+        "seq": int(row["seq"]),
+        "id": int(row["overlay_id"]),
+        "type": str(row["event_type"]),
+        "idxs": [int(x) for x in row["idxs"] or []],
+        "real": bool(row["real"]),
+        "created_at": _epoch(row["created_at"]),
+        "time": None if client_time is None else float(client_time),
+    }
+
+
+def _overlay_client_time(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    moment = float(value)
+    if not math.isfinite(moment):
+        raise ValueError("overlay time must be a finite number")
+    return moment
+
+
+def _overlay_target_state(event_type: str, real: bool) -> str:
+    if event_type == "unclean":
+        return "active"
+    return "background_only" if real else "removed"
+
+
 class PostgresStore:
     """Durable storage for tasks, variants, artifacts, frontiers, solutions and events."""
 
@@ -549,8 +583,8 @@ class PostgresStore:
         values = list(dict.fromkeys(int(n) for n in ns))
         if not values or any(n < 1 for n in values):
             raise ValueError("N должен быть положительным")
-        if any(n > self.settings.max_n_value for n in values):
-            raise ValueError(f"N превышает серверный лимит {self.settings.max_n_value}")
+        if any(n > self.settings.max_n for n in values):
+            raise ValueError(f"N превышает серверный лимит {self.settings.max_n}")
         with self.database.begin() as conn:
             current = conn.execute(
                 text("SELECT COUNT(*) FROM task_n_requests WHERE task_id=:task_id AND variant=:variant"),
@@ -2081,68 +2115,99 @@ class PostgresStore:
             rows = conn.execute(
                 text(
                     """
-                    SELECT seq, overlay_id, event_type, idxs, real, created_at
+                    SELECT seq, overlay_id, event_type, idxs, real, client_time, created_at
                     FROM scene_overlay_events WHERE scene_id=:scene_id ORDER BY seq
                     """
                 ),
                 {"scene_id": scene_id},
             ).mappings().all()
-        return [
-            {
-                "seq": int(row["seq"]),
-                "id": int(row["overlay_id"]),
-                "type": str(row["event_type"]),
-                "idxs": [int(x) for x in row["idxs"] or []],
-                "real": bool(row["real"]),
-                "created_at": _epoch(row["created_at"]),
-            }
-            for row in rows
-        ]
+        return [_overlay_event_row(row) for row in rows]
 
     def append_scene_overlay_events(
         self,
         scene_id: str,
         events: Sequence[Mapping[str, Any]],
     ) -> list[dict[str, Any]]:
+        """Append eraser events to a scene, allocating ids and skipping no-op indices.
+
+        ``id`` is optional: when it is absent the store allocates the next id inside
+        the same ``FOR UPDATE`` transaction, so ids grow strictly in append order.
+        Indices that would apply a mask twice (or lift a mask that is not there) are
+        dropped before the insert; an event whose index list becomes empty is still
+        stored, so the caller always gets an id back.
+        """
         if self.get_scene(scene_id) is None:
             raise KeyError(scene_id)
-        polygon_count = len(self.load_scene_variant_polygons(scene_id, variant="raw"))
+        polygons = self.load_scene_variant_polygons(scene_id, variant="raw")
+        polygon_count = len(polygons)
         rows: list[dict[str, Any]] = []
         seen: set[int] = set()
         for raw in events:
             event_type = str(raw.get("type", "")).lower()
             if event_type not in {"clean", "unclean"}:
                 raise ValueError("overlay type must be 'clean' or 'unclean'")
-            overlay_id = int(raw.get("id"))
-            if overlay_id <= 0:
-                raise ValueError("overlay id must be a positive integer; 0 is reserved for base state")
-            if overlay_id in seen:
-                raise ValueError(f"duplicate overlay id in request: {overlay_id}")
-            seen.add(overlay_id)
+            raw_id = raw.get("id")
+            overlay_id: int | None = None
+            if raw_id is not None and raw_id != "":
+                overlay_id = int(raw_id)
+                if overlay_id <= 0:
+                    raise ValueError("overlay id must be a positive integer; 0 is reserved for base state")
+                if overlay_id in seen:
+                    raise ValueError(f"duplicate overlay id in request: {overlay_id}")
+                seen.add(overlay_id)
             idxs = list(dict.fromkeys(int(x) for x in (raw.get("idxs", []) or [])))
             invalid = [idx for idx in idxs if idx < 0 or idx >= polygon_count]
             if invalid:
                 raise ValueError(f"source polygon indices out of range: {invalid}")
-            rows.append({"id": overlay_id, "type": event_type, "idxs": idxs, "real": bool(raw.get("real", False))})
+            rows.append(
+                {
+                    "id": overlay_id,
+                    "type": event_type,
+                    "idxs": idxs,
+                    "real": bool(raw.get("real", False)),
+                    "time": _overlay_client_time(raw.get("time")),
+                }
+            )
         if not rows:
             return self.scene_overlay_events(scene_id)
         try:
             with self.database.begin() as conn:
                 conn.execute(text("SELECT id FROM scenes WHERE id=:scene_id FOR UPDATE"), {"scene_id": scene_id})
+                states = self._head_overlay_states(conn, scene_id, polygons)
                 for row in rows:
+                    target = _overlay_target_state(row["type"], row["real"])
+                    if row["type"] == "unclean":
+                        idxs = [idx for idx in row["idxs"] if states[idx] != "active"]
+                    else:
+                        idxs = [idx for idx in row["idxs"] if states[idx] not in _MASKED_OVERLAY_STATES]
+                    for idx in idxs:
+                        states[idx] = target
+                    overlay_id = row["id"]
+                    if overlay_id is None:
+                        overlay_id = int(
+                            conn.execute(
+                                text(
+                                    "SELECT COALESCE(MAX(overlay_id), 0) + 1 FROM scene_overlay_events "
+                                    "WHERE scene_id=:scene_id"
+                                ),
+                                {"scene_id": scene_id},
+                            ).scalar_one()
+                        )
                     conn.execute(
                         text(
                             """
-                            INSERT INTO scene_overlay_events (scene_id, overlay_id, event_type, idxs, real)
-                            VALUES (:scene_id, :overlay_id, :event_type, :idxs, :real)
+                            INSERT INTO scene_overlay_events
+                                (scene_id, overlay_id, event_type, idxs, real, client_time)
+                            VALUES (:scene_id, :overlay_id, :event_type, :idxs, :real, :client_time)
                             """
                         ),
                         {
                             "scene_id": scene_id,
-                            "overlay_id": row["id"],
+                            "overlay_id": overlay_id,
                             "event_type": row["type"],
-                            "idxs": row["idxs"],
+                            "idxs": idxs,
                             "real": row["real"],
+                            "client_time": row["time"],
                         },
                     )
         except Exception as exc:
@@ -2150,6 +2215,34 @@ class PostgresStore:
                 raise ValueError("overlay id already exists for this scene") from exc
             raise
         return self.scene_overlay_events(scene_id)
+
+    @staticmethod
+    def _head_overlay_states(conn: Any, scene_id: str, polygons: Sequence[Mapping[str, Any]]) -> list[str]:
+        """Materialise the overlay state of every source polygon at the current head."""
+
+        rows = conn.execute(
+            text(
+                """
+                SELECT seq, overlay_id, event_type, idxs, real
+                FROM scene_overlay_events WHERE scene_id=:scene_id ORDER BY seq
+                """
+            ),
+            {"scene_id": scene_id},
+        ).mappings().all()
+        events = [
+            {
+                "seq": int(row["seq"]),
+                "id": int(row["overlay_id"]),
+                "type": str(row["event_type"]),
+                "idxs": [int(x) for x in row["idxs"] or []],
+                "real": bool(row["real"]),
+            }
+            for row in rows
+        ]
+        if not events:
+            return ["active" for _ in polygons]
+        head_id = events[-1]["id"]
+        return [str(row["overlay_state"]) for row in resolve_overlay(polygons, events, head_id)]
 
     def resolve_scene_overlay_id(self, scene_id: str, selector: int | str | None = 0) -> int:
         if self.get_scene(scene_id) is None:
@@ -2419,8 +2512,8 @@ class PostgresStore:
         values = list(dict.fromkeys(int(n) for n in ns))
         if not values or any(n < 1 for n in values):
             raise ValueError("N должен быть положительным")
-        if any(n > self.settings.max_n_value for n in values):
-            raise ValueError(f"N превышает серверный лимит {self.settings.max_n_value}")
+        if any(n > self.settings.max_n for n in values):
+            raise ValueError(f"N превышает серверный лимит {self.settings.max_n}")
         params_base = {"task_id": task_id, "variant": selected, "overlay_id": selected_overlay}
         with self.database.begin() as conn:
             current = conn.execute(

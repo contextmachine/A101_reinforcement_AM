@@ -6,3 +6,23 @@ resources:
 patches:
   - path: api-image-pull-secret-patch.yaml
   - path: worker-image-pull-secret-patch.yaml
+  - target:
+      group: keda.sh
+      version: v1alpha1
+      kind: ScaledJob
+      name: rebar-bars-worker
+    patch: |-
+      - op: replace
+        path: /spec/jobTargetRef/template/spec/imagePullSecrets
+        value:
+          - name: ghcr-pull
+  - target:
+      group: keda.sh
+      version: v1alpha1
+      kind: ScaledJob
+      name: rebar-verification-worker
+    patch: |-
+      - op: replace
+        path: /spec/jobTargetRef/template/spec/imagePullSecrets
+        value:
+          - name: ghcr-pull

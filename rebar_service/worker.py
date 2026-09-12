@@ -10,41 +10,16 @@ import uuid
 from .config import get_settings
 from .pipeline import PipelineJob, PipelineWorkflow
 from .store import Store
+from .worker_loop import LeaseHeartbeat
 
-
-class LeaseHeartbeat:
-    def __init__(self, store: Store, job: dict, worker_id: str) -> None:
-        self.store = store
-        self.job = job
-        self.worker_id = worker_id
-        self.stop = threading.Event()
-        self.thread: threading.Thread | None = None
-
-    def __enter__(self):
-        interval = max(1.0, self.store.settings.job_lease_seconds / 3.0)
-
-        def run() -> None:
-            while not self.stop.wait(interval):
-                try:
-                    self.store.heartbeat_job(self.job, self.worker_id)
-                except Exception:
-                    # A temporary heartbeat failure must not abort a running solver.
-                    pass
-
-        self.thread = threading.Thread(target=run, name="rebar-lease-heartbeat", daemon=True)
-        self.thread.start()
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        self.stop.set()
-        if self.thread is not None:
-            self.thread.join(timeout=2.0)
+__all__ = ["LeaseHeartbeat", "run_worker", "main"]
 
 
 def run_worker() -> None:
     settings = get_settings()
     store = Store(settings)
     workflow = PipelineWorkflow(store, settings)
+    v2_workflow = None
     worker_id = f"{os.getenv('HOSTNAME', 'worker')}-{uuid.uuid4().hex[:8]}"
     stopping = threading.Event()
 
@@ -88,6 +63,28 @@ def run_worker() -> None:
                 store.ack_job(raw, job_data, "done")
             continue
 
+        # /v2 jobs carry their own state machine in PostgreSQL (v2_tasks / v2_task_ns):
+        # no meta row, no generation, no task slot.
+        if str(job_data.get("kind", "")).startswith("v2_"):
+            if v2_workflow is None:
+                try:
+                    from .v2.pipeline import V2Pipeline
+                except ImportError:
+                    traceback.print_exc()
+                    store.ack_job(raw, job_data, "failed")
+                    continue
+            try:
+                if v2_workflow is None:
+                    v2_workflow = V2Pipeline(store, settings)
+                with LeaseHeartbeat(store, job_data, worker_id):
+                    v2_workflow.dispatch(job_data, worker_id)
+            except Exception:
+                traceback.print_exc()
+                store.ack_job(raw, job_data, "failed")
+            else:
+                store.ack_job(raw, job_data, "done")
+            continue
+
         meta = store.get_meta(task_id)
         if meta is None:
             store.ack_job(raw, job_data, "discarded")
@@ -102,7 +99,7 @@ def run_worker() -> None:
             store.requeue_job(raw, job_data, delay=1.0)
             continue
 
-        task_limit = int(meta.get("max_concurrent_jobs") or settings.max_jobs_per_task)
+        task_limit = int(settings.max_jobs_per_task)
         if not store.acquire_task_slot(task_id, job_id, task_limit):
             store.requeue_job(raw, job_data, delay=0.05)
             continue

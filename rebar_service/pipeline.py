@@ -25,7 +25,6 @@ from .planner import edge_to_middle_order, round_robin_unit_plans
 
 WHOLE_COMPONENT_ID = -1
 WHOLE_COMPONENT_KEY = "whole"
-SOLVER_HARD_MAX_N = 1000
 
 
 def component_storage_id(component_id: int | str) -> int | str:
@@ -735,13 +734,8 @@ class PipelineWorkflow:
         field = self._field(task_id, variant)
         cfg = field["cfg"]
         params = self._params(task_id)
-        solver = self._solver(task_id)
-        prepared_max_n = solver.get("prepared_max_n")
-        if prepared_max_n in (None, 0, "0"):
-            prepared_max_n = SOLVER_HARD_MAX_N
-        else:
-            prepared_max_n = min(int(prepared_max_n), SOLVER_HARD_MAX_N)
-        prepared_max_n = min(int(prepared_max_n), int(self.settings.max_n_value))
+        # REBAR_MAX_N is the single ceiling for the prepared candidate matrix.
+        prepared_max_n = int(self.settings.max_n)
         problem = prepare_component_problem(
             component,
             load2cls=cfg["load2cls"],
@@ -902,10 +896,7 @@ class PipelineWorkflow:
         problem = stored["problem"]
         field = self._field(task_id, variant)
         cfg = dict(field.get("cfg", {}) or {})
-        cap = min(SOLVER_HARD_MAX_N, int(self.settings.max_n_value))
-        configured = self._solver(task_id).get("prepared_max_n")
-        if configured is not None:
-            cap = min(cap, int(configured))
+        cap = int(self.settings.max_n)
         return estimate_max_useful_n(problem["work_matrix"], recipes=cfg.get("recipes"), hard_cap=cap)
 
     def handle_compute_max_n_component(self, job: PipelineJob) -> None:
@@ -917,7 +908,7 @@ class PipelineWorkflow:
         max_n = int(result.get("max_useful_n")) if feasible else None
         requested = self._requested_ns(task_id, variant, self._current_overlay_id())
         plan = edge_to_middle_order(
-            n for n in requested if max_n is not None and 1 <= int(n) <= min(max_n, SOLVER_HARD_MAX_N)
+            n for n in requested if max_n is not None and 1 <= int(n) <= min(max_n, int(self.settings.max_n))
         )
         result = {**dict(result), "max_useful_n": max_n}
         record.update(
@@ -1231,15 +1222,13 @@ class PipelineWorkflow:
 
     def _solver_options(self, task_id: str) -> tuple[dict[str, Any], int, float | None, float | None, str, bool]:
         solver = self._solver(task_id)
-        threads = self.settings.effective_threads(solver.get("threads"))
-        timeout = solver.get("timeout_seconds")
-        if timeout is None:
-            timeout = self.settings.solver_timeout
+        threads = int(self.settings.solver_threads)
+        timeout = self.settings.solver_timeout
         time_limit = solver.get("solver_time_limit")
         if time_limit is None:
             time_limit = self.settings.solver_time_limit
-        backend = str(solver.get("backend") or self.settings.solver_backend)
-        require_optimal = bool(solver.get("require_optimal", self.settings.require_optimal))
+        backend = str(self.settings.solver_backend)
+        require_optimal = bool(self.settings.require_optimal)
         return solver, threads, timeout, time_limit, backend, require_optimal
 
     def handle_solve_component(self, job: PipelineJob) -> None:
@@ -1320,7 +1309,7 @@ class PipelineWorkflow:
         field = self._field(task_id, variant)
         cfg = field["cfg"]
         params = self._params(task_id)
-        threads = self.settings.effective_threads(self._solver(task_id).get("threads"))
+        threads = int(self.settings.fit_threads)
         frontier = fit_component_frontier(
             stored["problem"], solved["results"], recipes=cfg.get("recipes"), densities=cfg["densities"],
             diameters=cfg["diameters"], steps=cfg["steps"], anchor_factor=float(params.get("anchor_factor", 40.0)),
@@ -1433,7 +1422,7 @@ class PipelineWorkflow:
             "actual_mass_kg": float(mass), "is_feasible": feasible, "is_optimal": optimal and feasible,
             "status": "feasible" if feasible else str(layout.get("status", "infeasible")), "bar_layout": layout,
             "metadata": {
-                "threads": self.settings.effective_threads(self._solver(task_id).get("threads")),
+                "threads": int(self.settings.solver_threads),
                 "created_at": time.time(), "variant": variant, "smooth": variant_is_smooth(variant),
                 "rebar_config_source": cfg.get("rebar_config_source"),
             },
@@ -1700,7 +1689,7 @@ class PipelineWorkflow:
 
         requested = self._requested_ns(task_id, variant, overlay_id)
         plan = edge_to_middle_order(
-            n for n in requested if max_n is not None and 1 <= int(n) <= min(max_n, SOLVER_HARD_MAX_N)
+            n for n in requested if max_n is not None and 1 <= int(n) <= min(max_n, int(self.settings.max_n))
         )
         result = {**dict(result), "max_useful_n": max_n}
         record.update(
@@ -1804,7 +1793,7 @@ class PipelineWorkflow:
         field = self._field(task_id, variant)
         cfg = field["cfg"]
         params = self._params(task_id)
-        threads = self.settings.effective_threads(self._solver(task_id).get("threads"))
+        threads = int(self.settings.fit_threads)
         frontier = fit_component_frontier(
             stored["problem"], solved["results"], recipes=cfg.get("recipes"), densities=cfg["densities"],
             diameters=cfg["diameters"], steps=cfg["steps"], anchor_factor=float(params.get("anchor_factor", 40.0)),
@@ -1873,7 +1862,7 @@ class PipelineWorkflow:
         variant = analysis_variant(smooth)
         storage_id = component_storage_id(component_id)
         requested = list(dict.fromkeys(int(n) for n in values))
-        hard_max_n = min(int(self.settings.max_n_value), SOLVER_HARD_MAX_N)
+        hard_max_n = int(self.settings.max_n)
         invalid_basic = [n for n in requested if n < 1 or n > hard_max_n]
         if invalid_basic:
             raise ValueError(f"n вне допустимого диапазона 1..{hard_max_n}: {invalid_basic}")
@@ -2228,7 +2217,7 @@ class PipelineWorkflow:
         variant = analysis_variant(smooth)
         selected_overlay = normalize_overlay_id(overlay_id)
         requested = list(dict.fromkeys(int(n) for n in values))
-        hard_max_n = min(int(self.settings.max_n_value), SOLVER_HARD_MAX_N)
+        hard_max_n = int(self.settings.max_n)
         invalid = [n for n in requested if n < 1 or n > hard_max_n]
         if invalid:
             raise ValueError(f"n вне допустимого диапазона 1..{hard_max_n}: {invalid}")
@@ -2360,7 +2349,7 @@ class PipelineWorkflow:
         token = context.set(selected_overlay) if context is not None else None
         try:
             requested = list(dict.fromkeys(int(n) for n in values))
-            hard_max_n = min(int(self.settings.max_n_value), SOLVER_HARD_MAX_N)
+            hard_max_n = int(self.settings.max_n)
             invalid_basic = [n for n in requested if n < 1 or n > hard_max_n]
             if invalid_basic:
                 raise ValueError(f"n вне допустимого диапазона 1..{hard_max_n}: {invalid_basic}")
@@ -2491,7 +2480,7 @@ class PipelineWorkflow:
             raw_max = record.get("max_useful_n")
             if raw_max is None or int(raw_max) <= 0 or str(record.get("max_n_state", "ready")) != "ready":
                 raise ValueError("Компонента не имеет подготовленного допустимого max N")
-            max_n = min(int(raw_max), SOLVER_HARD_MAX_N)
+            max_n = min(int(raw_max), int(self.settings.max_n))
             invalid = [n for n in requested if n > max_n]
             if invalid:
                 raise ValueError(f"n вне допустимого диапазона 1..{max_n}: {invalid}")
@@ -2964,7 +2953,7 @@ class PipelineWorkflow:
             "compact_zones": compact_zones,
             "mass_metrics": dict(layout.get("mass_metrics", {}) or {}),
             "metadata": {
-                "threads": self.settings.effective_threads(self._solver(task_id).get("threads")),
+                "threads": int(self.settings.solver_threads),
                 "created_at": time.time(), "variant": variant, "smooth": variant_is_smooth(variant),
                 "overlay_id": overlay_id, "rebar_config_source": cfg.get("rebar_config_source"),
             },

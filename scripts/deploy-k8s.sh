@@ -21,3 +21,6 @@ kubectl apply -f /tmp/rebar-rendered.yaml
 kubectl -n rebar-optimizer rollout status deployment/rebar-api --timeout=5m
 kubectl -n rebar-optimizer get deployment/rebar-worker
 kubectl -n rebar-optimizer get scaledobject/rebar-worker
+kubectl -n rebar-optimizer get scaledjob/rebar-bars-worker
+kubectl -n rebar-optimizer get scaledjob/rebar-verification-worker
+kubectl -n rebar-optimizer get pvc/rebar-solver-logs

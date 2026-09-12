@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main, master, am-super-branch]
+    branches: [main, master, am-super-branch, v2]
     tags: ["v*"]
   pull_request:
     branches: [main, master]
@@ -56,3 +56,34 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # The v2 branch image (tag "v2") feeds the test API deployment rebar-api-test, which pulls
+  # that tag with imagePullPolicy Always. The restart runs only when a kubeconfig secret is
+  # configured (KUBE_CONFIG_B64); otherwise the step reports how to restart it by hand.
+  deploy-test:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/v2'
+    needs: image
+    runs-on: ubuntu-latest
+    env:
+      NAMESPACE: rebar-optimizer
+      DEPLOYMENT: rebar-api-test
+    steps:
+      - uses: azure/setup-kubectl@v5
+        with:
+          version: latest
+      - name: Restart rebar-api-test on the new v2 image
+        env:
+          KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG_B64 }}
+        run: |
+          if [ -z "$KUBE_CONFIG_B64" ]; then
+            echo "KUBE_CONFIG_B64 is not configured; run manually:"
+            echo "kubectl -n $NAMESPACE rollout restart deployment/$DEPLOYMENT"
+            exit 0
+          fi
+          mkdir -p "$HOME/.kube"
+          echo "$KUBE_CONFIG_B64" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          kubectl -n "$NAMESPACE" set image "deployment/$DEPLOYMENT" \
+            "api=ghcr.io/${GITHUB_REPOSITORY,,}:v2"
+          kubectl -n "$NAMESPACE" rollout restart "deployment/$DEPLOYMENT"
+          kubectl -n "$NAMESPACE" rollout status "deployment/$DEPLOYMENT" --timeout=5m

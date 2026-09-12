@@ -37,18 +37,8 @@ def test_validate_plan_limits_before_expansion():
         raise AssertionError("max N limit was not enforced")
 
 
-def test_validate_solver_limits():
-    from rebar_service.planner import validate_solver_limits
+def test_solver_limit_validation_is_gone():
+    """Solver knobs come from the ConfigMap only; no request-side validation is left."""
+    import rebar_service.planner as planner
 
-    validate_solver_limits({"threads": 4, "timeout_seconds": 120, "solver_time_limit": 100}, max_threads=4, max_timeout=300)
-    for solver, message in [
-        ({"threads": 5, "timeout_seconds": 120}, "threads"),
-        ({"threads": 1, "timeout_seconds": 301}, "timeout"),
-        ({"threads": 1, "timeout_seconds": 100, "solver_time_limit": 101}, "solver_time_limit"),
-    ]:
-        try:
-            validate_solver_limits(solver, max_threads=4, max_timeout=300)
-        except ValueError as exc:
-            assert message in str(exc)
-        else:
-            raise AssertionError(f"limit was not enforced for {solver}")
+    assert not hasattr(planner, "validate_solver_limits")

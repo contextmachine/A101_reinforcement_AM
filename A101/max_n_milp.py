@@ -137,7 +137,7 @@ def _coerce_class_matrix(value: Any) -> np.ndarray:
 
 def estimate_max_useful_n(
     matrix: Any, *,
-    recipes: Mapping[Any, Sequence[Any]] | None = None, hard_cap: int = 250,
+    recipes: Mapping[Any, Sequence[Any]] | None = None, hard_cap: int | None = None,
 ) -> dict[str, Any]:
     """Compute the exact rectangle-count policy bound from matrix + recipes.
 
@@ -152,7 +152,8 @@ def estimate_max_useful_n(
     background zero, or an unrelated positive class.
     """
     values = _coerce_class_matrix(matrix)
-    cap = max(0, int(hard_cap))
+    # ``hard_cap=None`` means no cap: the exact matrix bound is returned as is.
+    cap = None if hard_cap is None else max(0, int(hard_cap))
     normalized = _normalized_recipes(recipes)
     cache: dict[int, tuple[int, ...]] = {}
     counts = {
@@ -199,9 +200,9 @@ def estimate_max_useful_n(
             total += int(cover["count"])
     return {
         "feasible": True,
-        "max_useful_n": min(total, cap),
+        "max_useful_n": total if cap is None else min(total, cap),
         "matrix_max_useful_n": total,
         "layers": layers,
-        "capped": total > cap,
+        "capped": cap is not None and total > cap,
         "optimal": True,
     }

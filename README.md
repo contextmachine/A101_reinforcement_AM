@@ -27,6 +27,10 @@ solutions, events)             dedupe / slots
              PipelineWorkflow
 ```
 
+Рядом с основным worker-ом работают два изолированных worker-типа со своими очередями и
+KEDA `ScaledJob`: `rebar_service.bars_worker` (`rebar:bars:*`) и
+`rebar_service.verification_worker` (`rebar:verification:*`).
+
 PostgreSQL — единственный durable source of truth. Redis можно полностью очистить без потери завершённых задач и результатов; после очистки теряются только незавершённые jobs очереди.
 
 `/results/{total_N}` сохраняет frontend-compatible response shape, но отдельная legacy-копия результата не хранится: ответ строится из canonical `solutions`.
@@ -76,13 +80,24 @@ Redis содержит только ephemeral queue/coordination state:
 rebar:jobs:ready          # full job JSON
 rebar:jobs:processing     # full claimed job JSON
 rebar:jobs:workload       # job_id only; KEDA uses LLEN
+rebar:bars:ready          # изолированная очередь /v2/bars
+rebar:bars:processing
+rebar:bars:workload
+rebar:verification:ready  # изолированная очередь /v2/verification
+rebar:verification:processing
+rebar:verification:workload
 rebar:job:<id>
 rebar:job:<id>:lease
 rebar:job-dedupe:<hash>
 rebar:task:<id>:pending
 rebar:task:<id>:slots
 rebar:lock:queue-reaper
+rebar:lock:queue-reaper:rebar:bars:workload
+rebar:lock:queue-reaper:rebar:verification:workload
 ```
+
+Все три очереди используют один и тот же `RedisQueue`; набор имён задаётся `QueueNames`
+(`rebar_service/redis_queue.py`), по умолчанию — основная очередь.
 
 В Redis больше нет task metadata, polygons, blobs, frontiers, solutions, results, events, generation или cancellation state.
 
@@ -199,6 +214,43 @@ GET  /v1/tasks/{task_id}/solutions
 GET  /v1/tasks/{task_id}/solutions/{solution_id}
 ```
 
+## API v2 (whole-field)
+
+`/v2` — минималистичный контракт (`payload-v2-am-aa.md`): поле считается целиком, без
+компонент; геометрия зон и стержней хранится и передаётся **без анкеровки** (анкеровка —
+числа `anchorage.{start,end}` на каждой зоне/стержне, по умолчанию `anchor_factor * d`).
+Все параметры развёртывания (потоки HiGHS, таймауты, backend, `REBAR_MAX_N`, размер сетки,
+число jobs на задачу) берутся только из ConfigMap `rebar-config`; в запросе остаётся лишь
+`config.solver.solver_time_limit`.
+
+```text
+POST /v2/dxf_upload | /v2/json_upload (тело: FEPolygon[]) | /v2/tables_upload -> {scene_id, state}
+GET  /v2/scenes/{scene_id}/polygons?smooth&overlay_id   -> FEPolygon[] + overlay_state (active|real|empty), source_index
+POST /v2/scenes/{scene_id}/overlays                     -> {scene_id, overlay_id}   (id последнего события)
+GET  /v2/scenes/{scene_id}/overlays/{overlay_id}        -> Overlay[] (журнал до ревизии; 0 база, -1 последняя)
+PUT  /v2/tasks                                          -> {task_id}
+PUT  /v2/tasks/{task_id}/n  |  PUT /v2/tasks/{task_id}/cancel
+GET  /v2/tasks/{task_id}    |  GET /v2/tasks/{task_id}/{n}   (bars, zones, mass_metrics)
+POST /v2/bars  | GET /v2/bars/{task_id}                 (изолированный worker раскладки)
+POST /v2/verification | GET /v2/verification/{id}       (раскладка + need/fact в cm²/m и kg/m³)
+```
+
+Состояния одного N: `pending -> preparing -> solving -> fitting -> bars -> success | error | cancelled`;
+`status` (`optimal | feasable | infeasable`) — итог solver. N выше `max_useful_n` (точный
+max-N MILP по всей сцене, ограничен `REBAR_MAX_N`) или ниже аналитического минимума
+завершается как `success` + `infeasable` без запуска solver.
+
+Стадии основного worker (`rebar:jobs:*`): `v2_prepare` (rebar config, поле, `max_useful_n`,
+`prepare_problem` с этим значением), `v2_solve` (HiGHS, лог в
+`{REBAR_SOLVER_LOG_DIR}/{task_id}/{n}/{worker-id}.log`), `v2_fit`, `v2_bars` (та же
+раскладка `layout_rebars`, что и `/v2/bars`).
+
+Проверка (`/v2/verification`): `fact [cm²/m] = 10 · Σ π(d/2)² · len(ось стержня ∩ полигон) / area`,
+`kg/m³ = cm²/m · ρ / (10 · t)` (`t` — толщина, мм; стержни без анкеровки, фон включён).
+
+Таблицы: `v2_tasks`, `v2_task_ns`, `v2_artifacts`, `v2_bar_tasks`, `v2_verification_tasks`
+(migration `0005_v2_tasks`; она же добавляет `scene_overlay_events.client_time`).
+
 ## Local `run3.py`
 
 `run3.py` не запускает API/worker/PostgreSQL/Redis:
@@ -222,6 +274,17 @@ Worker:
 ```bash
 python -m rebar_service.worker
 ```
+
+Изолированные worker-ы `/v2` (KEDA `ScaledJob`, каждый Pod разбирает свою очередь и завершается):
+
+```bash
+python -m rebar_service.bars_worker
+python -m rebar_service.verification_worker
+```
+
+`REBAR_WORKER_EXIT_WHEN_IDLE=true` (значение выставлено в обоих `ScaledJob`) заставляет loop
+выйти, как только claim по очереди возвращает пусто. Основной worker остаётся `Deployment` +
+`ScaledObject` и не завершается по idle.
 
 Migration:
 
@@ -255,9 +318,17 @@ rebar-optimizer
 deploy/k8s/base/api.yaml
 deploy/k8s/base/worker-deployment.yaml
 deploy/k8s/base/configmap.yaml
+deploy/k8s/base/logs-pvc.yaml
 deploy/k8s/base/db-migrate-job.yaml
 deploy/k8s/overlays/prod/worker-scaledobject.yaml
+deploy/k8s/overlays/prod/bars-scaledjob.yaml
+deploy/k8s/overlays/prod/verification-scaledjob.yaml
 ```
+
+HiGHS logs: PVC `rebar-solver-logs` (StorageClass `csi-s3`, `ReadWriteMany`, 50Gi) смонтирован
+только в основной worker по пути `/app/logs` с `subPath: rebar-optimizer/logs`; путь файла —
+`/app/logs/{task_id}/{n}/{worker-id}.log` (`REBAR_SOLVER_LOG_DIR`). Bars/verification Job-ы этот
+PVC не монтируют.
 
 KEDA 2.20.2:
 

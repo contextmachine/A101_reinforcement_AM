@@ -404,6 +404,15 @@ def _parse_box(item: Any, index: int) -> tuple[tuple[float, float, float, float]
     return (x0, y0, x1, y1), cls, meta
 
 
+def _optional_hold(value: Any, default: float, index: int, key: str) -> float:
+    if value is None:
+        return float(default)
+    hold = float(value)
+    if not np.isfinite(hold) or hold < 0:
+        raise ValueError(f"boxes[{index}]: {key} должен быть неотрицательным числом")
+    return hold
+
+
 def add_box_anchorage(
     boxes: Any,
     *,
@@ -419,6 +428,13 @@ def add_box_anchorage(
     Expansion is only along the world reinforcement axis. Rectangle bounds are
     clamped to the connected field polygon bounds; ``geometry`` is the exact
     intersection with that polygon and is used later for interaction checks.
+
+    Anchorage is ``anchor_factor * diameter`` on both ends unless a box carries
+    explicit ``hold_start`` / ``hold_end`` values (mm, measured from the fitted
+    end along the reinforcement axis: ``start`` is the lower coordinate, ``end``
+    the upper one). Either key may be given alone; the other end keeps the
+    default. The output keys are unchanged: ``hold`` reports the start-side
+    value when both ends agree and the maximum otherwise.
     """
 
     from shapely.geometry import box
@@ -450,9 +466,15 @@ def add_box_anchorage(
         for layer_index, cls in enumerate(physical):
             diameter = float(meta.get("diameter") if explicit else _lookup(diameters, cls))
             step = float(meta.get("step") if explicit else _lookup(steps, cls))
-            hold = float(anchor_factor) * diameter
+            default_hold = float(anchor_factor) * diameter
+            hold_start = _optional_hold(meta.get("hold_start"), default_hold, source_pos, "hold_start")
+            hold_end = _optional_hold(meta.get("hold_end"), default_hold, source_pos, "hold_end")
+            hold = hold_start if hold_start == hold_end else max(hold_start, hold_end)
             x0, y0, x1, y1 = fitted
-            anchored = (x0, y0 - hold, x1, y1 + hold) if axis == "y" else (x0 - hold, y0, x1 + hold, y1)
+            anchored = (
+                (x0, y0 - hold_start, x1, y1 + hold_end) if axis == "y"
+                else (x0 - hold_start, y0, x1 + hold_end, y1)
+            )
             anchored_unclipped = tuple(map(float, anchored))
             if component is not None:
                 fx0, fy0, fx1, fy1 = map(float, component.bounds)
@@ -464,7 +486,10 @@ def add_box_anchorage(
                 )
             geometry = box(*anchored) if component is None else component.intersection(box(*anchored))
             q = {
-                **{k: v for k, v in meta.items() if k not in {"bounds", "geometry", "bars", "class", "diameter", "step"}},
+                **{
+                    k: v for k, v in meta.items()
+                    if k not in {"bounds", "geometry", "bars", "class", "diameter", "step", "hold_start", "hold_end"}
+                },
                 "id": f"{original_id}:{layer_index}" if len(physical) > 1 else original_id,
                 "source_index": source_index,
                 "component_id": meta.get("component_id"),

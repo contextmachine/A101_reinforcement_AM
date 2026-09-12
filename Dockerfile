@@ -18,7 +18,7 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY . .
 RUN useradd --create-home --uid 10001 --user-group appuser \
-    && mkdir -p /tmp/rebar-cache \
+    && mkdir -p /tmp/rebar-cache /app/logs \
     && chown -R appuser:appuser /app /tmp/rebar-cache
 
 USER 10001:10001

@@ -55,13 +55,12 @@ def test_task_parameters_include_current_pipeline_options():
             "n": [1, 2, 3],
             "scan_mode": "hard",
             "whole": True,
-            "component_result_top_k": 7,
             "validate_results": True,
         }
     )
     assert params.scan_mode == "hard"
     assert params.whole is True
-    assert params.component_result_top_k == 7
+    assert "component_result_top_k" not in type(params).model_fields
     assert params.validate_results is True
 
 
@@ -103,6 +102,31 @@ def test_production_manifests_use_canonical_api_worker_and_one_queue():
     assert "rebar:component:" not in dev_keda
     assert prod_keda.count("type: redis") == 1
     assert dev_keda.count("type: redis") == 1
+    # The reinforcement pipeline still has exactly one queue: the isolated /v2 workers
+    # below scale on their own lists and never touch rebar:jobs:*.
+    assert prod_keda.count("listName:") == 1
+    assert dev_keda.count("listName:") == 1
+
+
+def test_isolated_v2_workers_scale_on_their_own_queues_and_entrypoints():
+    root = Path(__file__).resolve().parents[1]
+    expected = {
+        "bars-scaledjob.yaml": ("rebar:bars:workload", "rebar_service.bars_worker"),
+        "verification-scaledjob.yaml": (
+            "rebar:verification:workload",
+            "rebar_service.verification_worker",
+        ),
+    }
+    for overlay in ("dev", "prod"):
+        for name, (queue, module) in expected.items():
+            text = (root / f"deploy/k8s/overlays/{overlay}/{name}").read_text(encoding="utf-8")
+            assert "kind: ScaledJob" in text
+            assert text.count("type: redis") == 1
+            assert f"listName: {queue}" in text
+            assert "rebar:jobs:" not in text
+            assert "rebar:component:" not in text
+            assert f"- {module}" in text
+            assert "universal_worker" not in text
 
 
 def test_run3_is_local_only_and_not_a_production_entrypoint():

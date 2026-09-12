@@ -965,8 +965,8 @@ def _select_min_density_rectangles_legacy(
             raise ValueError("time_limit должен быть положительным или None")
 
     if threads is not None:
-        if isinstance(threads, bool) or int(threads) != threads or int(threads) <= 0:
-            raise ValueError("threads должен быть положительным целым или None")
+        if isinstance(threads, bool) or int(threads) != threads or int(threads) < 0:
+            raise ValueError("threads должен быть неотрицательным целым (0 = авто) или None")
         threads = int(threads)
 
     if greedy_warm_start_limit < 0:
@@ -2311,8 +2311,8 @@ def _select_min_density_rectangles_recipes(
         if not np.isfinite(time_limit) or time_limit <= 0:
             raise ValueError("time_limit должен быть положительным или None")
     if threads is not None:
-        if isinstance(threads, bool) or int(threads) != threads or int(threads) <= 0:
-            raise ValueError("threads должен быть положительным целым или None")
+        if isinstance(threads, bool) or int(threads) != threads or int(threads) < 0:
+            raise ValueError("threads должен быть неотрицательным целым (0 = авто) или None")
         threads = int(threads)
     if greedy_warm_start_limit < 0:
         raise ValueError("greedy_warm_start_limit не может быть отрицательным")
@@ -4046,6 +4046,27 @@ def _check_highs_status(status: Any, action: str) -> None:
 def _set_highs_option(highs, name: str, value: Any) -> None:
     _check_highs_status(highs.setOptionValue(str(name), value), f"option {name}")
 
+
+# HiGHS options that control where the solver log goes. They are applied after
+# every default so that explicit ``highs_options`` always win.
+_HIGHS_LOGGING_OPTIONS = ("log_file", "output_flag", "log_to_console")
+
+
+def _apply_highs_logging_options(highs, options: Mapping[str, Any]) -> None:
+    """Apply ``log_file``/``output_flag``/``log_to_console`` from ``options``.
+
+    ``log_file`` is set first: HiGHS opens the file when the option is set and
+    only writes to it while ``output_flag`` is true. The parent directory must
+    already exist (see ``rebar_service.solver_logs.solver_log_file``).
+    """
+
+    if "log_file" in options and options["log_file"] is not None:
+        _set_highs_option(highs, "log_file", str(options["log_file"]))
+    if "output_flag" in options and options["output_flag"] is not None:
+        _set_highs_option(highs, "output_flag", bool(options["output_flag"]))
+    if "log_to_console" in options and options["log_to_console"] is not None:
+        _set_highs_option(highs, "log_to_console", bool(options["log_to_console"]))
+
 def _set_highs_initial_solution(highs, initial_counts: np.ndarray) -> bool:
     nonzero = np.flatnonzero(initial_counts)
     if nonzero.size == 0:
@@ -4095,7 +4116,21 @@ def _solve_prepared_with_highs(
     highspy = _import_highspy()
     built = monotonic()
     lp, upper = _make_prepared_highs_lp(prepared, highspy)
+    options = dict(highs_options or {})
+    if threads is not None and int(threads) > 1:
+        options.setdefault("parallel", "on")
+    # Logging options are applied after every default so that explicit
+    # ``highs_options`` win over the ``solver_msg`` default: HiGHS writes
+    # ``log_file`` only while ``output_flag`` is true, so a caller that asks for
+    # a file log must be able to enable output without console output.
+    logging_options = {
+        name: options.pop(name) for name in _HIGHS_LOGGING_OPTIONS if name in options
+    }
     highs = highspy.Highs()
+    # HiGHS prints its banner on the first logged call (``passModel``), so the
+    # output destination must be configured before the model is passed.
+    _set_highs_option(highs, "output_flag", bool(solver_msg))
+    _apply_highs_logging_options(highs, logging_options)
     _check_highs_status(highs.passModel(lp), "passModel")
 
     if exact_count is not None:
@@ -4106,9 +4141,6 @@ def _solve_prepared_with_highs(
             "exact-count row",
         )
 
-    options = dict(highs_options or {})
-    if threads is not None and int(threads) > 1:
-        options.setdefault("parallel", "on")
     for name, value in options.items():
         _set_highs_option(highs, name, value)
     _set_highs_option(highs, "output_flag", bool(solver_msg))
@@ -4118,6 +4150,7 @@ def _solve_prepared_with_highs(
         _set_highs_option(highs, "time_limit", float(time_limit))
     if threads is not None:
         _set_highs_option(highs, "threads", int(threads))
+    _apply_highs_logging_options(highs, logging_options)
 
     initial = np.zeros(len(upper), dtype=np.int32)
     if initial_local_indices is not None:
@@ -4579,8 +4612,8 @@ def _solve_prepared_rectangle_problem(
         if not np.isfinite(time_limit) or time_limit <= 0:
             raise ValueError("time_limit должен быть положительным или None")
     if threads is not None:
-        if isinstance(threads, bool) or int(threads) != threads or int(threads) <= 0:
-            raise ValueError("threads должен быть положительным целым или None")
+        if isinstance(threads, bool) or int(threads) != threads or int(threads) < 0:
+            raise ValueError("threads должен быть неотрицательным целым (0 = авто) или None")
         threads = int(threads)
     backend = str(backend).strip().lower()
     if backend not in {"pulp", "highs", "scipy"}:

@@ -14,7 +14,8 @@ def fit_box_layout(polygons, rectangles, recipes=None, *, recipe_mode="threshold
                    densities=None, min_w=None, nearest=8, per_direction=1,
                    max_distance=None, time_limit=None, mip_rel_gap=0,
                    allow_class_upgrade=True, allowed_classes=None,
-                   avoid_rectangles=None, milp_backend="auto", threads=1, output=False, eps=1e-8):
+                   avoid_rectangles=None, milp_backend="auto", threads=1, output=False, eps=1e-8,
+                   highs_options=None):
     import numpy as np
     import shapely
     from shapely.geometry import box
@@ -23,6 +24,10 @@ def fit_box_layout(polygons, rectangles, recipes=None, *, recipe_mode="threshold
 
     if recipe_mode not in {"threshold", "exact"}:
         raise ValueError("recipe_mode: 'threshold' или 'exact'")
+    logging_options = {
+        key: value for key, value in dict(highs_options or {}).items()
+        if key in {"log_file", "output_flag", "log_to_console"}
+    }
 
     def seq(value):
         return (value,) if np.isscalar(value) else tuple(value)
@@ -413,9 +418,18 @@ def fit_box_layout(polygons, rectangles, recipes=None, *, recipe_mode="threshold
         import highspy
 
         solver = highspy.Highs(); solver.setOptionValue("output_flag", bool(output))
-        solver.setOptionValue("threads", max(1, int(threads))); solver.setOptionValue("mip_rel_gap", float(mip_rel_gap))
+        # threads=0 lets HiGHS pick the thread count itself.
+        solver.setOptionValue("threads", max(0, int(threads))); solver.setOptionValue("mip_rel_gap", float(mip_rel_gap))
         if time_limit is not None:
             solver.setOptionValue("time_limit", float(time_limit))
+        # Explicit logging options win over ``output``: HiGHS writes ``log_file``
+        # only while ``output_flag`` is true.
+        if logging_options.get("log_file") is not None:
+            solver.setOptionValue("log_file", str(logging_options["log_file"]))
+        if logging_options.get("output_flag") is not None:
+            solver.setOptionValue("output_flag", bool(logging_options["output_flag"]))
+        if logging_options.get("log_to_console") is not None:
+            solver.setOptionValue("log_to_console", bool(logging_options["log_to_console"]))
         count = len(flat); indices = np.arange(count, dtype=np.int32)
         solver.addVars(count, np.zeros(count), np.ones(count))
         solver.changeColsCost(count, indices, np.asarray(objective, dtype=float))

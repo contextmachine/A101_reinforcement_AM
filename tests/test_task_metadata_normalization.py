@@ -27,9 +27,7 @@ def test_task_parameters_json_does_not_duplicate_task_control_columns(monkeypatc
         n=[1, 2],
         scan_mode="hard",
         whole=True,
-        component_result_top_k=7,
         validate_results=True,
-        max_concurrent_jobs=9,
     )
     api._build_task(
         parameters,
@@ -49,6 +47,11 @@ def test_task_parameters_json_does_not_duplicate_task_control_columns(monkeypatc
         assert duplicated not in store.meta["parameters"]
     assert store.meta["scan_mode"] == "hard"
     assert store.meta["whole"] is True
-    assert store.meta["component_result_top_k"] == 7
+    assert store.meta["component_result_top_k"] == api.settings.frontier_top_k
+    assert "component_result_top_k" not in TaskParameters.model_fields
     assert store.meta["validate_results"] is True
-    assert store.meta["max_concurrent_jobs"] == 9
+    # ``max_concurrent_jobs`` is no longer a request field: the NOT NULL column is
+    # filled from REBAR_MAX_JOBS_PER_TASK only.
+    assert store.meta["max_concurrent_jobs"] == api.settings.max_jobs_per_task
+    assert "max_concurrent_jobs" not in TaskParameters.model_fields
+    assert "quantizer" not in TaskParameters.model_fields

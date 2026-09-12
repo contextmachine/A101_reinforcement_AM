@@ -6,6 +6,8 @@ resources:
   - redis.yaml
   - keda-auth.yaml
   - worker-scaledobject.yaml
+  - bars-scaledjob.yaml
+  - verification-scaledjob.yaml
   - redis-networkpolicy.yaml
   - ingress.yaml
 patches:

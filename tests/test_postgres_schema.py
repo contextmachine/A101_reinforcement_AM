@@ -85,3 +85,45 @@ def test_overlay_migration_normalizes_existing_optimal_statuses():
     assert "UPDATE component_results" in migration
     assert "jsonb_set" in migration
     assert "WHEN is_feasible AND is_optimal THEN 'optimal'" in migration
+
+
+def test_v2_migration_is_additive_and_chains_after_the_scene_revisions():
+    root = Path(__file__).resolve().parents[1]
+    migration = (root / "migrations/versions/0005_v2_tasks.py").read_text(encoding="utf-8")
+
+    assert 'revision = "0005_v2_tasks"' in migration
+    assert 'down_revision = "0004_scene_audit_repairs"' in migration
+
+    for table in ("v2_tasks", "v2_task_ns", "v2_artifacts", "v2_bar_tasks", "v2_verification_tasks"):
+        assert f'"{table}"' in migration
+        assert f'op.drop_table("{table}")' in migration
+
+    # The only change to a pre-existing table is one nullable column.
+    assert 'op.add_column(\n        "scene_overlay_events",' in migration
+    assert 'sa.Column("client_time", postgresql.DOUBLE_PRECISION(), nullable=True)' in migration
+    assert 'op.drop_column("scene_overlay_events", "client_time")' in migration
+    forbidden = ("op.alter_column", "op.execute(", "INSERT INTO", "UPDATE ", "DELETE FROM")
+    for marker in forbidden + ("op.drop_constraint",):
+        assert marker not in migration
+
+
+def test_v2_tables_are_unqualified_so_the_search_path_selects_the_schema():
+    root = Path(__file__).resolve().parents[1]
+    migration = (root / "migrations/versions/0005_v2_tasks.py").read_text(encoding="utf-8")
+    assert "schema=" not in migration
+    assert 'sa.ForeignKey("scenes.id", ondelete="RESTRICT")' in migration
+    assert 'sa.ForeignKey("v2_tasks.id", ondelete="CASCADE")' in migration
+    assert 'sa.CheckConstraint("n > 0", name="ck_v2_task_ns_positive")' in migration
+
+
+def test_migration_head_is_the_v2_revision():
+    root = Path(__file__).resolve().parents[1]
+    versions = root / "migrations/versions"
+    revisions = {}
+    for path in versions.glob("0*.py"):
+        text = path.read_text(encoding="utf-8")
+        revision = text.split('revision = "', 1)[1].split('"', 1)[0]
+        down = text.split("down_revision = ", 1)[1].split("\n", 1)[0].strip().strip('"')
+        revisions[revision] = None if down == "None" else down
+    heads = set(revisions) - {down for down in revisions.values() if down}
+    assert heads == {"0005_v2_tasks"}

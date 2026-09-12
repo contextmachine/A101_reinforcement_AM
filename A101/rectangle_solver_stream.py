@@ -593,8 +593,8 @@ def start_rectangle_job(
         raise ValueError("N должен быть неотрицательным целым")
     N = int(N)
     timeout = _normalize_timeout(timeout)
-    if isinstance(threads, bool) or int(threads) != threads or int(threads) <= 0:
-        raise ValueError("threads должен быть положительным целым")
+    if isinstance(threads, bool) or int(threads) != threads or int(threads) < 0:
+        raise ValueError("threads должен быть неотрицательным целым (0 = авто)")
     threads = int(threads)
     emit_interval = float(emit_interval)
     if not np.isfinite(emit_interval) or emit_interval <= 0:

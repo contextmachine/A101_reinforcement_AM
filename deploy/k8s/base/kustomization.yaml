@@ -4,5 +4,6 @@ namespace: rebar-optimizer
 resources:
   - namespace.yaml
   - configmap.yaml
+  - logs-pvc.yaml
   - api.yaml
   - worker-deployment.yaml

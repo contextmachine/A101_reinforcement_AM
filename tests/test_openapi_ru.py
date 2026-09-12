@@ -78,7 +78,7 @@ def test_swagger_documents_scene_snapshot_overlay_selectors_and_new_solver_contr
     assert "PUT /v1/tasks" in description
     assert "overlay=-1" in description
     assert "[-3]" in description
-    assert "100" in description
+    assert "REBAR_MAX_N" in description
     assert "compact_zones" in description
     assert "background_only" in description
     assert "immutable" in description.lower() or "неизмен" in description.lower()
