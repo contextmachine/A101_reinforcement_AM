@@ -10,6 +10,9 @@ scipy>=1.17,<1.19
 shapely==2.1.2
 ezdxf==1.4.4
 highspy==1.15.1
+# Apache-licensed HiGHS extras (BLAS/Metis/AMD/RCM) that enable the parallel HiPO interior point solver;
+# select it per solve with REBAR_HIGHS_OPTIONS, e.g. {"mip_lp_solver": "hipo"}.
+highspy-extras==1.15.1
 pulp>=3.2,<4
 python-multipart>=0.0.20,<1
 matplotlib>=3.11,<3.12
