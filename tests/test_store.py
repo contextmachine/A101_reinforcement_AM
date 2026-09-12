@@ -1,4 +1,9 @@
-from rebar_service.codec import decode_object, encode_object
+import pytest
+from contextlib import contextmanager
+
+from rebar_service.codec import decode_object, encode_object, sha256
+from rebar_service.config import Settings
+from rebar_service.postgres_store import PostgresStore
 from rebar_service.store import RedisStore
 
 
@@ -7,6 +12,55 @@ def test_codec_roundtrip_without_optional_zstd():
     payload, _ = encode_object(value)
     assert decode_object(payload) == value
 
+def test_codec_roundtrip_accepts_persisted_codec_metadata():
+    value = {"stage": "prepared", "numbers": [1, 2, 3]}
+    payload, codec = encode_object(value)
+    assert decode_object(payload, codec) == value
+
+def test_codec_rejects_mismatched_persisted_codec_metadata():
+    value = {"stage": "prepared"}
+    payload, codec = encode_object(value)
+    wrong = "pickle+zlib" if codec == "pickle+zstd" else "pickle+zstd"
+    with pytest.raises(ValueError, match="Codec mismatch"):
+        decode_object(payload, wrong)
+
+
+
+class _ArtifactResult:
+    def __init__(self, row):
+        self.row = row
+
+    def mappings(self):
+        return self
+
+    def first(self):
+        return self.row
+
+
+class _ArtifactConnection:
+    def __init__(self, row):
+        self.row = row
+
+    def execute(self, *_args, **_kwargs):
+        return _ArtifactResult(self.row)
+
+
+class _ArtifactDatabase:
+    def __init__(self, row):
+        self.row = row
+
+    @contextmanager
+    def connect(self):
+        yield _ArtifactConnection(self.row)
+
+
+def test_v2_artifact_loader_roundtrips_payload_with_stored_codec():
+    value = {"problem": {"n": 4}, "items": [1, 2, 3]}
+    payload, codec = encode_object(value)
+    database = _ArtifactDatabase({"codec": codec, "payload": payload, "sha256": sha256(payload)})
+    store = PostgresStore(Settings(), database=database)
+
+    assert store.load_v2_artifact("task", "prepared_problem") == value
 
 def test_jsonutil_replaces_non_finite_numbers():
     from rebar_service.jsonutil import dumps

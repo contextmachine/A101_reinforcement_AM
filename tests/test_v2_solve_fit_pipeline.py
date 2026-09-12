@@ -283,3 +283,65 @@ def test_v2_retry_during_old_solver_does_not_enqueue_stale_attempt(monkeypatch):
     pipeline.handle_solve(V2Job(stage="solving", kind="solve", task_id="t", n=4, attempt=1))
     assert store.jobs == []
     assert store.task["solutions"][0]["attempt"] == 2
+
+
+def test_v2_serialized_artifacts_survive_solve_fit_baring_handoff(monkeypatch):
+    from rebar_service.codec import decode_object, encode_object
+
+    class SerializedStore(FakeStore):
+        def __init__(self):
+            super().__init__()
+            self.encoded = {}
+            for key, value in list(self.artifacts.items()):
+                self.save_v2_artifact("t", key, key, value)
+
+        def load_v2_artifact(self, task_id, key):
+            row = self.encoded.get(key)
+            if row is None:
+                return None
+            payload, codec = row
+            return decode_object(payload, codec)
+
+        def save_v2_artifact(self, task_id, key, artifact_type, value, **kwargs):
+            self.encoded[key] = encode_object(value)
+
+    store = SerializedStore()
+    pipeline = V2Pipeline(store, Settings())
+
+    monkeypatch.setattr(mod, "solve_v2_problem", lambda *a, **k: {
+        "n": 4,
+        "is_feasible": True,
+        "is_optimal": True,
+        "solve_state": "optimal",
+        "total_cost": 42.0,
+        "rectangles": [(0, 0, 300, 1000, 1)],
+    })
+    monkeypatch.setattr(mod, "fit_v2_problem", lambda *a, **k: {
+        "n": 4,
+        "is_feasible": True,
+        "is_optimal": True,
+        "fit_result": {"status": "ok", "rectangles": [(0, 0, 300, 1000, 1)]},
+        "anchored_boxes": [{
+            "class": 1,
+            "diameter": 20.0,
+            "step": 150.0,
+            "fitted_bounds": (0.0, 0.0, 300.0, 1000.0),
+            "hold": 800.0,
+        }],
+    })
+    monkeypatch.setattr(mod, "build_v2_bars_for_context", lambda *a, **k: {
+        "bar_layout": {"bars": []},
+        "mass_metrics": {"additional": {}, "bg": {}},
+        "mass_kg": 12.0,
+        "mass_bg_kg": 3.0,
+    })
+
+    pipeline.handle_solve(V2Job(stage="solving", kind="solve", task_id="t", n=4, attempt=1))
+    assert "solver:n:4:attempt:1" in store.encoded
+
+    pipeline.handle_fit(V2Job(stage="fitting", kind="fit", task_id="t", n=4, attempt=1))
+    assert "fit:n:4:attempt:1" in store.encoded
+
+    pipeline.handle_task_bars(V2Job(stage="baring", kind="task_bars", task_id="t", n=4, attempt=1))
+    assert store.task["solutions"][0]["state"] == "success"
+    assert store.task["solutions"][0]["status"] == "optimal"
