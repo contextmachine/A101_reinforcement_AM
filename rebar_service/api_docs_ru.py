@@ -338,6 +338,12 @@ def install_russian_docs(app: FastAPI) -> None:
             for method in route.methods:
                 op = schema["paths"][route.path_format][method.lower()]
                 op.update(summary=summary, description=description, tags=[TAGS[group]["name"]])
+                if getattr(route, "deprecated", False):
+                    replacement = DEPRECATED_REPLACEMENTS.get(route.name)
+                    op["description"] = description + (
+                        f" Устарело: функциональность заменена на `{replacement}`; ручка сохранена для совместимости."
+                        if replacement else " Устарело; ручка сохранена для совместимости."
+                    )
                 for p in op.get("parameters", []):
                     name = p["name"]
                     desc = PARAMETERS.get(name)
@@ -377,3 +383,23 @@ def install_russian_docs(app: FastAPI) -> None:
         return schema
 
     app.openapi = openapi
+
+# v1 operations whose functionality is directly replaced by /v2 (they carry deprecated=True in
+# rebar_service/api.py); the value is shown in Swagger as the replacement.
+DEPRECATED_REPLACEMENTS = {
+    "create_scene_dxf_upload": "POST /v2/dxf_upload",
+    "create_scene_json_upload": "POST /v2/json_upload",
+    "create_scene_tables_upload": "POST /v2/tables_upload",
+    "scene_polygons": "GET /v2/scenes/{scene_id}/polygons",
+    "list_scene_overlays": "GET /v2/scenes/{scene_id}/overlays/{overlay_id}",
+    "append_scene_overlays": "POST /v2/scenes/{scene_id}/overlays",
+    "start_analysis": "PUT /v2/tasks",
+    "create_task": "POST /v2/json_upload + PUT /v2/tasks",
+    "create_task_upload": "POST /v2/dxf_upload + PUT /v2/tasks",
+    "create_task_tables_upload": "POST /v2/tables_upload + PUT /v2/tasks",
+    "create_task_json_upload": "POST /v2/json_upload + PUT /v2/tasks",
+    "verify_zones": "POST /v2/verification",
+    "verify_task_solution": "POST /v2/verification (zones из GET /v2/tasks/{task_id}/{n})",
+    "list_overlays": "GET /v2/scenes/{scene_id}/overlays/{overlay_id}",
+    "append_overlays": "POST /v2/scenes/{scene_id}/overlays",
+}

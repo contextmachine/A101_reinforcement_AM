@@ -101,3 +101,31 @@ def test_docs_define_components_as_task_scoped_and_minus_one_as_virtual_aggregat
     assert "виртуальный агрегат" in aggregate
     assert "max_useful_n=0" in aggregate
     assert "нет" in aggregate.lower() or "отсутств" in aggregate.lower()
+
+
+DEPRECATED_V1 = {
+    ("post", "/v1/scenes/dxf_upload"), ("post", "/v1/scenes/json_upload"), ("post", "/v1/scenes/tables_upload"),
+    ("get", "/v1/scenes/{scene_id}/polygons"), ("get", "/v1/scenes/{scene_id}/overlays"),
+    ("post", "/v1/scenes/{scene_id}/overlays"), ("put", "/v1/tasks"), ("post", "/v1/tasks"),
+    ("post", "/v1/tasks/upload"), ("post", "/v1/tasks/tables_upload"), ("post", "/v1/tasks/json_upload"),
+    ("post", "/v1/verification/zones"), ("post", "/v1/verification/task"),
+    ("get", "/v1/tasks/{task_id}/overlays"), ("post", "/v1/tasks/{task_id}/overlays"),
+}
+
+
+def test_v1_operations_replaced_by_v2_are_marked_deprecated():
+    paths = app.openapi()["paths"]
+    flagged = {
+        (method, path)
+        for path, methods in paths.items()
+        for method, op in methods.items()
+        if method in {"get", "post", "put", "patch", "delete"} and op.get("deprecated")
+    }
+    assert flagged == DEPRECATED_V1
+    for method, path in DEPRECATED_V1:
+        assert "Устарело" in paths[path][method]["description"], (method, path)
+        assert "/v2/" in paths[path][method]["description"], (method, path)
+    # v1 routes that keep working beside v2 stay undeprecated, and no /v2 route is deprecated
+    assert not paths["/v1/tasks/{task_id}/cancel"]["post"].get("deprecated")
+    assert not paths["/v1/tasks/{task_id}"]["get"].get("deprecated")
+    assert not paths["/v1/scenes/pkl_upload"]["post"].get("deprecated")

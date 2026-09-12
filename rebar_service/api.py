@@ -331,14 +331,14 @@ def ready():
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@app.post("/v1/scenes/dxf_upload", response_model=SceneCreated)
+@app.post("/v1/scenes/dxf_upload", response_model=SceneCreated, deprecated=True)
 async def create_scene_dxf_upload(file: UploadFile = File(...)):
     """Parse one DXF in the API and create a ready reusable scene without analysis."""
     input_obj = await _read_upload_input(file, dxf_only=True)
     return await _create_scene_response(input_obj)
 
 
-@app.post("/v1/scenes/json_upload", response_model=SceneCreated)
+@app.post("/v1/scenes/json_upload", response_model=SceneCreated, deprecated=True)
 async def create_scene_json_upload(file: UploadFile = File(...)):
     """Parse source-polygons JSON in the API and create a ready reusable scene."""
     if not (file.filename or "").lower().endswith(".json"):
@@ -348,7 +348,7 @@ async def create_scene_json_upload(file: UploadFile = File(...)):
     return await _create_scene_response(input_obj)
 
 
-@app.post("/v1/scenes/tables_upload", response_model=SceneCreated)
+@app.post("/v1/scenes/tables_upload", response_model=SceneCreated, deprecated=True)
 async def create_scene_tables_upload(
     nodes_file: UploadFile = File(...),
     elements_file: UploadFile = File(...),
@@ -397,7 +397,7 @@ async def get_scene(scene_id: str):
     return SceneInfo.model_validate(row)
 
 
-@app.get("/v1/scenes/{scene_id}/polygons")
+@app.get("/v1/scenes/{scene_id}/polygons", deprecated=True)
 async def scene_polygons(
     scene_id: str,
     smooth: bool = Query(False),
@@ -434,7 +434,7 @@ async def scene_polygons(
     )
 
 
-@app.get("/v1/scenes/{scene_id}/overlays")
+@app.get("/v1/scenes/{scene_id}/overlays", deprecated=True)
 async def list_scene_overlays(scene_id: str):
     if await run_in_threadpool(store.get_scene, scene_id) is None:
         raise HTTPException(status_code=404, detail="Scene not found")
@@ -442,7 +442,7 @@ async def list_scene_overlays(scene_id: str):
     return JSONResponse(to_jsonable({"scene_id": scene_id, "overlays": rows}))
 
 
-@app.post("/v1/scenes/{scene_id}/overlays")
+@app.post("/v1/scenes/{scene_id}/overlays", deprecated=True)
 async def append_scene_overlays(scene_id: str, mutations: list[OverlayEventMutation]):
     if await run_in_threadpool(store.get_scene, scene_id) is None:
         raise HTTPException(status_code=404, detail="Scene not found")
@@ -459,7 +459,7 @@ async def append_scene_overlays(scene_id: str, mutations: list[OverlayEventMutat
     return JSONResponse(to_jsonable({"scene_id": scene_id, "overlays": rows}))
 
 
-@app.put("/v1/tasks", response_model=TaskCreated)
+@app.put("/v1/tasks", response_model=TaskCreated, deprecated=True)
 async def start_analysis(request: AnalysisTaskStart):
     """Start an immutable analysis against a prepared scene snapshot."""
     scene = await run_in_threadpool(store.get_scene, request.scene_id)
@@ -505,7 +505,7 @@ async def start_analysis(request: AnalysisTaskStart):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.post("/v1/tasks", response_model=TaskCreated)
+@app.post("/v1/tasks", response_model=TaskCreated, deprecated=True)
 async def create_task(request: TaskCreate, smooth: bool = Query(False)):
     try:
         parameters = TaskParameters.model_validate(request.model_dump(exclude={"input"}))
@@ -548,7 +548,7 @@ async def _finish_source_upload(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.post("/v1/tasks/upload", response_model=TaskCreated)
+@app.post("/v1/tasks/upload", response_model=TaskCreated, deprecated=True)
 async def create_task_upload(
     config: Annotated[str | None, Form()] = None,
     file: UploadFile = File(...),
@@ -573,7 +573,7 @@ async def create_task_upload(
     )
 
 
-@app.post("/v1/tasks/tables_upload", response_model=TaskCreated)
+@app.post("/v1/tasks/tables_upload", response_model=TaskCreated, deprecated=True)
 async def create_task_tables_upload(
     config: Annotated[str | None, Form()] = None,
     nodes_file: UploadFile = File(...),
@@ -605,7 +605,7 @@ async def create_task_tables_upload(
     )
 
 
-@app.post("/v1/tasks/json_upload", response_model=TaskCreated)
+@app.post("/v1/tasks/json_upload", response_model=TaskCreated, deprecated=True)
 async def create_task_json_upload(
     config: Annotated[str | None, Form()] = None,
     file: UploadFile = File(...),
@@ -653,7 +653,7 @@ async def source_polygons_upload(file: Annotated[UploadFile, File()]):
     return JSONResponse(polygons)
 
 
-@app.post("/v1/verification/zones", response_model=VerificationResponse)
+@app.post("/v1/verification/zones", response_model=VerificationResponse, deprecated=True)
 async def verify_zones(request: CompactVerificationRequest):
     from .solution_verification import verify_compact_zones
 
@@ -685,7 +685,7 @@ async def verify_zones(request: CompactVerificationRequest):
     )
 
 
-@app.post("/v1/verification/task", response_model=VerificationResponse)
+@app.post("/v1/verification/task", response_model=VerificationResponse, deprecated=True)
 async def verify_task_solution(request: StoredSolutionVerificationRequest):
     from .compact_zones import compact_zones_from_layout
     from .solution_verification import verify_compact_zones
@@ -779,7 +779,7 @@ async def get_source_polygons(task_id: str, smooth: bool | None = Query(None), o
     return JSONResponse(to_jsonable(polygons))
 
 
-@app.get("/v1/tasks/{task_id}/overlays")
+@app.get("/v1/tasks/{task_id}/overlays", deprecated=True)
 async def list_overlays(task_id: str):
     meta = await run_in_threadpool(store.get_meta, task_id)
     if meta is None:
@@ -789,7 +789,7 @@ async def list_overlays(task_id: str):
     return JSONResponse(to_jsonable({"task_id": task_id, "scene_id": scene_id, "overlays": rows}))
 
 
-@app.post("/v1/tasks/{task_id}/overlays")
+@app.post("/v1/tasks/{task_id}/overlays", deprecated=True)
 async def append_overlays(task_id: str, mutations: list[OverlayEventMutation]):
     meta = await run_in_threadpool(store.get_meta, task_id)
     if meta is None:
