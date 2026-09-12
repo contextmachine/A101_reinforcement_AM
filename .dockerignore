@@ -13,3 +13,4 @@ examples
 deploy
 README*.md
 *.zip
+!/A101_DXF/

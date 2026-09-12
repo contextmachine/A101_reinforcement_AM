@@ -12,3 +12,4 @@ redis-data/
 !/deploy/k8s/secrets/*.example.yaml
 .DS_Store
 .idea/
+!/A101_DXF/
