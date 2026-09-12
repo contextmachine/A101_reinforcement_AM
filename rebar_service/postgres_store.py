@@ -3576,13 +3576,15 @@ class PostgresStore:
                         preparation_state=:state,
                         max_useful_n=:max_useful_n,
                         preparation_error=CAST(:error AS jsonb),
-                        prepared_at=CASE WHEN :state='success' THEN now() ELSE prepared_at END,
+                        prepared_at=CASE WHEN :is_success THEN now() ELSE prepared_at END,
                         updated_at=now()
                     WHERE id=:task_id
                     """
                 ),
                 {
-                    "task_id": str(task_id), "state": str(state),
+                    "task_id": str(task_id),
+                    "state": str(state),
+                    "is_success": state == "success",
                     "max_useful_n": None if max_useful_n is None else int(max_useful_n),
                     "error": _json_param(error) if error is not None else None,
                 },
@@ -3591,14 +3593,15 @@ class PostgresStore:
                 n_state = "preparing" if state == "preparing" else state
                 conn.execute(
                     text(
-                        """
-                        UPDATE v2_task_n SET state=:n_state, updated_at=now(),
-                            error=CASE WHEN :n_state='error' THEN CAST(:error AS jsonb) ELSE error END
-                        WHERE task_id=:task_id AND state IN ('pending','preparing')
+                        """UPDATE v2_task_n SET state=:n_state, updated_at=now(),
+                                error=CASE WHEN :is_error THEN CAST(:error AS jsonb) ELSE error END
+                            WHERE task_id=:task_id AND state IN ('pending','preparing')
                         """
                     ),
                     {
-                        "task_id": str(task_id), "n_state": n_state,
+                        "task_id": str(task_id),
+                        "n_state": n_state,
+                        "is_error": n_state == "error",
                         "error": _json_param(error) if error is not None else None,
                     },
                 )
