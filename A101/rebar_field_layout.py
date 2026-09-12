@@ -1021,6 +1021,65 @@ def _repair_local_cluster(
         tracks[k].x = value
     return None
 
+def _shift_zones_off_background(
+    tracks: list[_Track], adjacency: Sequence[set[int]], violations: set[tuple[int, int]]
+) -> None:
+    """Give every additional zone one common offset from its guides.
+
+    The guide-preference stage moves each bar that shares a guide with a background bar by the
+    clearance, one bar at a time, which leaves the zone with alternating gaps (step ± clearance)
+    and breaks it into one-bar runs.  Here the largest such offset is applied to every bar of
+    the zone, so the step stays uniform; the shift is kept only if every bar stays inside its
+    allowed window and clear of all other tracks.
+    """
+    by_zone: dict[tuple[Any, int], list[int]] = defaultdict(list)
+    for k, track in enumerate(tracks):
+        if not track.background and track.x is not None:
+            by_zone[(track.zone, track.component)].append(k)
+    for key, members in by_zone.items():
+        offsets = [float(tracks[k].x) - float(tracks[k].guide) for k in members]
+        if max(abs(o) for o in offsets) <= _EPS or max(offsets) - min(offsets) <= _EPS:
+            continue
+        candidates = sorted({round(o, 6) for o in offsets if abs(o) > _EPS}, key=lambda o: (-abs(o), o))
+        # also try the mirrored offset, in case the other side has more room
+        candidates += [-c for c in candidates if -c not in candidates]
+        best = None
+        for delta in candidates:
+            slack = float("inf")
+            ok = True
+            for k in members:
+                track = tracks[k]
+                x = float(track.guide) + delta
+                lo, hi = map(float, track.allowed)
+                if x < lo - _EPS or x > hi + _EPS:
+                    ok = False
+                    break
+                slack = min(slack, x - lo, hi - x)
+                for other in adjacency[k]:
+                    o = tracks[other]
+                    if o.x is None or (not o.background and o.zone == track.zone and o.component == track.component):
+                        continue
+                    if abs(x - float(o.x)) < (track.diameter + o.diameter) / 2 - _EPS:
+                        ok = False
+                        break
+                if not ok:
+                    break
+            if ok and (best is None or slack > best[0]):
+                best = (slack, delta)
+        if best is None:
+            continue
+        delta = best[1]
+        for k in members:
+            tracks[k].x = float(tracks[k].guide) + delta
+        for k in members:
+            for other in adjacency[k]:
+                pair = (min(k, other), max(k, other))
+                if _tracks_conflict(tracks[k], tracks[other]):
+                    violations.add(pair)
+                else:
+                    violations.discard(pair)
+
+
 def _separate(tracks: list[_Track]) -> list[dict[str, Any]]:
     """Place tracks near their guides and repair only actual local collisions.
 
@@ -1046,6 +1105,11 @@ def _separate(tracks: list[_Track]) -> list[dict[str, Any]]:
         for j in neighbours
         if j > i and _tracks_conflict(tracks[i], tracks[j])
     }
+
+    # A zone whose bars sit on background guides is moved as a whole by the clearance, so its
+    # step stays uniform (no strip wider than the step, no fragmented runs); only what remains
+    # is repaired bar by bar below.
+    _shift_zones_off_background(tracks, adjacency, violations)
 
     moved = 0
     while violations and moved < 2 * len(tracks):

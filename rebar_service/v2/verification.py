@@ -23,7 +23,9 @@ parallel rod on each side, but never farther than the crack-control reach
     density = 10 · π(d/2)² / (w_left + w_right)   [cm²/m]
 
 of the nearest rod whose band covers the point (``w`` = the two half-widths of that band), and
-``0`` where no band reaches.  A uniform mesh at spacing ``s ≤ 2r`` therefore reads exactly
+``0`` where no band reaches.  Only the part of a band that lies inside the field (the material
+polygons) counts as its width, so a rod near a slab edge or a hole is credited to the concrete
+that actually exists beside it.  A uniform mesh at spacing ``s ≤ 2r`` therefore reads exactly
 ``10·π(d/2)²/s`` everywhere, independently of how the finite elements are cut, and the strip
 between two rods farther apart than ``2r`` is unreinforced.  The density is evaluated on a
 raster of ``raster_mm`` cells over the field and averaged over the cells inside each polygon.
@@ -43,6 +45,7 @@ import numpy as np
 from shapely import contains_xy
 from shapely.geometry import LineString, Polygon
 from shapely.geometry.base import BaseGeometry
+from shapely.ops import unary_union
 
 # Stored/internal overlay state -> wire vocabulary.  Wire values pass through unchanged so the
 # function accepts rows that were already serialised for the API.
@@ -127,6 +130,7 @@ class SmearedDensity:
         *,
         cover_mm: float,
         raster_mm: float,
+        field: BaseGeometry | None = None,
     ) -> None:
         self.cell = float(raster_mm)
         rods = [
@@ -148,6 +152,17 @@ class SmearedDensity:
         self.n_long = max(1, int(np.ceil((l1 - self.l0) / self.cell)))
         self.n_cross = max(1, int(np.ceil((c1 - self.c0) / self.cell)))
         self.field = np.zeros((self.n_long, self.n_cross), dtype=float)
+        # in-field mask of the raster cells (cell centres inside the material polygons)
+        if field is None or field.is_empty:
+            self.inside = np.ones((self.n_long, self.n_cross), dtype=bool)
+        else:
+            gl, gc = np.meshgrid(
+                self.l0 + (np.arange(self.n_long) + 0.5) * self.cell,
+                self.c0 + (np.arange(self.n_cross) + 0.5) * self.cell, indexing="ij",
+            )
+            self.inside = contains_xy(field, (gl * ca - gc * sa).ravel(), (gl * sa + gc * ca).ravel()).reshape(gl.shape)
+        self.inside_cum = np.zeros((self.n_long, self.n_cross + 1), dtype=np.int64)
+        self.inside_cum[:, 1:] = np.cumsum(self.inside, axis=1)
         if rods:
             self._rasterise(rods)
 
@@ -171,8 +186,13 @@ class SmearedDensity:
             active = np.flatnonzero((lo <= mid) & (mid <= hi))
             if len(active) == 0:
                 continue
-            profile = _cross_profile(cross[active], area[active], reach[active], cross_centres)
-            self.field[cols, :] = profile
+            near, covered, areas, a_idx, b_idx = _cross_bands(cross[active], area[active], reach[active], cross_centres)
+            # effective band width per (column, rod): in-field cells of the covered range only
+            width = (self.inside_cum[cols][:, b_idx + 1] - self.inside_cum[cols][:, a_idx]) * self.cell  # (cols, rods)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                dens = np.where(width > 0, 10.0 * areas[None, :] / width, 0.0)  # (cols, rods) cm²/m
+            block = np.where(covered[None, :] & self.inside[cols], dens[:, near], 0.0)
+            self.field[cols, :] = block
 
     def mean_over(self, polygon: BaseGeometry) -> float | None:
         """Mean density over the raster cells inside ``polygon`` (``None`` if it has no area)."""
@@ -217,8 +237,13 @@ def _dominant_angle(rods: Sequence[tuple[tuple[float, float], tuple[float, float
     return 0.5 * atan2(sy, sx) % pi
 
 
-def _cross_profile(cross: np.ndarray, area: np.ndarray, reach: np.ndarray, centres: np.ndarray) -> np.ndarray:
-    """Density (cm²/m) along the cross axis for one set of simultaneously present rods."""
+def _cross_bands(cross: np.ndarray, area: np.ndarray, reach: np.ndarray, centres: np.ndarray):
+    """Band assignment along the cross axis for one set of simultaneously present rods.
+
+    Returns ``(near, covered, areas, a_idx, b_idx)``: for every raster cell the index of the nearest
+    rod and whether that rod's band reaches it; per rod its merged area and the inclusive raster
+    index range of its covered cells (contiguous, since the nearest-rod index is monotone).
+    """
     order = np.argsort(cross)
     cross, area, reach = cross[order], area[order], reach[order]
     # merge rods sitting on the same line (stacked layers): areas add, reach is the largest
@@ -241,8 +266,17 @@ def _cross_profile(cross: np.ndarray, area: np.ndarray, reach: np.ndarray, centr
     dist = np.minimum(d_lo, d_hi)
     side = np.where(centres < cross[near], w_lo[near], w_hi[near])
     covered = dist <= side
-    width = w_lo[near] + w_hi[near]
-    return np.where(covered, 10.0 * area[near] / width, 0.0)
+    n = len(cross)
+    cells = np.arange(len(centres))
+    big = len(centres)
+    a_idx = np.full(n, big, dtype=np.int64)
+    b_idx = np.full(n, -1, dtype=np.int64)
+    if covered.any():
+        np.minimum.at(a_idx, near[covered], cells[covered])
+        np.maximum.at(b_idx, near[covered], cells[covered])
+    a_idx = np.where(b_idx >= 0, a_idx, 0)
+    b_idx = np.where(b_idx >= 0, b_idx, -1)
+    return near, covered, area, a_idx, b_idx
 
 
 def reinforcement_rows(
@@ -281,7 +315,9 @@ def reinforcement_rows(
     if material and bars:
         xs0 = min(g.bounds[0] for g in material); ys0 = min(g.bounds[1] for g in material)
         xs1 = max(g.bounds[2] for g in material); ys1 = max(g.bounds[3] for g in material)
-        smeared = SmearedDensity(bars, (xs0, ys0, xs1, ys1), cover_mm=cover, raster_mm=float(raster_mm))
+        smeared = SmearedDensity(
+            bars, (xs0, ys0, xs1, ys1), cover_mm=cover, raster_mm=float(raster_mm), field=unary_union(material),
+        )
 
     rows: list[dict[str, Any]] = []
     for position, raw in enumerate(resolved_rows):

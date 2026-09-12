@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 from ..pipeline import analysis_variant
 from .bars import layout_zones, physical_polygons
+from .repair import fill_gaps
 from .verification import reinforcement_rows
 
 
@@ -35,6 +36,13 @@ def _layout_for(store: Any, row: Mapping[str, Any]) -> tuple[list[dict[str, Any]
             f"раскладка стержней не выполнена ({out.get('status', 'infeasible')}): "
             f"warnings={out.get('warnings')} errors={out.get('errors')}"
         )
+    if bool(config.get("fill_gaps", True)):
+        out = fill_gaps(
+            resolved, out, axis=str(config.get("axis", "y")),
+            anchor_factor=float(config.get("anchor_factor", 40.0)),
+            cover_mm=float(config.get("cover_mm", 30.0)),
+            steel_density_kg_m3=float(config.get("steel_density_kg_m3", 7850.0)),
+        )
     return resolved, out
 
 
@@ -48,6 +56,7 @@ def handle_bars_job(store: Any, job: Mapping[str, Any], worker_id: str) -> None:
         _resolved, out = _layout_for(store, row)
         store.v2.set_bar_task(task_id, state="success", result={
             "bars": out["bars"], "zones": out["zones"], "mass_metrics": out["mass_metrics"],
+            "repair": out.get("repair"),
         })
     except Exception as exc:  # noqa: BLE001 - the task row must record every failure
         traceback.print_exc()

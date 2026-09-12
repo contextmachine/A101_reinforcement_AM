@@ -370,7 +370,7 @@ async def v2_get_bars(request: Request, task_id: str):
     if row.get("error"):
         body["error"] = row["error"]
     if str(row.get("state")) == "success" and row.get("result"):
-        body.update({key: row["result"].get(key) for key in ("bars", "zones", "mass_metrics")})
+        body.update({key: row["result"].get(key) for key in ("bars", "zones", "mass_metrics", "repair")})
     return JSONResponse(to_jsonable(body))
 
 

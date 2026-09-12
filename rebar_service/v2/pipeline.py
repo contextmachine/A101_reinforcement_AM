@@ -464,9 +464,24 @@ class V2Pipeline:
                 error=f"bar layout {out.get('status', 'infeasible')}: {out.get('warnings') or out.get('errors')}",
             )
             return
+        if bool(config.get("fill_gaps", True)):
+            from .repair import fill_gaps
+
+            resolved = list(self.store.resolved_scene_polygons(
+                str(task["scene_id"]), variant=analysis_variant(bool(task.get("smooth"))),
+                overlay_id=int(task.get("overlay_id") or 0),
+            ))
+            out = fill_gaps(
+                resolved, out, axis=field["axis"], anchor_factor=float(config.get("anchor_factor", 40.0)),
+                cover_mm=float(config.get("cover_mm", 30.0)),
+                steel_density_kg_m3=float(config.get("steel_density_kg_m3", 7850.0)),
+            )
+            if self._cancelled(task_id, n):
+                return
         row = self.v2.get_n(task_id, n) or {}
         status = row.get("status") or ("optimal" if fit.get("is_optimal") else "feasable")
         self.v2.set_n(
             task_id, n, state="success", status=status, error=None,
-            mass_metrics=out["mass_metrics"], result={"bars": out["bars"], "zones": out["zones"]},
+            mass_metrics=out["mass_metrics"],
+            result={"bars": out["bars"], "zones": out["zones"], "repair": out.get("repair")},
         )

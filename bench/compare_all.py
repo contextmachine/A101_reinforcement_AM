@@ -27,9 +27,10 @@ RHO, T, COVER = 7850.0, 600.0, 30.0
 OUT = Path("bench/out/compare"); OUT.mkdir(parents=True, exist_ok=True)
 
 
-def evaluate(rows, zones, axis):
+def evaluate(rows, zones, axis, fill_gaps=True):
     store = FakeStore(Settings(min_internal_step=100), rows)
-    cfg = {"axis": axis, "anchor_factor": 40.0, "steel_density_kg_m3": RHO, "t": T, "cover_mm": COVER, "min_bar_gap_mm": None}
+    cfg = {"axis": axis, "anchor_factor": 40.0, "steel_density_kg_m3": RHO, "t": T, "cover_mm": COVER, "min_bar_gap_mm": None,
+           "fill_gaps": fill_gaps}
     store.v2.create_bar_task("b", scene_id="s", overlay_id=0, smooth=False, config=cfg, zones=zones)
     handle_bars_job(store, {"task_id": "b"}, "bench")
     bars = store.v2.get_bar_task("b")
@@ -44,8 +45,10 @@ def evaluate(rows, zones, axis):
     a = np.array([areas[int(r["source_index"])] for r in res]); short = np.maximum(0.0, need - fact)
     kg = lambda v: float((v * 1e-4 * a * RHO).sum())
     mm = bars["result"]["mass_metrics"]
+    rep = bars["result"].get("repair") or {}
     metrics = {"add_with_anch_kg": round(mm["additional"]["with_anchorage_kg"], 1), "bg_with_anch_kg": round(mm["bg"]["with_anchorage_kg"], 1),
-               "bars": len(bars["result"]["bars"]), "need_kg": round(kg(need)), "short_kg": round(kg(short), 1),
+               "bars": len(bars["result"]["bars"]), "zones_out": sum(1 for z in bars["result"]["zones"] if z.get("kind") == "additional"),
+               "rods_added": rep.get("rods_added", 0), "need_kg": round(kg(need)), "short_kg": round(kg(short), 1),
                "short_pct": round(100 * kg(short) / kg(need), 2), "polys_short": int((short > 0.05).sum()),
                "polys_short_gt1": int((short > 1).sum()), "worst_cm2_m": round(float(short.max()), 2)}
     return bars["result"], {int(r["source_index"]): (need[i], fact[i], short[i]) for i, r in enumerate(res)}, metrics
@@ -122,7 +125,9 @@ def main():
             expc = json.load(open(ceil_path))
             solutions.append(("user solver: ceil band policy", expc["k"], expc["t_total"], expc["zones_prod"]))
         for label, n, seconds, zones in solutions:
-            bars_result, per_poly, metrics = evaluate(rows, zones, axis)
+            _b0, _p0, plain = evaluate(rows, zones, axis, fill_gaps=False)
+            bars_result, per_poly, metrics = evaluate(rows, zones, axis, fill_gaps=True)
+            metrics["without_fill"] = plain
             stem = f"{scene}_N{n}_" + label.split(",")[0].split(":")[0].replace(" ", "_") + ("_ceil" if "ceil" in label else "")
             if "lattice" in label:
                 stem += "_lattice_L" + label.split("(L=")[1].rstrip(")")
@@ -131,9 +136,10 @@ def main():
             draw(rows, bars_result, zones, per_poly, axis, f"{name} — {label} — N={n}: {metrics['add_with_anch_kg']:.0f} kg additional, short {metrics['short_kg']:.1f} kg", stem)
             table.append({"scene": name, "solver": label, "N": n, "time_s": seconds, **metrics, "png": str(OUT / f"{stem}.png"), "dxf": str(OUT / f"{stem}.dxf")})
     json.dump(table, open(OUT / "table.json", "w"), ensure_ascii=False, indent=1)
-    print(f"{'scene':30s} {'solver':36s} {'N':>3} {'time s':>7} {'add+anch kg':>12} {'bars':>5} {'short kg':>8} {'%need':>6} {'polys>1':>7} {'worst':>6}")
+    print(f"{'scene':30s} {'solver':36s} {'N':>3} {'time s':>7} | {'no fill: kg':>11} {'zones':>5} {'short kg':>8} {'polys>1':>7} | {'fill: kg':>9} {'+rods':>5} {'zones':>5} {'short kg':>8} {'polys>1':>7} {'worst':>6}")
     for r in table:
-        print(f"{r['scene'][:30]:30s} {r['solver'][:36]:36s} {r['N']:3d} {r['time_s']:7.1f} {r.get('add_with_anch_kg', float('nan')):12.1f} {r.get('bars', 0):5d} {r.get('short_kg', float('nan')):8.1f} {r.get('short_pct', float('nan')):6.2f} {r.get('polys_short_gt1', 0):7d} {r.get('worst_cm2_m', float('nan')):6.2f}")
+        w = r.get("without_fill") or {}
+        print(f"{r['scene'][:30]:30s} {r['solver'][:36]:36s} {r['N']:3d} {r['time_s']:7.1f} | {w.get('add_with_anch_kg', float('nan')):11.1f} {w.get('zones_out', 0):5d} {w.get('short_kg', float('nan')):8.1f} {w.get('polys_short_gt1', 0):7d} | {r.get('add_with_anch_kg', float('nan')):9.1f} {r.get('rods_added', 0):5d} {r.get('zones_out', 0):5d} {r.get('short_kg', float('nan')):8.1f} {r.get('polys_short_gt1', 0):7d} {r.get('worst_cm2_m', float('nan')):6.2f}")
 
 
 if __name__ == "__main__":

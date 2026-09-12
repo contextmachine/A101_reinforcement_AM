@@ -40,6 +40,19 @@ def _mesh(step, d, count, length=3000.0):
     return [_bar((i * step, 0.0), (i * step, length), d) for i in range(count)]
 
 
+def _field(load, x0=-300.0, x1=3600.0, y0=-300.0, y1=3300.0, size=300.0, extra=()):
+    """Elements tiling the field around the bars (so bands are clipped only at the real edge)."""
+    rows = list(extra)
+    x, i = x0, len(rows)
+    while x < x1 - 1e-9:
+        y = y0
+        while y < y1 - 1e-9:
+            rows.append(_poly([(x, y), (x + size, y), (x + size, y + size), (x, y + size)], load, index=i)); i += 1
+            y += size
+        x += size
+    return rows
+
+
 def _area(d):
     return pi * (d / 2.0) ** 2
 
@@ -66,7 +79,7 @@ def test_row_shape_and_units_for_a_single_bar():
 def test_uniform_mesh_reads_the_analytic_area_per_metre():
     # ø18 @ 300 over a big square: 10·π·81/300 = 8.48 cm²/m everywhere inside the mesh
     bars = _mesh(300.0, 18, 12, length=3000.0)
-    polygons = [_square(600, 600, 1500, load=8.0)]
+    polygons = _field(8.0, extra=[_square(600, 600, 1500, load=8.0, index=0)])
     rows = reinforcement_rows(polygons, bars, steel_density_kg_m3=RHO, t_mm=T, cover_mm=COVER)
     assert rows[0]["fact_load_sm2/m"] == pytest.approx(10.0 * pi * 81.0 / 300.0, rel=1e-3)
     assert rows[0]["fact_load_sm2/m"] == pytest.approx(8.48, abs=0.02)
@@ -74,11 +87,11 @@ def test_uniform_mesh_reads_the_analytic_area_per_metre():
 
 def test_result_does_not_depend_on_how_the_elements_are_cut():
     bars = _mesh(300.0, 18, 12, length=3000.0)
-    whole = [_square(600, 600, 1500, load=8.0)]
+    whole = _field(8.0, extra=[_square(600, 600, 1500, load=8.0, index=0)])
     # the same area cut into narrow strips between and across the bars
-    strips = [_poly([(x, 600), (x + 100, 600), (x + 100, 2100), (x, 2100)], 8.0) for x in range(600, 2100, 100)]
+    strips = [_poly([(x, 600), (x + 100, 600), (x + 100, 2100), (x, 2100)], 8.0, index=k) for k, x in enumerate(range(600, 2100, 100))]
     whole_fact = reinforcement_rows(whole, bars, steel_density_kg_m3=RHO, t_mm=T)[0]["fact_load_sm2/m"]
-    strip_facts = [r["fact_load_sm2/m"] for r in reinforcement_rows(strips, bars, steel_density_kg_m3=RHO, t_mm=T)]
+    strip_facts = [r["fact_load_sm2/m"] for r in reinforcement_rows(_field(8.0, extra=strips), bars, steel_density_kg_m3=RHO, t_mm=T)[:len(strips)]]
     assert all(f == pytest.approx(whole_fact, rel=1e-6) for f in strip_facts)
     assert min(strip_facts) > 0.99 * whole_fact
 
@@ -86,16 +99,17 @@ def test_result_does_not_depend_on_how_the_elements_are_cut():
 def test_strip_between_bars_farther_apart_than_the_reach_is_unreinforced():
     # two ø20 bars 1000 mm apart, reach 200 mm each: the middle 600 mm carries nothing
     bars = [_bar((0, 0), (0, 3000), 20), _bar((1000, 0), (1000, 3000), 20)]
-    middle = [_square(350, 500, 300, load=5.0)]  # x in [350, 650]
-    near = [_poly([(0, 500), (150, 500), (150, 800), (0, 800)], 5.0)]  # x in [0, 150]
-    rows = reinforcement_rows(middle + near, bars, steel_density_kg_m3=RHO, t_mm=T, cover_mm=COVER)
+    middle = _square(350, 500, 300, load=5.0, index=0)  # x in [350, 650]
+    near = _poly([(0, 500), (150, 500), (150, 800), (0, 800)], 5.0, index=1)  # x in [0, 150]
+    rows = reinforcement_rows(_field(5.0, extra=[middle, near]), bars, steel_density_kg_m3=RHO, t_mm=T, cover_mm=COVER)
     assert rows[0]["fact_load_sm2/m"] == 0.0
     assert rows[1]["fact_load_sm2/m"] == pytest.approx(10.0 * _area(20) / 400.0, rel=1e-3)
 
 
 def test_cover_sets_the_reach():
     bars = [_bar((0, 0), (0, 3000), 20)]
-    polygon = [_poly([(150, 500), (450, 500), (450, 800), (150, 800)], 5.0)]  # x in [150, 450]
+    # field extends 600 mm beyond the rod on the left so that neither reach is clipped by the edge
+    polygon = _field(5.0, x0=-600.0, extra=[_poly([(150, 500), (450, 500), (450, 800), (150, 800)], 5.0, index=0)])  # x in [150, 450]
     close = reinforcement_rows(polygon, bars, steel_density_kg_m3=RHO, t_mm=T, cover_mm=30.0)[0]
     wide = reinforcement_rows(polygon, bars, steel_density_kg_m3=RHO, t_mm=T, cover_mm=80.0)[0]
     # cover 30 -> reach 200: only x in [150, 200] is covered; cover 80 -> reach 450: all of it
@@ -106,7 +120,7 @@ def test_cover_sets_the_reach():
 def test_bar_ending_inside_the_polygon_counts_only_where_it_exists():
     # mesh of ø18 @ 300 whose bars stop half-way through the polygon
     bars = _mesh(300.0, 18, 12, length=1350.0)
-    polygons = [_square(600, 600, 1500, load=8.0)]
+    polygons = _field(8.0, extra=[_square(600, 600, 1500, load=8.0, index=0)])
     row = reinforcement_rows(polygons, bars, steel_density_kg_m3=RHO, t_mm=T)[0]
     assert row["fact_load_sm2/m"] == pytest.approx(0.5 * 10.0 * pi * 81.0 / 300.0, rel=0.03)
 
@@ -114,7 +128,7 @@ def test_bar_ending_inside_the_polygon_counts_only_where_it_exists():
 def test_stacked_layers_on_the_same_line_add_their_area():
     single = _mesh(300.0, 20, 12)
     double = single + _mesh(300.0, 20, 12)
-    polygons = [_square(600, 600, 1500, load=8.0)]
+    polygons = _field(8.0, extra=[_square(600, 600, 1500, load=8.0, index=0)])
     one = reinforcement_rows(polygons, single, steel_density_kg_m3=RHO, t_mm=T)[0]["fact_load_sm2/m"]
     two = reinforcement_rows(polygons, double, steel_density_kg_m3=RHO, t_mm=T)[0]["fact_load_sm2/m"]
     assert two == pytest.approx(2.0 * one, rel=1e-6)
@@ -122,19 +136,19 @@ def test_stacked_layers_on_the_same_line_add_their_area():
 
 def test_bars_along_x_are_handled_in_their_own_frame():
     bars = [_bar((0.0, i * 300.0), (3000.0, i * 300.0), 18) for i in range(12)]
-    polygons = [_square(600, 600, 1500, load=8.0)]
+    polygons = _field(8.0, extra=[_square(600, 600, 1500, load=8.0, index=0)])
     row = reinforcement_rows(polygons, bars, steel_density_kg_m3=RHO, t_mm=T)[0]
     assert row["fact_load_sm2/m"] == pytest.approx(10.0 * pi * 81.0 / 300.0, rel=1e-3)
 
 
 def test_real_and_empty_rows_use_wire_vocabulary_and_formulas():
     bars = _mesh(300.0, 18, 12)
-    polygons = [
+    polygons = _field(5.0, extra=[
         _square(600, 600, 900, load=5.0, state="active", index=0),
         _square(600, 600, 900, load=5.0, state="background_only", index=1),
         _square(600, 600, 900, load=5.0, state="removed", index=2),
-    ]
-    rows = reinforcement_rows(polygons, bars, steel_density_kg_m3=RHO, t_mm=T)
+    ])
+    rows = reinforcement_rows(polygons, bars, steel_density_kg_m3=RHO, t_mm=T)[:3]
     assert [r["source_index"] for r in rows] == [0, 1, 2]
     assert [r["overlay_state"] for r in rows] == ["active", "real", "empty"]
     active, real, empty = rows
@@ -149,7 +163,7 @@ def test_real_and_empty_rows_use_wire_vocabulary_and_formulas():
 
 def test_kg_per_m3_relation_to_cm2_per_m():
     bars = _mesh(300.0, 18, 12)
-    polygons = [_square(600, 600, 900, load=8.0)]
+    polygons = _field(8.0, extra=[_square(600, 600, 900, load=8.0, index=0)])
     density, t = 7700.0, 250.0
     row = reinforcement_rows(polygons, bars, steel_density_kg_m3=density, t_mm=t)[0]
     factor = density / (10.0 * t)
@@ -189,7 +203,7 @@ def test_zero_area_polygon_reports_need_but_no_fact():
 
 def test_tiny_polygon_without_a_raster_cell_centre_is_sampled_at_its_point():
     bars = _mesh(300.0, 18, 12)
-    tiny = [_square(605, 605, 5, load=8.0)]
+    tiny = _field(8.0, extra=[_square(605, 605, 5, load=8.0, index=0)])
     row = reinforcement_rows(tiny, bars, steel_density_kg_m3=RHO, t_mm=T)[0]
     assert row["fact_load_sm2/m"] == pytest.approx(10.0 * pi * 81.0 / 300.0, rel=1e-3)
 
@@ -214,3 +228,13 @@ def test_wire_states_pass_through_and_unknown_states_are_rejected():
     assert wire_overlay_state(None) == "active"
     with pytest.raises(ValueError):
         wire_overlay_state("gone")
+
+
+def test_band_is_clipped_at_the_field_edge():
+    # one ø20 rod 100 mm inside the slab edge, no neighbour: its band inside the field is
+    # 100 mm (to the edge) + reach 200 mm; nothing is credited to the concrete that does not exist
+    bars = [_bar((100, -100), (100, 1100), 20)]
+    field = [_poly([(0, 0), (900, 0), (900, 1000), (0, 1000)], 5.0, index=0)]
+    row = reinforcement_rows(field, bars, steel_density_kg_m3=RHO, t_mm=T, cover_mm=COVER)[0]
+    density = 10.0 * _area(20) / 300.0
+    assert row["fact_load_sm2/m"] == pytest.approx(density * 300.0 / 900.0, rel=0.03)

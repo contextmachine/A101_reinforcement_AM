@@ -126,6 +126,30 @@ horizontal bars use `direction=(0,-1)` and the origin is the start of the base b
   Background tracks: unclipped length = the field component's extent along the bar axis at
   that track (see Q2).
 
+## 5. Bar layout notes (2026-09-12)
+
+* An additional zone whose bars land on background guides is shifted as a whole by the clearance
+  (`_shift_zones_off_background`), so its step stays uniform; only residual collisions are
+  repaired bar by bar.
+* Zones are re-derived from the laid-out tracks with a grid tolerance of 0.3·step
+  (`_RUN_GRID_TOL`): a bar pushed off its guide stays a member of its zone, a missing or extra bar
+  starts a new run. Before this every shifted bar became its own one-bar zone.
+* The verification band of a rod counts only the width inside the field (material polygons), so
+  edge rods are not credited to concrete beyond the slab edge.
+
+## 5a. Gap filling after the layout (`fill_gaps`, 2026-09-12)
+
+A laid-out zone can leave a strip wider than its step (bars pushed off background guides by the
+clearance rule, a zone box ending inside a high-need element, an element straddling a weak part of
+the period). With `fill_gaps=true` (default, `BarsConfig`/`TaskConfig`) the bars stage, `/v2/bars`
+and `/v2/verification` check every polygon with the verification model of §6 and, for each polygon
+short by more than 0.5 cm²/m, insert one rod (diameter of the additional zone under the polygon)
+into the widest gap of parallel rods crossing it, merged along the bars for neighbouring short
+elements, clipped to the field, with `anchor_factor·d` anchorage; the pass repeats until nothing
+is short. Inserted rods are returned as one-bar `additional` zones and counted in
+`mass_metrics.additional`; the `repair` field of the result reports `passes`, `rods_added`,
+`added_kg`, `short_before`, `short_after`.
+
 ## 6. Verification
 
 For every source polygon (stable order) with its overlay state mapped to

@@ -36,6 +36,7 @@ _ALIGN_TOL = 1e-4
 #: Two tracks of one zone belong to the same arithmetic run when their spacing equals the zone
 #: step within this many millimetres (guide slots are exact up to floating-point noise).
 _RUN_TOL = 1e-3
+_RUN_GRID_TOL = 0.35  # fraction of the step a bar may deviate from its grid position and stay in the run
 
 
 # --------------------------------------------------------------------------------------------
@@ -381,15 +382,25 @@ def fitted_boxes_to_zones(
 
 
 def _runs(rows: Sequence[Mapping[str, Any]], axis: str, step: float) -> list[list[Mapping[str, Any]]]:
-    """Split one zone's tracks (sorted by cross coordinate) into exact arithmetic runs of ``step``."""
+    """Split one zone's tracks (sorted by cross coordinate) into arithmetic runs of ``step``.
+
+    A track joins the current run when it sits on the run's next grid position (origin +
+    k·step, k consecutive) within ``_RUN_GRID_TOL`` of the step: bars pushed off background
+    guides by the clearance rule stay members of their zone, a missing or extra bar starts a
+    new run.
+    """
     ordered = sorted(rows, key=lambda t: (_track_cross(t, axis), int(t["id"])))
     runs: list[list[Mapping[str, Any]]] = []
+    origins: list[float] = []
     for track in ordered:
         coordinate = _track_cross(track, axis)
-        if runs and abs(coordinate - _track_cross(runs[-1][-1], axis) - step) <= _RUN_TOL:
-            runs[-1].append(track)
-        else:
-            runs.append([track])
+        if runs:
+            expected = origins[-1] + len(runs[-1]) * step
+            if abs(coordinate - expected) <= _RUN_GRID_TOL * step:
+                runs[-1].append(track)
+                continue
+        runs.append([track])
+        origins.append(coordinate)
     return runs
 
 

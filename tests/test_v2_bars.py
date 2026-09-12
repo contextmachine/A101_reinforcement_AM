@@ -155,7 +155,7 @@ def test_layout_axis_y_bg_and_additional_bars():
     for bar in add_bars:
         z = by_id[bar["zone_id"]]
         offset = (bar["start"][0] - z["origin"][0]) / z["arm"]["step"]
-        assert abs(offset - round(offset)) < 1e-9 and -z["left"] <= round(offset) <= z["right"]
+        assert abs(offset - round(offset)) <= 0.35 + 1e-9 and -z["left"] <= round(offset) <= z["right"]
 
     metrics = result["mass_metrics"]
     assert set(metrics) == {"additional", "bg"} and all(set(metrics[g]) == set(MASS_KEYS) for g in metrics)
@@ -354,7 +354,7 @@ def test_layout_axis_x_horizontal_bars_and_zone_conventions():
     for bar in add_bars:
         z = by_id[bar["zone_id"]]
         offset = (z["origin"][1] - bar["start"][1]) / z["arm"]["step"]
-        assert abs(offset - round(offset)) < 1e-9 and -z["left"] <= round(offset) <= z["right"]
+        assert abs(offset - round(offset)) <= 0.35 + 1e-9 and -z["left"] <= round(offset) <= z["right"]
     bg = result["mass_metrics"]["bg"]
     assert bg["without_anchorage_kg"] == pytest.approx(4 * 3000 * unit(18))
     assert bg["with_anchorage_unclipped_kg"] == pytest.approx(4 * (3000 + 1440) * unit(18))
