@@ -68,6 +68,7 @@ def handle_verification_job(store: Any, job: Mapping[str, Any], worker_id: str) 
             resolved, out["bars"],
             steel_density_kg_m3=float(config.get("steel_density_kg_m3", 7850.0)),
             t_mm=float(config["t"]),
+            cover_mm=float(config.get("cover_mm", 30.0)),
         )
         store.v2.set_verification_task(task_id, state="success", result=rows)
     except Exception as exc:  # noqa: BLE001 - the task row must record every failure

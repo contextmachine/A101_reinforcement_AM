@@ -239,7 +239,7 @@ PUT  /v2/tasks                                          -> {task_id}
 PUT  /v2/tasks/{task_id}/n  |  PUT /v2/tasks/{task_id}/cancel
 GET  /v2/tasks/{task_id}    |  GET /v2/tasks/{task_id}/{n}   (bars, zones, mass_metrics)
 POST /v2/bars  | GET /v2/bars/{task_id}                 (изолированный worker раскладки)
-POST /v2/verification | GET /v2/verification/{id}       (раскладка + need/fact в cm²/m и kg/m³)
+POST /v2/verification | GET /v2/verification/{id}       (раскладка + need/fact в cm²/m и kg/m³; fact — размазанная плотность стержней, зона влияния 5·(cover_mm + d/2))
 ```
 
 Состояния одного N: `pending -> preparing -> solving -> fitting -> bars -> success | error | cancelled`;

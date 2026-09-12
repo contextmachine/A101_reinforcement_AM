@@ -132,10 +132,22 @@ For every source polygon (stable order) with its overlay state mapped to
 `active | real | empty`:
 
 * `need_load_sm2/m` = polygon `load` for `active`, `0` for `real`, `null` for `empty`.
-* `fact_load_sm2/m` = `10 · Σ_bars π(d/2)² · len(bar axis ∩ polygon) / area(polygon)`
-  (bar axes without anchorage, background bars included).
-* `need_load_kg/m3` = `need · ρ / (10 · t)`, `fact_load_kg/m3` = `Σ π(d/2)² · len · ρ / (area · t)`
+* `fact_load_sm2/m` = mean **smeared reinforcement density** over the polygon. The rods of all
+  zones (background included, anchorage excluded, clipped to the field) form one set; each rod
+  has only an axis and a diameter `d`. At every point along a rod its tributary band reaches
+  half-way to the nearest parallel rod on each side, but never farther than the crack-control
+  reach `r = 5·(cover_mm + d/2)` (EN 1992-1-1 §7.3.4; `cover_mm` = concrete cover to the bar
+  face, request field, default 30). Density of a point = `10·π(d/2)² / (w_left + w_right)`
+  of the nearest rod whose band covers it, `0` where no band reaches. The field is evaluated on
+  a 20 mm raster and averaged over the raster cells inside the polygon, so a uniform mesh at
+  spacing `s ≤ 2r` reads exactly `10·π(d/2)²/s` regardless of how the elements are cut.
+* `need_load_kg/m3` = `need · ρ / (10 · t)`, `fact_load_kg/m3` = `fact · ρ / (10 · t)`
   (`t`, lengths in mm, `ρ = steel_density_kg_m3`). See Q6.
+
+Rationale (2026-09-12): the first version credited the steel of rod cylinders intersected
+with each polygon; with 300 mm spacing and 500 mm elements the result oscillated with the
+element cut and narrow elements between two rods read zero, so refining the mesh raised the
+"deficit" without any change in reinforcement.
 
 ## 7. Configuration (env / ConfigMap only)
 

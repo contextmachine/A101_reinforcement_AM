@@ -308,6 +308,9 @@ class BarsView(V2Model):
 class VerificationConfig(BarsConfig):
     steel_density_kg_m3: float = Field(default=7850.0, gt=0)
     t: float = Field(gt=0)
+    # Concrete cover to the bar face (защитный слой), mm: sets the lateral reach 5·(cover + d/2)
+    # of every rod in the smeared-density verification (EN 1992-1-1 §7.3.4).
+    cover_mm: float = Field(default=30.0, ge=0)
 
 
 class VerificationRequest(V2Model):
