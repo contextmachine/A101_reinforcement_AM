@@ -16,6 +16,9 @@ for _p in (str(_VENDOR), str(_VENDOR / "experiments")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+# CP-SAT (ortools) is imported lazily inside the selector (vendor/experiments/ilp.py): it cannot share a
+# process with highspy (same libhighs soname), so rebar_service.alt_worker loads it first and never
+# imports highspy; this module itself stays importable anywhere.
 import agglo  # noqa: E402  (vendor/experiments)
 import ilp  # noqa: E402
 from a101_reinforcement.catalog import (  # noqa: E402

@@ -1,29 +1,40 @@
-"""Alternative solver (vendored experiments) behind the v2 task protocol."""
+"""Alternative solver (vendored experiments) behind the v2 task protocol.
+
+CP-SAT (ortools) and highspy cannot share one process (both ship a libhighs with the same
+soname), so everything that needs the solver runs in a child interpreter; only the pure
+scene-to-mosaic adapter is tested in-process.
+"""
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
-import pytest
+ROOT = Path(__file__).resolve().parents[1]
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_v2_pipeline_end_to_end import CONFIG, ROWS, FakeStore, drain, make_settings  # noqa: E402
 
-from rebar_service.altsolver import build_engine, solve_n  # noqa: E402
-
-try:  # the CP-SAT extension cannot load next to highspy's libhighs on macOS (same dylib install name)
-    from ortools.sat.python import cp_model  # noqa: F401
-    CPSAT_LOADS = True
-except ImportError:
-    CPSAT_LOADS = False
-needs_cpsat = pytest.mark.skipif(not CPSAT_LOADS, reason="ortools CP-SAT cannot be loaded in this process (libhighs clash)")
-from rebar_service.altsolver.engine import mosaic_from_rows  # noqa: E402
-from rebar_service.altsolver.pipeline import AltSolverPipeline  # noqa: E402
-from rebar_service.v2.models import MassMetrics  # noqa: E402
+def _run_in_child(body: str) -> dict:
+    script = textwrap.dedent('''
+        import json, sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path("tests")))
+        from ortools.sat.python import cp_model  # noqa: F401  (load CP-SAT before anything else)
+        from test_v2_pipeline_end_to_end import CONFIG, ROWS, FakeStore, drain, make_settings
+        from rebar_service.altsolver import build_engine, solve_n
+        from rebar_service.altsolver.pipeline import AltSolverPipeline
+        from rebar_service.v2.models import MassMetrics
+    ''') + textwrap.dedent(body)
+    proc = subprocess.run([sys.executable, "-c", script], cwd=ROOT, capture_output=True, text=True, timeout=600)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
 def test_mosaic_from_rows_uses_legend_convention_and_drops_removed_polygons():
+    from rebar_service.altsolver.engine import mosaic_from_rows
+
     rows = [
         {"points": [[0, 0], [1200, 0], [1200, 1800], [0, 1800]], "load": 12.0},
         {"points": [[1800, 0], [3000, 0], [3000, 1800], [1800, 1800]], "load": 19.0, "overlay_state": "active"},
@@ -38,37 +49,44 @@ def test_mosaic_from_rows_uses_legend_convention_and_drops_removed_polygons():
     assert mosaic.direction == "Y"
 
 
-@needs_cpsat
 def test_engine_and_selection_on_the_tiny_scene():
-    settings = make_settings(Path("/tmp"))
-    scene = build_engine(ROWS, config=CONFIG, settings=settings)
-    assert scene.background == (16.0, 300.0)
-    assert scene.info["demand_cells"] > 0 and scene.info["solver"] == "canon_pool_cpsat"
-    solution = solve_n(scene, 2, settings=settings, time_limit=30)
-    assert solution.status in {"OPTIMAL", "FEASIBLE", "GAP"}
-    kinds = [z["kind"] for z in solution.zones]
-    assert kinds[0] == "bg" and 1 <= len(kinds) - 1 <= 2
-    assert all(z["left"] == 0 and z["right"] >= 1 for z in solution.zones[1:])
+    out = _run_in_child('''
+        settings = make_settings(Path("/tmp"))
+        scene = build_engine(ROWS, config=CONFIG, settings=settings)
+        solution = solve_n(scene, 2, settings=settings, time_limit=30)
+        print(json.dumps({"background": list(scene.background), "demand": scene.info["demand_cells"],
+                          "solver": scene.info["solver"], "status": solution.status,
+                          "kinds": [z["kind"] for z in solution.zones],
+                          "runs_ok": all(z["left"] == 0 and z["right"] >= 1 for z in solution.zones[1:])}))
+    ''')
+    assert out["background"] == [16.0, 300.0]
+    assert out["demand"] > 0 and out["solver"] == "canon_pool_cpsat"
+    assert out["status"] in {"OPTIMAL", "FEASIBLE", "GAP"}
+    assert out["kinds"][0] == "bg" and 1 <= len(out["kinds"]) - 1 <= 2 and out["runs_ok"]
 
 
-@needs_cpsat
 def test_alt_pipeline_runs_prepare_and_solve_end_to_end(tmp_path):
-    settings = make_settings(tmp_path)
-    store = FakeStore(settings)
-    pipeline = AltSolverPipeline(store, settings)
-    task_id = pipeline.create_task(scene_id="scene", overlay_id=0, smooth=False, config=CONFIG, ns=[1, 2])
-    drain(store, pipeline)
-    task = store.v2.get_task(task_id)
-    assert task["state"] == "ready" and task["prepare_info"]["solver"] == "canon_pool_cpsat"
-    assert task["max_useful_n"] >= 2
-    rows = {n: store.v2.get_n(task_id, n) for n in (1, 2)}
-    assert all(r["state"] == "success" for r in rows.values()), rows
-    solved = [r for r in rows.values() if r["status"] in {"optimal", "feasable"}]
-    assert solved, rows
-    for r in solved:
-        MassMetrics.model_validate(r["mass_metrics"])
-        assert r["result"]["bars"] and r["result"]["zones"][0]["kind"] == "bg"
-        assert r["result"]["solver"]["status"] in {"OPTIMAL", "FEASIBLE", "GAP"}
-        assert r["fun"] is not None and r["fun"] > 0
-    # only prepare and solve jobs were needed: no fit/bars jobs on the queue
-    assert {j["kind"] for j in store.queue.enqueued} <= {"v2_prepare", "v2_solve"}
+    out = _run_in_child(f'''
+        settings = make_settings(Path({str(tmp_path)!r}))
+        store = FakeStore(settings)
+        pipeline = AltSolverPipeline(store, settings)
+        task_id = pipeline.create_task(scene_id="scene", overlay_id=0, smooth=False, config=CONFIG, ns=[1, 2])
+        drain(store, pipeline)
+        task = store.v2.get_task(task_id)
+        rows = {{n: store.v2.get_n(task_id, n) for n in (1, 2)}}
+        solved = [r for r in rows.values() if r["status"] in {{"optimal", "feasable"}}]
+        for r in solved:
+            MassMetrics.model_validate(r["mass_metrics"])
+        print(json.dumps({{"state": task["state"], "solver": task["prepare_info"]["solver"], "max_n": task["max_useful_n"],
+                           "states": [r["state"] for r in rows.values()], "solved": len(solved),
+                           "bars": [len(r["result"]["bars"]) for r in solved],
+                           "bg_first": all(r["result"]["zones"][0]["kind"] == "bg" for r in solved),
+                           "statuses": [r["result"]["solver"]["status"] for r in solved],
+                           "fun_pos": all(r["fun"] is not None and r["fun"] > 0 for r in solved),
+                           "kinds": sorted({{j["kind"] for j in store.queue.enqueued}})}}))
+    ''')
+    assert out["state"] == "ready" and out["solver"] == "canon_pool_cpsat" and out["max_n"] >= 2
+    assert all(s == "success" for s in out["states"]) and out["solved"] >= 1
+    assert all(b > 0 for b in out["bars"]) and out["bg_first"] and out["fun_pos"]
+    assert all(s in {"OPTIMAL", "FEASIBLE", "GAP"} for s in out["statuses"])
+    assert set(out["kinds"]) <= {"v2_prepare", "v2_solve"}

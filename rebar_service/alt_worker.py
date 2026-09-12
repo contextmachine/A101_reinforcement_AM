@@ -9,6 +9,10 @@ the process drains its queue and exits.
 
 from __future__ import annotations
 
+# ortools bundles its own (older) libhighs under the same soname as highspy; whichever loads first
+# wins the symbol table, so this process loads CP-SAT first and must never import highspy.
+from ortools.sat.python import cp_model  # noqa: F401  (must stay the first import)
+
 from .config import get_settings
 from .redis_queue import QueueNames, RedisQueue
 from .store import Store
