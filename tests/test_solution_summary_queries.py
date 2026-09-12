@@ -42,7 +42,7 @@ def test_result_metadata_uses_solution_summaries_not_full_results():
 def test_api_solution_list_uses_summary_query():
     source = (Path(__file__).resolve().parents[1] / "rebar_service/api.py").read_text(encoding="utf-8")
     start = source.index("async def list_solutions(")
-    body = source[start : source.index("@app.get(\"/v1/tasks/{task_id}/solutions/{solution_id}\")", start)]
+    body = source[start : source.index("@app.get(\"/v1/tasks/{task_id}/solutions/{solution_id}\"", start)]
     assert "store.solution_summaries" in body
     assert "store.solutions(" not in body
 
