@@ -1,3 +1,5 @@
+# Paused at 0: the production worker of the test stack is shut down; tasks are served by the
+# alternative solver ScaledJob (rebar-solver-worker-test). Remove the annotation to re-enable.
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
@@ -7,6 +9,8 @@ metadata:
     scaledobject.keda.sh/name: rebar-worker-test
   name: rebar-worker-test
   namespace: rebar-optimizer
+  annotations:
+    autoscaling.keda.sh/paused-replicas: '0'
 spec:
   advanced:
     horizontalPodAutoscalerConfig:
@@ -29,4 +33,3 @@ spec:
       listLength: '1'
       listName: rebar:test:jobs:workload
     type: redis
-

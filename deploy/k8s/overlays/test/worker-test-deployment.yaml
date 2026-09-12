@@ -8,8 +8,9 @@ metadata:
   labels:
     app: rebar-worker-test
 spec:
-  # replicas are owned by the KEDA ScaledObject (0..12); a fixed value here would be re-applied on every
-  # kubectl apply and spawn idle 15-CPU workers.
+  # Shut down: the ScaledObject is paused at 0 and the deployment pinned to 0; the alternative solver
+  # ScaledJob serves the test stack. Set replicas/annotation back to re-enable the production worker.
+  replicas: 0
   selector:
     matchLabels:
       app: rebar-worker-test
