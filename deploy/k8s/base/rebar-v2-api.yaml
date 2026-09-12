@@ -1,0 +1,119 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rebar-v2-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rebar-v2-api
+  template:
+    metadata:
+      labels:
+        app: rebar-v2-api
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+      - name: ghcr-secret
+      containers:
+      - name: api
+        image: ghcr.io/contextmachine/a101_reinforcement_am:am-super-branch
+        imagePullPolicy: Always
+        envFrom:
+        - configMapRef:
+            name: rebar-config-v2
+        - secretRef:
+            name: rebar-secrets
+        env:
+        - name: REBAR_POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: a101-postgres-auth
+              key: POSTGRES_USER
+        - name: REBAR_POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: a101-postgres-auth
+              key: POSTGRES_PASSWORD
+        ports:
+        - name: http
+          containerPort: 8000
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        resources:
+          requests:
+            cpu: 250m
+            memory: 1Gi
+          limits:
+            cpu: '2'
+            memory: 4Gi
+        startupProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 60
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        command:
+        - python
+        - -m
+        - uvicorn
+        args:
+        - rebar_service.api:app
+        - --host
+        - "0.0.0.0"
+        - --port
+        - "8000"
+      volumes:
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rebar-v2-api
+spec:
+  selector:
+    app: rebar-v2-api
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: rebar-v2-api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: rebar-v2-api
