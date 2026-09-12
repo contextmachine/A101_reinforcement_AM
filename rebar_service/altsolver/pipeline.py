@@ -12,7 +12,11 @@ cached in the process.
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any
+
+log = logging.getLogger("rebar.altsolver")
 
 from ..pipeline import analysis_variant
 from ..v2 import bars as bars_module
@@ -25,6 +29,20 @@ class AltSolverPipeline(V2Pipeline):
     def __init__(self, store: Any, settings: Any) -> None:
         super().__init__(store, settings)
         self._engines: dict[str, SceneEngine] = {}
+
+    def dispatch(self, job: Any, worker_id: str) -> None:
+        """One log line per job (kind, task, N, outcome, duration): jobs are short-lived pods."""
+        kind, task_id = str(job.get("kind", "")), str(job.get("task_id", ""))
+        n = (job.get("payload") or {}).get("n")
+        started = time.perf_counter()
+        try:
+            super().dispatch(job, worker_id)
+        except Exception as exc:
+            log.error("alt-solver %s task=%s n=%s FAILED in %.1fs: %s: %s", kind, task_id, n, time.perf_counter() - started, type(exc).__name__, exc)
+            raise
+        row = None if n is None else self.v2.get_n(task_id, int(n))
+        outcome = "-" if row is None else f"{row.get('state')}/{row.get('status')}"
+        log.info("alt-solver %s task=%s n=%s -> %s in %.1fs", kind, task_id, n, outcome, time.perf_counter() - started)
 
     # ------------------------------------------------------------- helpers
     def _rows(self, task: dict[str, Any]) -> list[dict[str, Any]]:

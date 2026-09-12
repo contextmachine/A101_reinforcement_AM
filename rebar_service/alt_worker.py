@@ -20,6 +20,9 @@ from .worker_loop import run_queue_worker
 
 
 def run_alt_worker() -> None:
+    import logging
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     settings = get_settings()
     store = Store(settings)
     queue = RedisQueue(settings, names=QueueNames.main(settings))
