@@ -268,6 +268,8 @@ class SolutionView(V2SolutionSummary):
     task_id: str
     bars: list[Bar] | None = None
     zones: list[Zone] | None = None
+    repair: dict[str, Any] | None = None
+    solver: dict[str, Any] | None = None
     error: str | None = None
 
 
@@ -310,6 +312,7 @@ class BarsView(V2Model):
     bars: list[Bar] | None = None
     zones: list[Zone] | None = None
     mass_metrics: MassMetrics | None = None
+    repair: dict[str, Any] | None = None
     error: str | None = None
 
 

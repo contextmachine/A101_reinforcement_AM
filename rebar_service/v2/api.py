@@ -323,6 +323,9 @@ async def v2_get_task_solution(request: Request, task_id: str, n: int):
     if str(row.get("state")) == "success" and result:
         body["bars"] = result.get("bars", [])
         body["zones"] = result.get("zones", [])
+        for key in ("repair", "solver"):
+            if result.get(key) is not None:
+                body[key] = result[key]
     return JSONResponse(to_jsonable(body))
 
 
