@@ -106,7 +106,12 @@ def process_claimed_v2_job(
     try:
         workflow.dispatch(job)
     except Exception as exc:
-        _mark_job_error(store, job, exc)
+        try:
+            _mark_job_error(store, job, exc)
+        except Exception:
+            traceback.print_exc()
+            queue.requeue_job(raw, job_data, delay=1.0)
+            return
         queue.ack_job(raw, job_data, "failed")
     else:
         queue.ack_job(raw, job_data, "done")
