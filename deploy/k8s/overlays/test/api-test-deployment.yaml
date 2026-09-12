@@ -51,7 +51,7 @@ spec:
         # rebar-test-queues routes them to the production worker deployment (rollback).
         - configMapRef:
             name: rebar-test-solver-queues
-        image: ghcr.io/contextmachine/a101_reinforcement_am:sha-1c071e0
+        image: ghcr.io/contextmachine/a101_reinforcement_am:sha-14e9846
         imagePullPolicy: Always
         livenessProbe:
           failureThreshold: 3
