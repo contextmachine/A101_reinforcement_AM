@@ -62,7 +62,8 @@ def test_engine_and_selection_on_the_tiny_scene():
     assert out["background"] == [16.0, 300.0]
     assert out["demand"] > 0 and out["solver"] == "canon_pool_cpsat"
     assert out["status"] in {"OPTIMAL", "FEASIBLE", "GAP"}
-    assert out["kinds"][0] == "bg" and 1 <= len(out["kinds"]) - 1 <= 2 and out["runs_ok"]
+    # K=2 boxes; a two-layer rung of the user stock is emitted as stacked zones, so up to 2*K zones
+    assert out["kinds"][0] == "bg" and 1 <= len(out["kinds"]) - 1 <= 4 and out["runs_ok"]
 
 
 def test_alt_pipeline_runs_prepare_and_solve_end_to_end(tmp_path):

@@ -503,3 +503,17 @@ def test_tracks_split_by_a_hole_at_one_coordinate_form_one_zone_member_and_one_r
     assert masses["additional"]["without_anchorage_kg"] == pytest.approx(unit * (1000.0 + 1000.0 + 3000.0))
     assert masses["additional"]["with_anchorage_kg"] == pytest.approx(unit * (5000.0 + 3 * 2 * 800.0))
     assert masses["additional"]["with_anchorage_unclipped_kg"] == pytest.approx(unit * (2 * 3000.0 + 2 * 2 * 800.0))
+
+
+def test_zone_reaching_past_the_slab_edge_keeps_its_bars_inside():
+    """A zone whose last bar position lies beyond the slab edge at its band: the bar is pulled inside
+    (or dropped softly when there is no slab at all), the layout stays feasible."""
+    field = box(0, 0, 3000, 3000)
+    # two-bar ø20 zone at step 100 whose second bar sits at x=3050, 50 mm past the edge
+    zone = additional_zone(left=0, right=1, origin=[2950.0, 600.0], arm={"d": 20.0, "step": 100.0})
+    result = run([field], [BG, zone])
+    assert result["is_feasible"], result.get("warnings")
+    add_bars = bars_of(result, [1])
+    assert 1 <= len(add_bars) <= 2
+    assert all(0.0 <= b["start"][0] <= 3000.0 for b in add_bars)
+    assert not any(w.get("type") == "empty_track" for w in result["warnings"])

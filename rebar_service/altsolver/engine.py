@@ -134,7 +134,11 @@ def build_engine(rows: Sequence[Mapping[str, Any]], *, config: Mapping[str, Any]
     bg_d, bg_step = (float(v) for v in cfg["back_grid"])
     background = Background(int(bg_d), int(bg_step), area_cm2_per_m(bg_d, bg_step))
     if stock is not None:
-        options = sorted({RebarOption.make(int(d), int(step)) for d, step in cfg["stock"]})
+        # a user stock is single-layer; max_layers allows stacking the same mesh (like the ×2 rungs of
+        # the catalogue ladder), which boxes_to_zones emits as stacked zones
+        layers = max(1, int(cfg.get("max_layers") or config.get("max_layers") or 1))
+        options = sorted({RebarOption.make(int(d), int(step), layer)
+                          for d, step in cfg["stock"] for layer in range(1, layers + 1)})
     else:
         options = ladder_options(background)
     mosaic = mosaic_from_rows(rows, axis=axis, background_area=background.as_cm2_m)

@@ -357,7 +357,16 @@ def _allowed_in_field(allowed: tuple[float, float], guide: float, diameter: floa
     if span is None or not (lo - _EPS <= guide <= hi + _EPS):
         return (lo, hi)
     cover = float(diameter) / 2.0
-    return (min(max(lo, span[0] + cover), guide), max(min(hi, span[1] - cover), guide))
+    in_lo, in_hi = max(lo, span[0] + cover), min(hi, span[1] - cover)
+    if in_lo > in_hi + _EPS:
+        # the band is narrower than one bar cover: keep the raw window, the track is dropped later
+        return (lo, hi)
+    if guide < span[0] - _EPS or guide > span[1] + _EPS:
+        # the guide slot itself lies outside the slab at this band (a zone reaching past the edge):
+        # the bar must move inside, there is nothing to keep reachable out there
+        return (in_lo, in_hi)
+    # a guide on or inside the slab stays reachable; only the outward escape is removed
+    return (min(in_lo, guide), max(in_hi, guide))
 
 
 def _background_positions(component: Polygon, step: float) -> list[float]:
@@ -1371,6 +1380,12 @@ def layout_rebars_y(
         geom = comp
         segs = _segments(geom, float(t.x), t.intervals)
         if not segs:
+            if not t.background:
+                # an additional bar with no slab under it at this band (a zone box past the edge or over
+                # a hole) simply does not exist; the verification/gap filling decide whether the zone
+                # needs anything there
+                warnings.append({"type": "track_outside_field", "track": t.id, "guide": t.guide, "x": t.x})
+                continue
             warnings.append({"type": "empty_track", "track": t.id, "guide": t.guide, "x": t.x})
         for y0, y1 in segs:
             row = {
