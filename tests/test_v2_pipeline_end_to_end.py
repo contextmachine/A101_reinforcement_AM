@@ -281,3 +281,22 @@ def test_new_ns_revive_a_fully_cancelled_task(tmp_path):
     assert store.v2.get_task(task_id)["state"] == "ready"
     assert store.v2.get_n(task_id, 3)["state"] == "success"
     assert store.v2.get_n(task_id, 1)["state"] == "cancelled"
+
+
+def test_solver_subprocess_failure_reason_is_persisted(tmp_path, monkeypatch):
+    settings = make_settings(tmp_path)
+    store = FakeStore(settings)
+    pipeline = V2Pipeline(store, settings)
+    task_id = pipeline.create_task(scene_id="scene", overlay_id=0, smooth=False, config=CONFIG, ns=[3])
+    # run only the prepare job, then make the solver die like an OOM-killed child would
+    pipeline.dispatch(store.queue.jobs.popleft(), "worker-test")
+    assert store.v2.get_n(task_id, 3)["state"] == "solving"
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("worker exited with code -9")
+
+    monkeypatch.setattr("A101.reinforcement_components.solve_component_frontier", boom)
+    with pytest.raises(RuntimeError):
+        drain(store, pipeline)
+    row = store.v2.get_n(task_id, 3)
+    assert row["state"] == "error" and "code -9" in row["error"]

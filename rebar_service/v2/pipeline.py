@@ -341,13 +341,20 @@ class V2Pipeline:
             self.v2.set_n(task_id, n, state="error", error="prepared problem is missing")
             return
         log_file = solver_log_file(self.settings, task_id, n, worker_id)
-        results, _ = solve_component_frontier(
-            problem, [n], data={}, timeout=self.settings.solver_timeout,
-            solver_time_limit=self._solver_time_limit(task),
-            threads=int(self.settings.solver_threads), backend=str(self.settings.solver_backend),
-            require_optimal=bool(self.settings.require_optimal), return_best_on_timeout=True,
-            raise_errors=False, highs_options=highs_log_options(log_file),
-        )
+        try:
+            results, _ = solve_component_frontier(
+                problem, [n], data={}, timeout=self.settings.solver_timeout,
+                solver_time_limit=self._solver_time_limit(task),
+                threads=int(self.settings.solver_threads), backend=str(self.settings.solver_backend),
+                require_optimal=bool(self.settings.require_optimal), return_best_on_timeout=True,
+                raise_errors=True, highs_options=highs_log_options(log_file),
+            )
+        except Exception as exc:  # noqa: BLE001 - keep the subprocess failure reason (e.g. OOM kill)
+            if self._cancelled(task_id, n):
+                return
+            message = f"{type(exc).__name__}: {exc}"
+            self.v2.set_n(task_id, n, state="error", error=message[:4000])
+            raise
         row = dict(results.get(n) or {"n": n, "is_feasible": False, "error": "solver returned nothing"})
         if self._cancelled(task_id, n):
             return
