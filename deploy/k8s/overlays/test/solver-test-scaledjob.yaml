@@ -1,4 +1,6 @@
-# Alternative-solver worker (rebar_service.alt_worker): KEDA ScaledJob on rebar:test:solver:*.
+# Alternative-solver worker (rebar_service.alt_worker): KEDA ScaledJob on rebar:test:solver:*,
+# scheduled on the always-on ng-heavy-jobs pool (16 CPU / 28 GiB): the big ng-rebar-jobs-e pool autoscales
+# to zero and would boot a node for every burst of jobs.
 apiVersion: keda.sh/v1alpha1
 kind: ScaledJob
 metadata:
@@ -58,12 +60,12 @@ spec:
           imagePullPolicy: IfNotPresent
           name: solver-worker
           resources:
+            requests:
+              cpu: '4'
+              memory: 6Gi
             limits:
               cpu: '8'
-              memory: 16Gi
-            requests:
-              cpu: 4
-              memory: 8Gi
+              memory: 12Gi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -94,15 +96,14 @@ spec:
         - effect: NoSchedule
           key: workload
           operator: Equal
-          value: rebar-jobs
+          value: heavy-jobs
         volumes:
         - emptyDir: {}
           name: tmp
         - emptyDir: {}
           name: cache
         nodeSelector:
-          node-group: ng-rebar-jobs-e
-          workload: rebar-jobs
+          node-group: ng-heavy-jobs
     ttlSecondsAfterFinished: 3600
   maxReplicaCount: 12
   pollingInterval: 5
