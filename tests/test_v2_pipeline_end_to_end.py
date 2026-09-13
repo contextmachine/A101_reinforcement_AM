@@ -353,3 +353,32 @@ def test_lattice_candidate_pool_runs_the_whole_pipeline(tmp_path):
     rows = [store.v2.get_n(task_id, n) for n in (1, 2, 3)]
     assert all(r["state"] == "success" for r in rows), rows
     assert any(r["status"] in {"optimal", "feasable"} and r["result"]["bars"] for r in rows), rows
+
+
+def test_verification_by_bars_matches_verification_by_zones(tmp_path):
+    """POST /v2/verification with the bars of a solution verifies those rods as they are."""
+    settings = make_settings(tmp_path)
+    store = FakeStore(settings)
+    pipeline = V2Pipeline(store, settings)
+    task_id = pipeline.create_task(scene_id="scene", overlay_id=0, smooth=False, config=CONFIG, ns=[1, 2, 3])
+    drain(store, pipeline)
+    row = next(r for r in (store.v2.get_n(task_id, n) for n in (1, 2, 3)) if r["status"] in {"optimal", "feasable"})
+    config = {"axis": "y", "anchor_factor": 40.0, "steel_density_kg_m3": 7850.0, "t": 600.0}
+    store.v2.create_verification_task("by-zones", scene_id="scene", overlay_id=0, smooth=False,
+                                      config=config, zones=row["result"]["zones"])
+    handle_verification_job(store, {"kind": "verification", "task_id": "by-zones"}, "w")
+    store.v2.create_verification_task("by-bars", scene_id="scene", overlay_id=0, smooth=False,
+                                      config=config, zones=[], bars=row["result"]["bars"])
+    handle_verification_job(store, {"kind": "verification", "task_id": "by-bars"}, "w")
+    by_zones = store.v2.get_verification_task("by-zones")
+    by_bars = store.v2.get_verification_task("by-bars")
+    assert by_zones["state"] == "success" and by_bars["state"] == "success"
+    # the solution's bars are exactly what the zones lay out to (plus gap filling), so both agree
+    assert by_bars["result"] == by_zones["result"]
+    # rods given explicitly are verified as they are: dropping half of them lowers the fact values
+    store.v2.create_verification_task("half", scene_id="scene", overlay_id=0, smooth=False,
+                                      config=config, zones=[], bars=row["result"]["bars"][::2])
+    handle_verification_job(store, {"kind": "verification", "task_id": "half"}, "w")
+    half = store.v2.get_verification_task("half")["result"]
+    assert all(h["fact_load_sm2/m"] <= f["fact_load_sm2/m"] + 1e-9 for h, f in zip(half, by_bars["result"]))
+    assert any(h["fact_load_sm2/m"] < f["fact_load_sm2/m"] for h, f in zip(half, by_bars["result"]))

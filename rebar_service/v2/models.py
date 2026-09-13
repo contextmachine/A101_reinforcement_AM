@@ -329,15 +329,25 @@ class VerificationConfig(BarsConfig):
 
 
 class VerificationRequest(V2Model):
+    """Verify either the rods of a solution (``bars``) or zones laid out by the service.
+
+    With ``bars`` the rods are verified exactly as given (no layout, no gap filling); with only
+    ``zones`` they are laid out first, as ``POST /v2/bars`` does.  ``bars`` win when both come.
+    """
+
     scene_id: str = Field(min_length=1)
     smooth: bool = False
     overlay_id: int = 0
     config: VerificationConfig
-    zones: list[Zone] = Field(min_length=1)
+    zones: list[Zone] | None = Field(default=None, min_length=1)
+    bars: list[Bar] | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
-    def validate_zones(self):
-        validate_zone_collection(self.zones)
+    def validate_payload(self):
+        if not self.zones and not self.bars:
+            raise ValueError("нужны zones или bars")
+        if self.zones:
+            validate_zone_collection(self.zones)
         return self
 
 

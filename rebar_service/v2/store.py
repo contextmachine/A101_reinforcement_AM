@@ -441,15 +441,16 @@ class V2Store:
         smooth: bool,
         config: Mapping[str, Any],
         zones: Sequence[Mapping[str, Any]],
+        bars: Sequence[Mapping[str, Any]] | None = None,
         conn: Any = None,
     ) -> None:
         with self._write(conn) as connection:
             connection.execute(
                 text(
                     f"""
-                    INSERT INTO {table} (id, scene_id, overlay_id, smooth, config, zones, state)
+                    INSERT INTO {table} (id, scene_id, overlay_id, smooth, config, zones, bars, state)
                     VALUES (:task_id, :scene_id, :overlay_id, :smooth,
-                            CAST(:config AS jsonb), CAST(:zones AS jsonb), 'pending')
+                            CAST(:config AS jsonb), CAST(:zones AS jsonb), CAST(:bars AS jsonb), 'pending')
                     """
                 ),
                 {
@@ -459,6 +460,7 @@ class V2Store:
                     "smooth": bool(smooth),
                     "config": _json_param(dict(config or {})),
                     "zones": _json_param([json_safe_value(dict(zone)) for zone in (zones or [])]),
+                    "bars": None if bars is None else _json_param([json_safe_value(dict(bar)) for bar in bars]),
                 },
             )
 
@@ -467,7 +469,7 @@ class V2Store:
             row = connection.execute(
                 text(
                     f"""
-                    SELECT id, scene_id, overlay_id, smooth, config, zones, state, result, error,
+                    SELECT id, scene_id, overlay_id, smooth, config, zones, bars, state, result, error,
                            created_at, updated_at
                     FROM {table} WHERE id=:task_id
                     """
@@ -483,6 +485,7 @@ class V2Store:
             "smooth": bool(row["smooth"]),
             "config": _json_value(row["config"], {}) or {},
             "zones": _json_value(row["zones"], []) or [],
+            "bars": _json_value(row.get("bars"), None),
             "state": str(row["state"]),
             "result": _json_value(row["result"], None),
             "error": row["error"],
@@ -550,11 +553,12 @@ class V2Store:
         smooth: bool,
         config: Mapping[str, Any],
         zones: Sequence[Mapping[str, Any]],
+        bars: Sequence[Mapping[str, Any]] | None = None,
         conn: Any = None,
     ) -> None:
         self._create_worker_task(
             "v2_verification_tasks", task_id, scene_id=scene_id, overlay_id=overlay_id,
-            smooth=smooth, config=config, zones=zones, conn=conn,
+            smooth=smooth, config=config, zones=zones, bars=bars, conn=conn,
         )
 
     def get_verification_task(self, task_id: str, *, conn: Any = None) -> dict[str, Any] | None:

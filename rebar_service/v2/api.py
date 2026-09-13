@@ -388,14 +388,15 @@ async def v2_create_verification(request: Request, body: VerificationRequest):
     await _ready_scene(request, body.scene_id)
     overlay_id = await _resolve_overlay(request, body.scene_id, body.overlay_id)
     task_id = uuid4().hex
-    zones = [zone.model_dump(mode="python") for zone in body.zones]
+    zones = [zone.model_dump(mode="python") for zone in (body.zones or [])]
+    bars = None if body.bars is None else [bar.model_dump(mode="python") for bar in body.bars]
     config = body.config.model_dump(mode="python")
 
     def create() -> None:
         store = _store(request)
         store.v2.create_verification_task(
             task_id, scene_id=body.scene_id, overlay_id=overlay_id, smooth=bool(body.smooth),
-            config=config, zones=zones,
+            config=config, zones=zones, bars=bars,
         )
         store.verification_queue.enqueue_pipeline_job(_isolated_job("verification", task_id))
 

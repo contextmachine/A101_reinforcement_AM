@@ -126,4 +126,4 @@ def test_migration_head_is_the_v2_revision():
         down = text.split("down_revision = ", 1)[1].split("\n", 1)[0].strip().strip('"')
         revisions[revision] = None if down == "None" else down
     heads = set(revisions) - {down for down in revisions.values() if down}
-    assert heads == {"0005_v2_tasks"}
+    assert heads == {"0006_verification_bars"}

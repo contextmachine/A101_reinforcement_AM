@@ -200,3 +200,18 @@ def test_verification_row_uses_contract_slash_aliases_in_both_directions():
     # populate_by_name keeps the python spelling usable from internal code.
     by_name = VerificationRow(source_index=1, overlay_state="empty", need_load_sm2_m=None)
     assert by_name.model_dump(by_alias=True)["need_load_sm2/m"] is None
+
+
+def test_verification_request_needs_zones_or_bars():
+    import pytest
+    from rebar_service.v2.models import VerificationRequest
+
+    base = {"scene_id": "s", "config": {"axis": "y", "t": 600.0}}
+    with pytest.raises(ValueError):
+        VerificationRequest.model_validate(base)
+    bar = {"zone_id": 1, "start": [0, 0], "end": [0, 1000], "d": 20.0, "anchorage": {"start": 800, "end": 800}}
+    by_bars = VerificationRequest.model_validate({**base, "bars": [bar]})
+    assert by_bars.zones is None and len(by_bars.bars) == 1
+    zones = [{"id": 0, "kind": "bg", "arm": {"d": 16, "step": 300}}]
+    by_zones = VerificationRequest.model_validate({**base, "zones": zones})
+    assert by_zones.bars is None and len(by_zones.zones) == 1

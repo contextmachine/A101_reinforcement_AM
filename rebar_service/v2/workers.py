@@ -72,9 +72,18 @@ def handle_verification_job(store: Any, job: Mapping[str, Any], worker_id: str) 
     store.v2.set_verification_task(task_id, state="running")
     try:
         config = dict(row.get("config") or {})
-        resolved, out = _layout_for(store, row)
+        if row.get("bars"):
+            # rods given explicitly (the bars of a solution): verify them as they are
+            resolved = list(store.resolved_scene_polygons(
+                str(row["scene_id"]), variant=analysis_variant(bool(row.get("smooth"))),
+                overlay_id=int(row.get("overlay_id") or 0),
+            ))
+            bars = list(row["bars"])
+        else:
+            resolved, out = _layout_for(store, row)
+            bars = out["bars"]
         rows = reinforcement_rows(
-            resolved, out["bars"],
+            resolved, bars,
             steel_density_kg_m3=float(config.get("steel_density_kg_m3", 7850.0)),
             t_mm=float(config["t"]),
             cover_mm=float(config.get("cover_mm", 30.0)),

@@ -217,10 +217,12 @@ class MemoryV2Store:
         smooth: bool,
         config: Mapping[str, Any],
         zones: Sequence[Mapping[str, Any]],
+        bars: Sequence[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         now = time.time()
         return {
             "task_id": task_id,
+            "bars": None if bars is None else [dict(b) for b in bars],
             "scene_id": scene_id,
             "overlay_id": int(overlay_id or 0),
             "smooth": bool(smooth),
@@ -250,10 +252,11 @@ class MemoryV2Store:
 
     def create_verification_task(
         self, task_id: str, *, scene_id: str, overlay_id: int, smooth: bool,
-        config: Mapping[str, Any], zones: Sequence[Mapping[str, Any]], conn: Any = None,
+        config: Mapping[str, Any], zones: Sequence[Mapping[str, Any]],
+        bars: Sequence[Mapping[str, Any]] | None = None, conn: Any = None,
     ) -> None:
         self.verification_tasks[task_id] = self._worker_row(
-            task_id, scene_id, overlay_id, smooth, config, zones
+            task_id, scene_id, overlay_id, smooth, config, zones, bars
         )
 
     def get_verification_task(self, task_id: str, *, conn: Any = None) -> dict[str, Any] | None:
