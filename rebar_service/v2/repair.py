@@ -84,14 +84,22 @@ def fill_gaps(
                 break
             anchor = float(anchor_factor) * d
             # the rod runs the full length of the zone it belongs to (an infinite line clipped to the
-            # zone box and the field); without a zone it spans the short elements only
+            # zone box and the field); when that line is blocked by other rods farther along the zone,
+            # a shorter rod over the short elements themselves is inserted instead
+            z_lo, z_hi = l_lo, l_hi
             for (bx0, by0, bx1, by1), zd, _zs, _zo, zid in additional_boxes:
                 lo_b, hi_b = (bx0, bx1) if long == 0 else (by0, by1)
                 if zid == zone_id and lo_b <= l_hi and hi_b >= l_lo:
-                    l_lo, l_hi = min(l_lo, lo_b), max(l_hi, hi_b)
-            c_pos = _clear_position(c_pos, d, bars, l_lo, l_hi, cross, long)
-            if c_pos is None:
+                    z_lo, z_hi = min(z_lo, lo_b), max(z_hi, hi_b)
+            placed = None
+            for e_lo, e_hi in ((z_lo, z_hi), (l_lo, l_hi)):
+                pos = _clear_position(c_pos, d, bars, e_lo, e_hi, cross, long)
+                if pos is not None:
+                    placed = (pos, e_lo, e_hi)
+                    break
+            if placed is None:
                 continue
+            c_pos, l_lo, l_hi = placed
             segments = _clip_to_field(field, axis, c_pos, l_lo, l_hi, long)
             for s_lo, s_hi in segments:
                 if s_hi - s_lo <= 1.0:
@@ -147,8 +155,8 @@ def _propose_rod(polygon, bars, additional_boxes, *, axis: str, cover_mm: float)
     for b in bars:
         s, e = b["start"], b["end"]
         b_lo, b_hi = min(s[long], e[long]), max(s[long], e[long])
-        if b_hi < l_lo or b_lo > l_hi:
-            continue
+        if b_hi <= l_lo + 1e-6 or b_lo >= l_hi - 1e-6:
+            continue  # rods that only touch the polygon's span end-to-end do not cross it
         pos = 0.5 * (s[cross] + e[cross])
         reach = bar_reach_mm(float(b["d"]), cover_mm)
         if pos < c_lo - reach or pos > c_hi + reach:
@@ -198,8 +206,8 @@ def _clear_position(position, d, bars, l_lo, l_hi, cross, long):
     for b in bars:
         s, e = b["start"], b["end"]
         b_lo, b_hi = min(s[long], e[long]), max(s[long], e[long])
-        if b_hi < l_lo or b_lo > l_hi:
-            continue
+        if b_hi <= l_lo + 1e-6 or b_lo >= l_hi - 1e-6:
+            continue  # a rod that merely touches the extent end-to-end does not block it
         rods.append((0.5 * (s[cross] + e[cross]), float(b["d"])))
     target = position
     for _ in range(8):
