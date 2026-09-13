@@ -373,8 +373,15 @@ def test_verification_by_bars_matches_verification_by_zones(tmp_path):
     by_zones = store.v2.get_verification_task("by-zones")
     by_bars = store.v2.get_verification_task("by-bars")
     assert by_zones["state"] == "success" and by_bars["state"] == "success"
-    # the solution's bars are exactly what the zones lay out to (plus gap filling), so both agree
-    assert by_bars["result"] == by_zones["result"]
+    # zones are verified as laid out WITHOUT the gap filler: identical to a plain layout of the zones
+    from rebar_service.v2.bars import layout_zones, physical_polygons
+    from rebar_service.v2.verification import reinforcement_rows
+    plain = layout_zones(physical_polygons(store.resolved_scene_polygons("scene")), row["result"]["zones"], axis="y",
+                         anchor_factor=40.0, steel_density_kg_m3=7850.0, min_step=settings.min_internal_step)
+    assert by_zones["result"] == reinforcement_rows(store.resolved_scene_polygons("scene"), plain["bars"],
+                                                    steel_density_kg_m3=7850.0, t_mm=600.0, cover_mm=30.0)
+    # the solution's own bars (filler rods included) never verify worse than the bare zones
+    assert all(b["fact_load_sm2/m"] >= z["fact_load_sm2/m"] - 1e-9 for b, z in zip(by_bars["result"], by_zones["result"]))
     # rods given explicitly are verified as they are: dropping half of them lowers the fact values
     store.v2.create_verification_task("half", scene_id="scene", overlay_id=0, smooth=False,
                                       config=config, zones=[], bars=row["result"]["bars"][::2])

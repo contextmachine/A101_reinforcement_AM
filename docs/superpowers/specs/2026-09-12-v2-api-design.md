@@ -173,8 +173,10 @@ For every source polygon (stable order) with its overlay state mapped to
 `active | real | empty`:
 
 * Input: `bars` (the rods of a solution, verified exactly as given, no layout and no gap filling)
-  or `zones` (laid out first like `POST /v2/bars`); `bars` win when both are sent (2026-09-14,
-  migration 0006 adds the nullable `bars` column to the worker task tables).
+  or `zones` (laid out first, *without* the gap filler: the check shows what the zones alone give,
+  the filler belongs to the rod algorithm of `POST /v2/bars` and the task pipeline); `bars` win
+  when both are sent (2026-09-14, migration 0006 adds the nullable `bars` column to the worker task
+  tables).
 * `need_load_sm2/m` = polygon `load` for `active`, `0` for `real`, `null` for `empty`.
 * `fact_load_sm2/m` = mean **smeared reinforcement density** over the polygon. The rods of all
   zones (background included, anchorage excluded, clipped to the field) form one set; each rod

@@ -15,7 +15,8 @@ from .repair import fill_gaps
 from .verification import reinforcement_rows
 
 
-def _layout_for(store: Any, row: Mapping[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _layout_for(store: Any, row: Mapping[str, Any], *, fill: bool) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Lay out the row's zones; ``fill`` enables the gap filler (part of the rod algorithm, never of a check)."""
     config = dict(row.get("config") or {})
     resolved = list(store.resolved_scene_polygons(
         str(row["scene_id"]),
@@ -36,7 +37,7 @@ def _layout_for(store: Any, row: Mapping[str, Any]) -> tuple[list[dict[str, Any]
             f"раскладка стержней не выполнена ({out.get('status', 'infeasible')}): "
             f"warnings={out.get('warnings')} errors={out.get('errors')}"
         )
-    if bool(config.get("fill_gaps", True)):
+    if fill and bool(config.get("fill_gaps", True)):
         out = fill_gaps(
             resolved, out, axis=str(config.get("axis", "y")),
             anchor_factor=float(config.get("anchor_factor", 40.0)),
@@ -53,7 +54,7 @@ def handle_bars_job(store: Any, job: Mapping[str, Any], worker_id: str) -> None:
         return
     store.v2.set_bar_task(task_id, state="running")
     try:
-        _resolved, out = _layout_for(store, row)
+        _resolved, out = _layout_for(store, row, fill=True)
         store.v2.set_bar_task(task_id, state="success", result={
             "bars": out["bars"], "zones": out["zones"], "mass_metrics": out["mass_metrics"],
             "repair": out.get("repair"),
@@ -80,7 +81,9 @@ def handle_verification_job(store: Any, job: Mapping[str, Any], worker_id: str) 
             ))
             bars = list(row["bars"])
         else:
-            resolved, out = _layout_for(store, row)
+            # zones only: verify what the zones lay out to, without the gap filler, so a user who
+            # brings zones but not our rods is not shown a coverage the zones alone do not have
+            resolved, out = _layout_for(store, row, fill=False)
             bars = out["bars"]
         rows = reinforcement_rows(
             resolved, bars,
