@@ -54,7 +54,7 @@ spec:
               name: rebar-secrets
           - configMapRef:
               name: rebar-test-solver-queues
-          image: ghcr.io/contextmachine/a101_reinforcement_am:sha-33b4771
+          image: ghcr.io/contextmachine/a101_reinforcement_am:sha-3018da9
           imagePullPolicy: IfNotPresent
           name: solver-worker
           resources:
