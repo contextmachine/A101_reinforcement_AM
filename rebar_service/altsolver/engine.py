@@ -116,7 +116,7 @@ def _map_bands(scale, background: Background, options: list[RebarOption], policy
     return mapped
 
 
-def build_engine(rows: Sequence[Mapping[str, Any]], *, config: Mapping[str, Any], settings: Any) -> SceneEngine:
+def build_engine(rows: Sequence[Mapping[str, Any]], *, config: Mapping[str, Any], settings: Any, band_policy: str | None = None) -> SceneEngine:
     """Resolve background/ladder like the production pipeline, rasterise the scene, build the Engine."""
     from A101.calculate_mass import resolve_rebar_config
 
@@ -142,7 +142,8 @@ def build_engine(rows: Sequence[Mapping[str, Any]], *, config: Mapping[str, Any]
     else:
         options = ladder_options(background)
     mosaic = mosaic_from_rows(rows, axis=axis, background_area=background.as_cm2_m)
-    mapping = _map_bands(mosaic.scale, background, options, str(settings.alt_solver_band_policy))
+    policy = str(band_policy or settings.alt_solver_band_policy)
+    mapping = _map_bands(mosaic.scale, background, options, policy)
     bands = denoise_bands(mosaic, int(settings.alt_solver_isolated_fe))
     grid = build_grid(mosaic, bands, mapping, cell_mm=float(settings.alt_solver_cell_mm))
     min_width_mm = float(config.get("min_width_mm", 1000.0) or 0.0)
@@ -150,7 +151,7 @@ def build_engine(rows: Sequence[Mapping[str, Any]], *, config: Mapping[str, Any]
     info = {
         "solver": "canon_pool_cpsat", "grid": [int(v) for v in grid.need.shape], "cell_mm": float(grid.cell_mm),
         "demand_cells": int((grid.need > 0).sum()), "background": [bg_d, bg_step],
-        "options": engine.labels[1:], "band_policy": str(settings.alt_solver_band_policy),
+        "options": engine.labels[1:], "band_policy": policy,
         "bands": [{"upper": float(m.upper), "option": None if m.option is None else m.option.label} for m in mapping],
     }
     return SceneEngine(engine=engine, background=(bg_d, bg_step), options=engine.labels[1:], axis=axis, info=info)

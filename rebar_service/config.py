@@ -97,6 +97,9 @@ class Settings(BaseSettings):
     alt_solver_workers: int = 8           # CP-SAT workers
     alt_solver_time_limit: float = 600.0  # seconds per N
     alt_solver_band_policy: str = "nearest"  # band -> rung: nearest | ceil
+    # After nearest + layout + gap filling, an N that still leaves elements short is redone with this
+    # policy (empty = never); the attempt with the smaller residual is kept.
+    alt_solver_fallback_policy: str = "ceil"
     alt_solver_isolated_fe: int = 0       # islands of <= this many elements are demoted (0 = off)
 
     grid_size: float = 300.0

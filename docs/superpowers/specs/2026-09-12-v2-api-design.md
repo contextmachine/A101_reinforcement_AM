@@ -162,7 +162,9 @@ protocol: `handle_prepare` builds the engine from the resolved scene rows (band 
 background/ladder resolved like the production pipeline, user `stock` honoured), sizes N by the
 exact useful range (`min_useful_n` = smallest covering count, `max_useful_n` = box count of the
 unconstrained minimum-mass cover; N above it is `infeasable` with that reason), and `handle_solve` does selection → wire zones → production bar layout →
-gap filling → the N row (`result.solver` carries pool/lattice/status/timings). It consumes the
+gap filling → internal verification; an N still short after that is redone with the fallback band
+policy (`ceil` by default) and the attempt with the smaller residual is kept (`result.solver.band_policy`,
+`result.solver.attempts`) → the N row (`result.solver` carries pool/lattice/status/timings). It consumes the
 *main* queue of its configuration, so routing is a ConfigMap choice for the API:
 `rebar-test-solver-queues` (→ `rebar:test:solver:*`, KEDA ScaledJob `rebar-solver-worker-test`) or
 `rebar-test-queues` (→ the production worker). No artifacts are written.

@@ -84,6 +84,11 @@ def test_alt_pipeline_runs_prepare_and_solve_end_to_end(tmp_path):
                            "bars": [len(r["result"]["bars"]) for r in solved],
                            "bg_first": all(r["result"]["zones"][0]["kind"] == "bg" for r in solved),
                            "statuses": [r["result"]["solver"]["status"] for r in solved],
+                           "policies": [r["result"]["solver"]["band_policy"] for r in solved],
+                           "attempts_ok": all(1 <= len(r["result"]["solver"]["attempts"]) <= 2 and
+                                              r["result"]["solver"]["attempts"][-1]["band_policy"] == r["result"]["solver"]["band_policy"]
+                                              or r["result"]["solver"]["attempts"][0]["short_polygons"] < r["result"]["solver"]["attempts"][-1]["short_polygons"]
+                                              for r in solved),
                            "fun_pos": all(r["fun"] is not None and r["fun"] > 0 for r in solved),
                            "kinds": sorted({{j["kind"] for j in store.queue.enqueued}})}}))
     ''')
@@ -94,4 +99,5 @@ def test_alt_pipeline_runs_prepare_and_solve_end_to_end(tmp_path):
     assert all(s == "success" for s in out["states"]) and out["solved"] >= 1
     assert all(b > 0 for b in out["bars"]) and out["bg_first"] and out["fun_pos"]
     assert all(s in {"OPTIMAL", "FEASIBLE", "GAP"} for s in out["statuses"])
+    assert all(p in {"nearest", "ceil"} for p in out["policies"]) and out["attempts_ok"]
     assert set(out["kinds"]) <= {"v2_prepare", "v2_solve"}
