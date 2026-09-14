@@ -255,6 +255,7 @@ class V2SolutionSummary(V2Model):
     fun: float | None = None
     status: str | None = None
     mass_metrics: MassMetrics | None = None
+    error: str | None = None
 
 
 class TaskView(V2Model):
@@ -269,6 +270,11 @@ class TaskView(V2Model):
     # ``infeasable`` with that reason).
     min_useful_n: int | None = None
     max_useful_n: int | None = None
+    # Why nothing (or not everything) can be computed: ``reason`` is a machine key
+    # (reinforcement_capacity | candidate_cover), ``details`` its facts (load, max_supported_load,
+    # affected elements, area...); the human text is in ``error``.
+    reason: str | None = None
+    details: dict[str, Any] | None = None
     solutions: list[V2SolutionSummary] = Field(default_factory=list)
 
 

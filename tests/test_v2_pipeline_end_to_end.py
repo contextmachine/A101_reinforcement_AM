@@ -389,3 +389,25 @@ def test_verification_by_bars_matches_verification_by_zones(tmp_path):
     half = store.v2.get_verification_task("half")["result"]
     assert all(h["fact_load_sm2/m"] <= f["fact_load_sm2/m"] + 1e-9 for h, f in zip(half, by_bars["result"]))
     assert any(h["fact_load_sm2/m"] < f["fact_load_sm2/m"] for h, f in zip(half, by_bars["result"]))
+
+
+def test_capacity_shortfall_is_explained_on_the_task_and_on_every_n(tmp_path):
+    """A scene the stock cannot reinforce: the task and each N carry a human-readable message
+    with the need, the stock's maximum and the affected elements; the raw facts sit in details."""
+    settings = make_settings(tmp_path)
+    rows = [{**ROWS[0], "load": 400.0}] + list(ROWS[1:])
+    store = FakeStore(settings, rows=rows)
+    pipeline = V2Pipeline(store, settings)
+    task_id = pipeline.create_task(scene_id="scene", overlay_id=0, smooth=False, config=CONFIG, ns=[1, 2])
+    drain(store, pipeline)
+    task = store.v2.get_task(task_id)
+    assert task["state"] == "ready" and task["max_useful_n"] == 0
+    assert "Недостаточно армирования" in task["error"] and "400.0" in task["error"] and "max_layers" in task["error"]
+    info = task["prepare_info"]
+    assert info["reason"] == "reinforcement_capacity"
+    assert info["details"]["load"] == 400.0 and info["details"]["elements"] == 1 and info["details"]["elements_total"] == len(rows)
+    assert info["details"]["max_supported_load"] < 400.0 and info["details"]["shortfall"] > 0
+    for n in (1, 2):
+        row = store.v2.get_n(task_id, n)
+        assert row["state"] == "success" and row["status"] == "infeasable"
+        assert row["error"] == task["error"]

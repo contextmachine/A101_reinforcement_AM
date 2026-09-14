@@ -126,6 +126,14 @@ horizontal bars use `direction=(0,-1)` and the origin is the start of the base b
   Background tracks: unclipped length = the field component's extent along the bar axis at
   that track (see Q2).
 
+## 4a. Task diagnostics (2026-09-14)
+
+When a task cannot be computed as configured (`reinforcement_capacity`: the stock cannot reach the
+largest need; `candidate_cover`: the field cannot be covered by rectangles), the task view carries
+`error` (Russian text: need, the stock's maximum, affected elements and area, what to change),
+`reason` (machine key) and `details` (the facts), and every N gets the same text as its `error`
+instead of "N > max_useful_n=0". `rebar_service/v2/diagnostics.py`.
+
 ## 5. Bar layout notes (2026-09-12)
 
 * **Zone-exact layout (2026-09-14).** v2 no longer uses the v1 guide lattice

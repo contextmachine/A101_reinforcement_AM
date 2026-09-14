@@ -130,9 +130,12 @@ class V2Pipeline:
         min_useful_n = task.get("min_useful_n")
         info = dict(task.get("prepare_info") or {})
         if max_useful_n is not None and n > int(max_useful_n):
-            reason = f"N={n} превышает max_useful_n={int(max_useful_n)}"
-            if info.get("reason") and info["reason"] != "prepared":
-                reason += f" ({info['reason']})"
+            if int(max_useful_n) == 0 and info.get("message"):
+                reason = str(info["message"])  # nothing can be computed: say why, not "N > 0"
+            else:
+                reason = f"N={n} превышает max_useful_n={int(max_useful_n)}"
+                if info.get("reason") and info["reason"] != "prepared":
+                    reason += f" ({info['reason']})"
             self.v2.set_n(task_id, n, state="success", status="infeasable", error=reason, conn=conn)
             return
         if min_useful_n is not None and n < int(min_useful_n):
@@ -162,17 +165,28 @@ class V2Pipeline:
         try:
             field, problem, info = self._prepare(task)
         except ReinforcementCapacityError as exc:
-            info = {
-                "reason": "reinforcement_capacity", "load": float(exc.load),
-                "max_supported_load": float(exc.max_supported_load), "max_layers": exc.max_layers,
-                "back_grid": None if exc.back_grid is None else list(exc.back_grid),
-            }
-            self.v2.set_task(task_id, state="ready", max_useful_n=0, min_useful_n=None, prepare_info=info)
+            from .diagnostics import capacity_details, capacity_message
+
+            try:
+                rows = list(self.store.resolved_scene_polygons(
+                    str(task["scene_id"]), variant=analysis_variant(bool(task.get("smooth"))),
+                    overlay_id=int(task.get("overlay_id") or 0),
+                ))
+            except Exception:  # noqa: BLE001 - the counts are informational
+                rows = None
+            details = capacity_details(exc, rows)
+            message = capacity_message(details)
+            info = {"reason": "reinforcement_capacity", "details": details, "message": message, **{
+                k: details[k] for k in ("load", "max_supported_load", "max_layers", "back_grid")}}
+            self.v2.set_task(task_id, state="ready", error=message, max_useful_n=0, min_useful_n=None, prepare_info=info)
             self.schedule_pending(task_id)
             return
         except CandidateCoverInfeasible as exc:
-            info = {"reason": "candidate_cover", "detail": str(exc)}
-            self.v2.set_task(task_id, state="ready", max_useful_n=0, min_useful_n=None, prepare_info=info)
+            from .diagnostics import candidate_cover_message
+
+            message = candidate_cover_message(str(exc))
+            info = {"reason": "candidate_cover", "detail": str(exc), "message": message}
+            self.v2.set_task(task_id, state="ready", error=message, max_useful_n=0, min_useful_n=None, prepare_info=info)
             self.schedule_pending(task_id)
             return
         except Exception as exc:  # noqa: BLE001 - every N must learn about the failure

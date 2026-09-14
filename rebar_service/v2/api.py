@@ -241,7 +241,7 @@ def _check_ns(request: Request, values: list[int]) -> list[int]:
 
 def _summary(row: dict) -> dict:
     out: dict[str, Any] = {"n": int(row["n"]), "state": str(row["state"])}
-    for key in ("fun", "status", "mass_metrics"):
+    for key in ("fun", "status", "mass_metrics", "error"):
         if row.get(key) is not None:
             out[key] = row[key]
     return out
@@ -264,6 +264,11 @@ async def _task_view(request: Request, task: dict) -> JSONResponse:
     for key in ("error", "min_useful_n", "max_useful_n"):
         if task.get(key) is not None:
             body[key] = task[key]
+    info = dict(task.get("prepare_info") or {})
+    if info.get("reason") and info["reason"] != "prepared":
+        body["reason"] = info["reason"]
+        if info.get("details") is not None:
+            body["details"] = info["details"]
     return JSONResponse(to_jsonable(body))
 
 

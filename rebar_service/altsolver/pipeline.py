@@ -85,12 +85,13 @@ class AltSolverPipeline(V2Pipeline):
         try:
             scene, _rows = self._engine(task_id, task)
         except ReinforcementCapacityError as exc:
-            info = {
-                "reason": "reinforcement_capacity", "load": float(exc.load),
-                "max_supported_load": float(exc.max_supported_load), "max_layers": exc.max_layers,
-                "back_grid": None if exc.back_grid is None else list(exc.back_grid), "solver": "canon_pool_cpsat",
-            }
-            self.v2.set_task(task_id, state="ready", max_useful_n=0, min_useful_n=None, prepare_info=info)
+            from ..v2.diagnostics import capacity_details, capacity_message
+
+            details = capacity_details(exc, self._rows(task))
+            message = capacity_message(details)
+            info = {"reason": "reinforcement_capacity", "details": details, "message": message, "solver": "canon_pool_cpsat",
+                    **{k: details[k] for k in ("load", "max_supported_load", "max_layers", "back_grid")}}
+            self.v2.set_task(task_id, state="ready", error=message, max_useful_n=0, min_useful_n=None, prepare_info=info)
             self.schedule_pending(task_id)
             return
         except Exception as exc:  # noqa: BLE001 - every N must learn about the failure
