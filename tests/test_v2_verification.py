@@ -238,3 +238,17 @@ def test_band_is_clipped_at_the_field_edge():
     row = reinforcement_rows(field, bars, steel_density_kg_m3=RHO, t_mm=T, cover_mm=COVER)[0]
     density = 10.0 * _area(20) / 300.0
     assert row["fact_load_sm2/m"] == pytest.approx(density * 300.0 / 900.0, rel=0.03)
+
+
+def test_bundled_bars_count_in_full():
+    # three ø18 bars 18 mm apart every 300 mm (two layers pushed beside a background bar):
+    # 3·π·81 per 300 mm = 20.1 cm²/m, and no bar may vanish between raster cells
+    bars = []
+    for i in range(12):
+        for dx in (-18.0, 0.0, 18.0):
+            bars.append(_bar((i * 300.0 + dx, 0.0), (i * 300.0 + dx, 3000.0), 18))
+    polygons = _field(19.0, extra=[_square(600, 600, 1500, load=19.0, index=0), _square(631, 700, 430, load=19.0, index=1)])
+    rows = reinforcement_rows(polygons, bars, steel_density_kg_m3=RHO, t_mm=T, cover_mm=COVER)
+    expected = 3 * 10.0 * pi * 81.0 / 300.0
+    assert rows[0]["fact_load_sm2/m"] == pytest.approx(expected, rel=0.02)
+    assert rows[1]["fact_load_sm2/m"] == pytest.approx(expected, rel=0.05)

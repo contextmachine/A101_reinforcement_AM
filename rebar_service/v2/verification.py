@@ -23,7 +23,9 @@ parallel rod on each side, but never farther than the crack-control reach
     density = 10 · π(d/2)² / (w_left + w_right)   [cm²/m]
 
 of the nearest rod whose band covers the point (``w`` = the two half-widths of that band), and
-``0`` where no band reaches.  Only the part of a band that lies inside the field (the material
+``0`` where no band reaches.  Rods closer than one raster cell (stacked layers, bars pushed beside
+each other by the clearance rule) count as one bundle with the summed area, since a strip narrower
+than a cell cannot be sampled.  Only the part of a band that lies inside the field (the material
 polygons) counts as its width, so a rod near a slab edge or a hole is credited to the concrete
 that actually exists beside it.  A uniform mesh at spacing ``s ≤ 2r`` therefore reads exactly
 ``10·π(d/2)²/s`` everywhere, independently of how the finite elements are cut, and the strip
@@ -186,7 +188,7 @@ class SmearedDensity:
             active = np.flatnonzero((lo <= mid) & (mid <= hi))
             if len(active) == 0:
                 continue
-            near, covered, areas, a_idx, b_idx = _cross_bands(cross[active], area[active], reach[active], cross_centres)
+            near, covered, areas, a_idx, b_idx = _cross_bands(cross[active], area[active], reach[active], cross_centres, merge_mm=self.cell)
             # effective band width per (column, rod): in-field cells of the covered range only
             width = (self.inside_cum[cols][:, b_idx + 1] - self.inside_cum[cols][:, a_idx]) * self.cell  # (cols, rods)
             with np.errstate(divide="ignore", invalid="ignore"):
@@ -237,7 +239,7 @@ def _dominant_angle(rods: Sequence[tuple[tuple[float, float], tuple[float, float
     return 0.5 * atan2(sy, sx) % pi
 
 
-def _cross_bands(cross: np.ndarray, area: np.ndarray, reach: np.ndarray, centres: np.ndarray):
+def _cross_bands(cross: np.ndarray, area: np.ndarray, reach: np.ndarray, centres: np.ndarray, merge_mm: float = 1e-6):
     """Band assignment along the cross axis for one set of simultaneously present rods.
 
     Returns ``(near, covered, areas, a_idx, b_idx)``: for every raster cell the index of the nearest
@@ -246,13 +248,17 @@ def _cross_bands(cross: np.ndarray, area: np.ndarray, reach: np.ndarray, centres
     """
     order = np.argsort(cross)
     cross, area, reach = cross[order], area[order], reach[order]
-    # merge rods sitting on the same line (stacked layers): areas add, reach is the largest
-    keep = np.r_[True, np.diff(cross) > 1e-6]
+    # Rods closer than one raster cell form a bundle (stacked layers on one line, or bars pushed
+    # beside each other by the clearance rule): one rod with the summed area at the area-weighted
+    # position and the largest reach.  A strip narrower than a cell cannot be sampled, so without
+    # this the inner bar of a bundle would simply vanish from the raster.
+    keep = np.r_[True, np.diff(cross) > merge_mm]
     if not keep.all():
         groups = np.cumsum(keep) - 1
-        cross = cross[keep]
-        area = np.bincount(groups, weights=area)
+        merged_area = np.bincount(groups, weights=area)
+        cross = np.bincount(groups, weights=area * cross) / merged_area
         reach = np.maximum.reduceat(reach, np.flatnonzero(keep))
+        area = merged_area
     half_lo = np.r_[np.inf, np.diff(cross)] / 2.0
     half_hi = np.r_[np.diff(cross), np.inf] / 2.0
     w_lo = np.minimum(half_lo, reach)
