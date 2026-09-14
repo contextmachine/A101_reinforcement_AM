@@ -1556,11 +1556,14 @@ def layout_rebars_zones_y(
             positions = list(spec["positions"])
             if even_between_background:
                 positions = _even_between_background(positions, step, component_rows[ci]["background_positions"], bg_step)
+            zone_lo, zone_hi = min(positions) - step / 2.0, max(positions) + step / 2.0
             for k, x in enumerate(positions):
                 x = float(x)
                 if x < span[0] - step / 2.0 or x > span[1] + step / 2.0:
                     continue  # no slab within reach of this bar at this band
-                allowed = _allowed_in_field((x - step / 2.0, x + step / 2.0), x, d, span)
+                # a bar prefers its nominal position and may move, minimally, anywhere inside its zone
+                # to resolve a collision; the window is clipped to the slab at this band
+                allowed = _allowed_in_field((zone_lo, zone_hi), x, d, span)
                 if allowed[0] > allowed[1] + _EPS:
                     continue
                 tid = add_track(z, ci, x, d, step, intervals, allowed, False, k)
@@ -1575,7 +1578,27 @@ def layout_rebars_zones_y(
             "intervals": t.intervals, "allowed_x": t.allowed, "ordinal": t.ordinal,
         }
 
+    # A bar that cannot be placed (typically a zone reaching past the slab edge, its bar squeezed
+    # between the edge and a background bar) is dropped with a warning; the layout never fails
+    # because of one bar, the verification and the gap filler decide what that spot needs.
     errors = _separate(tracks)
+    for _round in range(len(tracks)):
+        culprits = sorted({i for e in errors if e.get("type") == "bar_packing_infeasible" for i in e.get("tracks", []) if not tracks[i].background})
+        if not errors or not culprits:
+            break
+        victim = tracks[culprits[-1]]
+        warnings.append({"type": "bar_dropped_no_room", "track": victim.id, "zone": victim.zone, "guide": victim.guide,
+                         "allowed_x": victim.allowed})
+        tracks = [t for t in tracks if t.id != victim.id]
+        for i, t in enumerate(tracks):
+            t.id = i
+            t.x = None
+        errors = _separate(tracks)
+    zone_track_ids = defaultdict(list)
+    for t in tracks:
+        if not t.background:
+            zone_track_ids[int(t.zone)].append(t.id)
+    background_zone_ids = [[t.id for t in tracks if t.background and t.component == ci] for ci in range(len(components))]
     if errors:
         return {
             "status": "Infeasible", "is_feasible": False, "axis": "y",
