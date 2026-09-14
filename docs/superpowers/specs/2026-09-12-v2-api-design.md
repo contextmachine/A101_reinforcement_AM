@@ -181,6 +181,11 @@ policy (`ceil` by default) and the attempt with the smaller residual is kept (`r
 For every source polygon (stable order) with its overlay state mapped to
 `active | real | empty`:
 
+* Raster (2026-09-14): 20 mm along the rods, 5 mm across them (the strips live there). Rods whose
+  axes lie within one diameter of each other (stacked layers, bars pushed beside a background bar)
+  form a bundle and count as one bar with the summed area (SP 63.13330 treats a bundle as a bar of
+  equivalent diameter); before, the nearest-rod rule gave the inner bar of a bundle a strip a few mm
+  wide and `ceil` two-layer zones read up to 12 % short.
 * Input: `bars` (the rods of a solution, verified exactly as given, no layout and no gap filling)
   or `zones` (laid out first, *without* the gap filler: the check shows what the zones alone give,
   the filler belongs to the rod algorithm of `POST /v2/bars` and the task pipeline); `bars` win

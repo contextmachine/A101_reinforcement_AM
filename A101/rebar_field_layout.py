@@ -1472,7 +1472,7 @@ def layout_rebars_y(
     }
 
 
-def _even_between_background(positions: Sequence[float], step: float, bg_positions: Sequence[float], bg_step: float) -> list[float]:
+def _even_between_background(positions: Sequence[float], step: float, bg_positions: Sequence[float], bg_step: float, max_bars: int | None = None) -> list[float]:
     """Re-space a zone's bars evenly between consecutive background bars.
 
     A zone whose step divides the background step has ``m = bg_step / step`` bars per background
@@ -1484,6 +1484,8 @@ def _even_between_background(positions: Sequence[float], step: float, bg_positio
     if not bg_positions or step <= 0 or abs(bg_step / step - round(bg_step / step)) > 1e-6:
         return list(positions)
     m = int(round(bg_step / step))
+    if max_bars is not None and m > max_bars:
+        return list(positions)  # e.g. the "100*" row of the ТЗ table: the colliding bar sits beside the background bar
     pitch = bg_step / (m + 1)
     origin = float(bg_positions[0])
     out = []
@@ -1555,7 +1557,12 @@ def layout_rebars_zones_y(
                 continue
             positions = list(spec["positions"])
             if even_between_background:
-                positions = _even_between_background(positions, step, component_rows[ci]["background_positions"], bg_step)
+                # True: every dividing step is spread evenly; "tz": only steps with <= 2 bars per
+                # background period (Таблица 2.7.9: 300 -> midpoint, 150 -> 100/200, 100 -> beside the bar)
+                positions = _even_between_background(
+                    positions, step, component_rows[ci]["background_positions"], bg_step,
+                    max_bars=2 if even_between_background == "tz" else None,
+                )
             zone_lo, zone_hi = min(positions) - step / 2.0, max(positions) + step / 2.0
             for k, x in enumerate(positions):
                 x = float(x)
