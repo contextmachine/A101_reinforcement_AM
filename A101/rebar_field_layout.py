@@ -1472,6 +1472,205 @@ def layout_rebars_y(
     }
 
 
+def _even_between_background(positions: Sequence[float], step: float, bg_positions: Sequence[float], bg_step: float) -> list[float]:
+    """Re-space a zone's bars evenly between consecutive background bars.
+
+    A zone whose step divides the background step has ``m = bg_step / step`` bars per background
+    period, one of which coincides with a background bar; instead of pushing that bar beside the
+    background bar (100 / 81 / 119 for step 100) the ``m`` bars of each period are placed at
+    ``bg + i · bg_step / (m + 1)`` (75 / 75 / 75 / 75), which keeps the bar count and gives a
+    uniform smeared density.  Steps that do not divide the background step are left as they are.
+    """
+    if not bg_positions or step <= 0 or abs(bg_step / step - round(bg_step / step)) > 1e-6:
+        return list(positions)
+    m = int(round(bg_step / step))
+    pitch = bg_step / (m + 1)
+    origin = float(bg_positions[0])
+    out = []
+    for x in positions:
+        rel = (float(x) - origin) / bg_step
+        period = floor(rel + 1e-9)
+        i = int(round((rel - period) * m))  # nominal index inside the period, 0 = on the background bar
+        if i >= m:
+            period, i = period + 1, 0
+        out.append(origin + period * bg_step + (i + 1) * pitch - pitch * (0 if i else 0))
+    # ``i == 0`` is the bar on the background bar: it becomes the first even slot of its period,
+    # the others follow, so the whole period reads bg, +pitch, +2·pitch, ..., bg
+    return sorted(out)
+
+
+def layout_rebars_zones_y(
+    polygons: Sequence[Any],
+    zone_specs: Sequence[Mapping[str, Any]],
+    background: tuple[float, float] = (18, 300),
+    *,
+    even_between_background: bool = False,
+) -> dict[str, Any]:
+    """Zone-exact vertical-bar layout: every bar sits where its zone puts it.
+
+    ``zone_specs`` rows: ``{"index", "id", "positions": [x, ...], "y0", "y1", "diameter", "step",
+    "layer"}`` in the native frame (bars along y, ``positions`` across).  Unlike
+    :func:`layout_rebars_y` there is no guide lattice and no re-distribution of bars inside a
+    box: a bar is placed at its nominal position, moved only by the clearance rule when it
+    collides with a background bar or another zone's bar (within ``step / 2`` of its nominal
+    position, never past the slab edge), and clipped to the field geometry.  The result has the
+    same shape as :func:`layout_rebars_y` so the v2 bar/mass assembly consumes it unchanged.
+    """
+    bg_d, bg_step = map(float, background)
+    if bg_d <= 0 or bg_step <= 0:
+        raise ValueError("background должен быть положительным")
+    _source_geoms, components = _polygons(polygons)
+    field_geom = unary_union(components)
+    warnings: list[dict[str, Any]] = []
+    tracks: list[_Track] = []
+    component_rows: list[dict[str, Any]] = []
+    background_zone_ids: list[list[int]] = []
+
+    def add_track(zone, component, guide, diameter, step, intervals, allowed, background=False, ordinal=0):
+        t = _Track(len(tracks), zone, component, float(guide), float(diameter), float(step), _merge(intervals), tuple(map(float, allowed)), background, ordinal)
+        tracks.append(t)
+        return t.id
+
+    for ci, comp in enumerate(components):
+        xmin, ymin, xmax, ymax = map(float, comp.bounds)
+        positions = _background_positions(comp, bg_step)
+        bg_track_ids = [add_track(None, ci, x, bg_d, bg_step, _segments(comp, x), (x, x), True) for x in positions]
+        background_zone_ids.append(bg_track_ids)
+        component_rows.append({"id": ci, "bounds": (xmin, ymin, xmax, ymax), "area": float(comp.area), "holes": len(comp.interiors), "background_positions": positions, "strips": []})
+
+    zone_track_ids: dict[int, list[int]] = defaultdict(list)
+    zone_components: dict[int, set[int]] = defaultdict(set)
+    for spec in zone_specs:
+        z = int(spec["index"])
+        d, step = float(spec["diameter"]), float(spec["step"])
+        y0, y1 = float(spec["y0"]), float(spec["y1"])
+        for ci, comp in enumerate(components):
+            xmin, ymin, xmax, ymax = map(float, comp.bounds)
+            iy0, iy1 = max(y0, ymin), min(y1, ymax)
+            if iy1 <= iy0 + _EPS:
+                continue
+            intervals = [(iy0, iy1)]
+            span = _field_span(comp, intervals)
+            if span is None:
+                continue
+            positions = list(spec["positions"])
+            if even_between_background:
+                positions = _even_between_background(positions, step, component_rows[ci]["background_positions"], bg_step)
+            for k, x in enumerate(positions):
+                x = float(x)
+                if x < span[0] - step / 2.0 or x > span[1] + step / 2.0:
+                    continue  # no slab within reach of this bar at this band
+                allowed = _allowed_in_field((x - step / 2.0, x + step / 2.0), x, d, span)
+                if allowed[0] > allowed[1] + _EPS:
+                    continue
+                tid = add_track(z, ci, x, d, step, intervals, allowed, False, k)
+                zone_track_ids[z].append(tid)
+                zone_components[z].add(ci)
+
+    def public(t: _Track) -> dict[str, Any]:
+        return {
+            "id": t.id, "zone_id": t.component if t.background else len(components) + int(t.zone),
+            "input_zone_index": t.zone, "component_id": t.component, "background": t.background,
+            "guide_x": t.guide, "x": None if t.x is None else float(t.x), "diameter": t.diameter, "step": t.step,
+            "intervals": t.intervals, "allowed_x": t.allowed, "ordinal": t.ordinal,
+        }
+
+    errors = _separate(tracks)
+    if errors:
+        return {
+            "status": "Infeasible", "is_feasible": False, "axis": "y",
+            "background": {"diameter": bg_d, "step": bg_step},
+            "components": component_rows, "zones": [], "tracks": [public(t) for t in tracks],
+            "bars": [], "guides": [], "warnings": warnings, "errors": errors,
+            "stats": {
+                "components": len(components), "input_zones": len(zone_specs), "zones": 0,
+                "tracks": len(tracks), "bar_segments": 0, "max_stack": 0, "hard_conflicts": len(errors),
+                "packing_errors": sum(e.get("type") == "bar_packing_infeasible" for e in errors),
+                "spacing_violations": sum(e.get("type") == "bar_clearance" for e in errors),
+                **_clearance_stats(tracks),
+            },
+        }
+    bar_rows: list[dict[str, Any]] = []
+    zone_bars: dict[int, list[tuple[float, float, float, float]]] = defaultdict(list)
+    for t in tracks:
+        comp = components[t.component]
+        segs = _segments(comp, float(t.x), t.intervals)
+        if not segs:
+            if not t.background:
+                warnings.append({"type": "track_outside_field", "track": t.id, "guide": t.guide, "x": t.x})
+                continue
+            warnings.append({"type": "empty_track", "track": t.id, "guide": t.guide, "x": t.x})
+        for y0, y1 in segs:
+            row = {
+                "id": len(bar_rows), "track_id": t.id,
+                "zone_id": t.component if t.background else len(components) + int(t.zone),
+                "input_zone_index": t.zone, "component_id": t.component,
+                "background": t.background, "diameter": t.diameter, "step": t.step,
+                "guide_x": t.guide, "x0": float(t.x), "y0": y0, "x1": float(t.x), "y1": y1,
+            }
+            bar_rows.append(row)
+            if not t.background:
+                zone_bars[int(t.zone)].append((row["x0"], y0, row["x1"], y1))
+    out_zones: list[dict[str, Any]] = []
+    for ci, comp in enumerate(components):
+        tids = background_zone_ids[ci]
+        rows = [b for b in bar_rows if b["track_id"] in tids]
+        out_zones.append({
+            "id": len(out_zones), "input_id": None, "source_index": None, "component_id": ci,
+            "component_ids": [ci], "class": None, "background": True, "diameter": bg_d,
+            "step": bg_step, "bounds": tuple(map(float, comp.bounds)), "nominal_positions": component_rows[ci]["background_positions"],
+            "track_ids": tids, "bars": [(b["x0"], b["y0"], b["x1"], b["y1"]) for b in rows], "parts": _parts(comp),
+        })
+    for spec in zone_specs:
+        z = int(spec["index"])
+        xs = [float(x) for x in spec["positions"]]
+        step = float(spec["step"])
+        bounds = (min(xs) - step / 2.0, float(spec["y0"]), max(xs) + step / 2.0, float(spec["y1"]))
+        touched = sorted(zone_components.get(z, set()))
+        if not zone_bars.get(z):
+            warnings.append({"type": "zone_without_bars", "zone": spec.get("id")})
+        out_zones.append({
+            "id": len(out_zones), "input_id": spec.get("id"), "source_index": None,
+            "component_id": touched[0] if len(touched) == 1 else None, "component_ids": touched,
+            "class": None, "parent_class": None, "layer_index": spec.get("layer"),
+            "background": False, "diameter": float(spec["diameter"]), "step": step,
+            "primary_bounds": bounds, "bounds": bounds, "track_ids": zone_track_ids.get(z, []),
+            "hold": None, "fitted_bounds": bounds, "anchored_bounds_unclipped": bounds,
+            "bars": zone_bars.get(z, []), "parts": _parts(field_geom.intersection(box(*bounds))), "assigned_polygons": [],
+        })
+    hard = sum(w.get("type") in {"stack_overlap_relaxed", "empty_track", "zone_without_bars"} for w in warnings)
+    return {
+        "status": "Feasible" if not hard else "Partial", "is_feasible": not hard, "axis": "y",
+        "background": {"diameter": bg_d, "step": bg_step},
+        "components": component_rows, "zones": out_zones, "tracks": [public(t) for t in tracks],
+        "bars": bar_rows, "guides": [], "warnings": warnings, "errors": [],
+        "stats": {
+            "components": len(components), "input_zones": len(zone_specs), "zones": len(out_zones),
+            "tracks": len(tracks), "bar_segments": len(bar_rows), "max_stack": 1,
+            "hard_conflicts": hard, "packing_errors": 0, "spacing_violations": 0,
+            **_clearance_stats(tracks),
+        },
+    }
+
+
+def layout_rebars_zones(
+    polygons: Sequence[Any],
+    zone_specs: Sequence[Mapping[str, Any]],
+    background: tuple[float, float] = (18, 300),
+    *,
+    axis: str = "y",
+    even_between_background: bool = False,
+) -> dict[str, Any]:
+    """Axis-neutral wrapper around :func:`layout_rebars_zones_y` (world ``x`` solved by swapping)."""
+    from .axis_orientation import normalize_axis, orient_polygon_items, restore_bar_layout
+
+    axis = normalize_axis(axis)
+    if axis == "y":
+        return layout_rebars_zones_y(polygons, zone_specs, background, even_between_background=even_between_background)
+    work = layout_rebars_zones_y(orient_polygon_items(polygons, "x"), zone_specs, background, even_between_background=even_between_background)
+    return restore_bar_layout(work, "x")
+
+
 def layout_rebars(
     polygons: Sequence[Any],
     boxes: Any,

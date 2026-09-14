@@ -128,6 +128,13 @@ horizontal bars use `direction=(0,-1)` and the origin is the start of the base b
 
 ## 5. Bar layout notes (2026-09-12)
 
+* **Zone-exact layout (2026-09-14).** v2 no longer uses the v1 guide lattice
+  (`min_bar_gap_mm` / `REBAR_MIN_INTERNAL_STEP` quantum): `layout_rebars_zones` places every bar at
+  its zone's own position (`origin + k·step`), moves it only by the clearance rule when it collides
+  with a background bar or another zone's bar (within `step/2`, never past the slab edge), and clips
+  it to the field. The lattice was a v1 device for inventing bar positions inside fitted boxes; in v2
+  the zones already say where every bar is, and the lattice silently displaced them (75/60/120 mm
+  gaps in a step-100 zone on a 50 mm lattice). `min_bar_gap_mm` is accepted and ignored.
 * An additional zone whose bars land on background guides is shifted as a whole by the clearance
   (`_shift_zones_off_background`), so its step stays uniform; only residual collisions are
   repaired bar by bar.

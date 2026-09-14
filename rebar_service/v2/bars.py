@@ -292,6 +292,22 @@ def zone_to_box(zone: Mapping[str, Any], *, axis: str) -> dict[str, Any]:
     return {"id": zone_id, "bounds": tuple(map(float, bounds)), "diameter": d, "step": step}
 
 
+def zone_to_positions(zone: Mapping[str, Any], *, axis: str) -> dict[str, Any]:
+    """Bar positions of a ``ZoneAdditional``: ``{"id", "positions": [cross...], "long": (lo, hi), "diameter", "step"}``."""
+    axis = _axis(axis)
+    box_ = zone_to_box(zone, axis=axis)
+    d, step = _arm(zone)
+    left, right = int(zone.get("left", 0) or 0), int(zone.get("right", 0) or 0)
+    origin = (float(zone["origin"][0]), float(zone["origin"][1]))
+    direction = _aligned_direction(zone.get("direction"), axis)
+    cross, long = _frame(axis)
+    sign_cross = direction[cross]
+    positions = sorted(origin[cross] + k * step * sign_cross for k in range(-left, right + 1))
+    b = box_["bounds"]
+    long_extent = (b[1], b[3]) if axis == "y" else (b[0], b[2])
+    return {"id": box_["id"], "positions": positions, "long": tuple(map(float, long_extent)), "diameter": d, "step": step}
+
+
 def fitted_boxes_to_zones(
     boxes: Sequence[Mapping[str, Any]],
     *,
@@ -586,20 +602,21 @@ def layout_zones(
     anchor_factor: float,
     steel_density_kg_m3: float,
     min_step: float,
+    even_between_background: bool = False,
 ) -> dict[str, Any]:
     """Lay out bars for wire zones over the physical field polygons.
 
     ``polygons`` are the physical polygons of the scene (``active`` + ``background_only``; see
     :func:`physical_polygons`), so bars are clipped at the field boundary and around openings.
     ``zones`` must contain exactly one ``bg`` zone (its ``arm`` is the background grid) and any
-    number of ``additional`` zones.  ``min_step`` is the guide quantum lower bound of
-    ``layout_rebars`` (``min_bar_gap_mm`` or ``REBAR_MIN_INTERNAL_STEP``).
+    number of ``additional`` zones.  Bars sit exactly at the zones' positions (``origin + k·step``)
+    and move only by the clearance rule; ``min_step`` is accepted for compatibility and ignored.
 
     Returns ``{"is_feasible", "status", "bars", "zones", "mass_metrics", "layout", "warnings",
     "errors"}``.  An infeasible or partial layout yields empty ``bars``/``zones`` and zero masses;
     ``layout`` is the raw ``layout_rebars`` output for diagnostics.
     """
-    from A101.rebar_field_layout import layout_rebars
+    from A101.rebar_field_layout import layout_rebars_zones
 
     axis = _axis(axis)
     factor = float(anchor_factor)
@@ -608,20 +625,19 @@ def layout_zones(
     density = float(steel_density_kg_m3)
     if not isfinite(density) or density <= 0:
         raise ValueError("steel_density_kg_m3 должен быть положительным")
-    quantum = float(min_step)
-    if not isfinite(quantum) or quantum <= 0:
-        raise ValueError("min_step должен быть положительным")
-
     field = [p for p in polygons if not (hasattr(p, "is_empty") and p.is_empty)]
     if not field:
         raise ValueError("Не переданы физические полигоны сцены")
     bg, additional = _split_zones(zones)
     bg_d, bg_step = _arm(bg)
-    boxes = [zone_to_box(zone, axis=axis) for zone in additional]
-
-    layout = dict(layout_rebars(
-        field, boxes, background=(bg_d, bg_step), axis=axis, min_step=quantum,
-    ) or {})
+    # zone-exact layout: bars at the zone's own positions (origin + k·step), moved only by the
+    # clearance rule; ``min_step`` (the former guide lattice) is accepted for compatibility and ignored
+    specs = []
+    for index, zone in enumerate(additional):
+        pos = zone_to_positions(zone, axis=axis)
+        specs.append({"index": index, "id": pos["id"], "positions": pos["positions"], "y0": pos["long"][0],
+                      "y1": pos["long"][1], "diameter": pos["diameter"], "step": pos["step"], "layer": None})
+    layout = dict(layout_rebars_zones(field, specs, background=(bg_d, bg_step), axis=axis, even_between_background=even_between_background) or {})
     status = str(layout.get("status", "") or "").lower()
     warnings = list(layout.get("warnings", []) or [])
     errors = list(layout.get("errors", []) or [])
