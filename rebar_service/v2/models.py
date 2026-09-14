@@ -206,6 +206,7 @@ class TaskConfig(V2Model):
     stock: list[RcVariant] | None = Field(default=None, min_length=1)
     solver: SolverConfig = Field(default_factory=SolverConfig)
     cover_mm: float = Field(default=30.0, ge=0)
+    smoothing_mm: float = Field(default=300.0, ge=0)
     fill_gaps: bool = True
 
 
@@ -290,6 +291,10 @@ class BarsConfig(V2Model):
     # Concrete cover to the bar face (защитный слой), mm: sets the lateral reach 5·(cover + d/2)
     # of every rod in the smeared-density verification (EN 1992-1-1 §7.3.4).
     cover_mm: float = Field(default=30.0, ge=0)
+    # Sliding window across the bars over which the smeared density is averaged before it is compared
+    # with the elements (mm; default = the background step). Removes the ±2-3 % that depends on
+    # where an element's edges fall in the bar pattern; real gaps wider than the window still show.
+    smoothing_mm: float = Field(default=300.0, ge=0)
     # After the layout, check every polygon with the verification model and insert one rod into the
     # widest gap of parallel rods over each polygon that is still short; repeat until covering.
     fill_gaps: bool = True

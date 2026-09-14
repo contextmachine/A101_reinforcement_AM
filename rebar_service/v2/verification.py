@@ -136,6 +136,7 @@ class SmearedDensity:
         raster_mm: float,
         field: BaseGeometry | None = None,
         cross_raster_mm: float | None = None,
+        smoothing_mm: float | None = None,
     ) -> None:
         self.cell = float(raster_mm)                                    # along the rods
         self.cross_cell = float(cross_raster_mm or DEFAULT_CROSS_RASTER_MM)  # across the rods
@@ -171,6 +172,26 @@ class SmearedDensity:
         self.inside_cum[:, 1:] = np.cumsum(self.inside, axis=1)
         if rods:
             self._rasterise(rods)
+        if smoothing_mm and smoothing_mm > 0:
+            self._smooth(float(smoothing_mm))
+
+    def _smooth(self, window_mm: float) -> None:
+        """Average the density across the rods over a sliding window of ``window_mm`` (in-field cells only).
+
+        ``cm²/m`` is by definition an average over a length; the window is the background period,
+        the scale on which reinforcement is designed. Inside a zone every point then reads the
+        zone's true value, element readings stop depending on where their edges fall relative to
+        the bar pattern, and zone boundaries blend over half a window.
+        """
+        half = max(1, int(round(0.5 * window_mm / self.cross_cell)))
+        n = self.n_cross
+        num = np.zeros((self.n_long, n + 1)); num[:, 1:] = np.cumsum(self.field * self.inside, axis=1)
+        idx = np.arange(n)
+        lo = np.clip(idx - half, 0, n); hi = np.clip(idx + half + 1, 0, n)
+        total = num[:, hi] - num[:, lo]
+        count = self.inside_cum[:, hi] - self.inside_cum[:, lo]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            self.field = np.where(count > 0, total / count, 0.0)
 
     def _rasterise(self, rods: list[tuple[tuple[float, float], tuple[float, float], float, float, float]]) -> None:
         cross = np.empty(len(rods)); lo = np.empty(len(rods)); hi = np.empty(len(rods))
@@ -309,6 +330,7 @@ def reinforcement_rows(
     cover_mm: float = DEFAULT_COVER_MM,
     raster_mm: float = DEFAULT_RASTER_MM,
     cross_raster_mm: float = DEFAULT_CROSS_RASTER_MM,
+    smoothing_mm: float | None = None,
 ) -> list[dict[str, Any]]:
     """Return one verification row per source polygon, in input order (design §6).
 
@@ -339,7 +361,7 @@ def reinforcement_rows(
         xs1 = max(g.bounds[2] for g in material); ys1 = max(g.bounds[3] for g in material)
         smeared = SmearedDensity(
             bars, (xs0, ys0, xs1, ys1), cover_mm=cover, raster_mm=float(raster_mm), field=unary_union(material),
-            cross_raster_mm=float(cross_raster_mm),
+            cross_raster_mm=float(cross_raster_mm), smoothing_mm=smoothing_mm,
         )
 
     rows: list[dict[str, Any]] = []

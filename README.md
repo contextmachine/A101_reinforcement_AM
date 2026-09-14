@@ -259,7 +259,7 @@ PUT  /v2/tasks                                          -> {task_id}
 PUT  /v2/tasks/{task_id}/n  |  PUT /v2/tasks/{task_id}/cancel
 GET  /v2/tasks/{task_id}    |  GET /v2/tasks/{task_id}/{n}   (bars, zones, mass_metrics)
 POST /v2/bars  | GET /v2/bars/{task_id}                 (изолированный worker раскладки)
-POST /v2/verification | GET /v2/verification/{id}       (bars как есть, либо zones → раскладка; need/fact в cm²/m и kg/m³; fact — размазанная плотность стержней, зона влияния 5·(cover_mm + d/2), растр 20×5 мм, пучки стержней (оси ближе одного диаметра) считаются одним стержнем)
+POST /v2/verification | GET /v2/verification/{id}       (bars как есть, либо zones → раскладка; need/fact в cm²/m и kg/m³; fact — размазанная плотность стержней, зона влияния 5·(cover_mm + d/2), растр 20×5 мм, пучки стержней (оси ближе одного диаметра) считаются одним стержнем, усреднение окном smoothing_mm=300 поперёк стержней)
 # раскладка v2 ставит стержни точно по позициям зон (origin + k·step) и сдвигает их только правилом зазора;
 # min_bar_gap_mm больше не задаёт сетку позиций и игнорируется
 # fill_gaps=true (по умолчанию) в config: после раскладки пропуски шире шага закрываются одиночными стержнями по модели верификации (поле repair в ответе)

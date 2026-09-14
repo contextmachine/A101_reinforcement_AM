@@ -475,6 +475,7 @@ class V2Pipeline:
                 resolved, out, axis=field["axis"], anchor_factor=float(config.get("anchor_factor", 40.0)),
                 cover_mm=float(config.get("cover_mm", 30.0)),
                 steel_density_kg_m3=float(config.get("steel_density_kg_m3", 7850.0)),
+                smoothing_mm=float(config.get("smoothing_mm", 300.0)),
             )
             if self._cancelled(task_id, n):
                 return

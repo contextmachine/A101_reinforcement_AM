@@ -181,6 +181,10 @@ policy (`ceil` by default) and the attempt with the smaller residual is kept (`r
 For every source polygon (stable order) with its overlay state mapped to
 `active | real | empty`:
 
+* Window (2026-09-14): the density is averaged over a sliding `smoothing_mm` window across the
+  bars (default 300 = the background step) before it is compared with the elements, so an element
+  reads its zone's true value regardless of where its edges fall in the bar pattern (the tributary
+  split of a boundary rod between neighbours gave ±2-3 % noise); gaps wider than the window still show.
 * Raster (2026-09-14): 20 mm along the rods, 5 mm across them (the strips live there). Rods whose
   axes lie within one diameter of each other (stacked layers, bars pushed beside a background bar)
   form a bundle and count as one bar with the summed area (SP 63.13330 treats a bundle as a bar of

@@ -56,7 +56,7 @@ def _short(rows, bars, tol=0.5):
 
 
 def test_missing_bar_gap_is_closed_with_one_rod():
-    rows = _rows(load=55.0)  # ø25@100 + ø16@300 = 49.1 + 6.7 = 55.8 >= 55 when complete
+    rows = _rows(load=54.0)  # ø25@100 + ø16@300 = 49.1 + 6.7 = 55.8 >= 54 when complete
     out = _layout_with_gap()
     before = _short(rows, out["bars"])
     assert before, "the missing bar must leave short elements"
@@ -124,7 +124,7 @@ def test_rod_blocked_farther_along_its_zone_falls_back_to_the_short_elements():
 
 
 def test_rods_touching_the_extent_end_to_end_do_not_block():
-    rows = _rows(load=55.0)
+    rows = _rows(load=54.0)
     out = _layout_with_gap()
     # a rod on the wanted line that ends exactly where the field starts (touching, not overlapping)
     out["bars"].append(_bar(1550, 25, 2, y0=-2000.0, y1=0.0))

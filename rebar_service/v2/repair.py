@@ -38,6 +38,7 @@ def fill_gaps(
     tol_cm2_m: float = 0.5,
     max_passes: int = 30,
     max_rods: int = 2000,
+    smoothing_mm: float | None = 300.0,
 ) -> dict[str, Any]:
     """Return a copy of ``layout_out`` (bars, zones, mass_metrics) with gap-filling rods added."""
     axis = "x" if str(axis).lower() == "x" else "y"
@@ -57,7 +58,7 @@ def fill_gaps(
     report: dict[str, Any] = {"passes": 0, "rods_added": 0, "added_kg": 0.0, "short_before": None, "short_after": None}
     for _pass in range(int(max_passes)):
         verification = reinforcement_rows(
-            resolved_rows, bars, steel_density_kg_m3=density, t_mm=1000.0, cover_mm=cover_mm,
+            resolved_rows, bars, steel_density_kg_m3=density, t_mm=1000.0, cover_mm=cover_mm, smoothing_mm=smoothing_mm,
         )
         short = []
         for position, v in enumerate(verification):
@@ -121,7 +122,7 @@ def fill_gaps(
                 added += 1
         if added == 0:
             break
-    verification = reinforcement_rows(resolved_rows, bars, steel_density_kg_m3=density, t_mm=1000.0, cover_mm=cover_mm)
+    verification = reinforcement_rows(resolved_rows, bars, steel_density_kg_m3=density, t_mm=1000.0, cover_mm=cover_mm, smoothing_mm=smoothing_mm)
     residual = [v["need_load_sm2/m"] - v["fact_load_sm2/m"] for v in verification
                 if v.get("need_load_sm2/m") is not None and v.get("fact_load_sm2/m") is not None]
     report["short_after"] = {"polygons": sum(1 for s in residual if s > tol_cm2_m), "worst_cm2_m": round(max(residual, default=0.0), 2)}

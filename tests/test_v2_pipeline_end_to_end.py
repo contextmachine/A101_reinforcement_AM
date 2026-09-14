@@ -379,7 +379,7 @@ def test_verification_by_bars_matches_verification_by_zones(tmp_path):
     plain = layout_zones(physical_polygons(store.resolved_scene_polygons("scene")), row["result"]["zones"], axis="y",
                          anchor_factor=40.0, steel_density_kg_m3=7850.0, min_step=settings.min_internal_step)
     assert by_zones["result"] == reinforcement_rows(store.resolved_scene_polygons("scene"), plain["bars"],
-                                                    steel_density_kg_m3=7850.0, t_mm=600.0, cover_mm=30.0)
+                                                    steel_density_kg_m3=7850.0, t_mm=600.0, cover_mm=30.0, smoothing_mm=300.0)
     # the solution's own bars (filler rods included) never verify worse than the bare zones
     assert all(b["fact_load_sm2/m"] >= z["fact_load_sm2/m"] - 1e-9 for b, z in zip(by_bars["result"], by_zones["result"]))
     # rods given explicitly are verified as they are: dropping half of them lowers the fact values

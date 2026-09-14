@@ -43,6 +43,7 @@ def _layout_for(store: Any, row: Mapping[str, Any], *, fill: bool) -> tuple[list
             anchor_factor=float(config.get("anchor_factor", 40.0)),
             cover_mm=float(config.get("cover_mm", 30.0)),
             steel_density_kg_m3=float(config.get("steel_density_kg_m3", 7850.0)),
+            smoothing_mm=float(config.get("smoothing_mm", 300.0)),
         )
     return resolved, out
 
@@ -90,6 +91,7 @@ def handle_verification_job(store: Any, job: Mapping[str, Any], worker_id: str) 
             steel_density_kg_m3=float(config.get("steel_density_kg_m3", 7850.0)),
             t_mm=float(config["t"]),
             cover_mm=float(config.get("cover_mm", 30.0)),
+            smoothing_mm=float(config.get("smoothing_mm", 300.0)),
         )
         store.v2.set_verification_task(task_id, state="success", result=rows)
     except Exception as exc:  # noqa: BLE001 - the task row must record every failure

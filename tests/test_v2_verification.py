@@ -252,3 +252,26 @@ def test_bundled_bars_count_in_full():
     expected = 3 * 10.0 * pi * 81.0 / 300.0
     assert rows[0]["fact_load_sm2/m"] == pytest.approx(expected, rel=0.02)
     assert rows[1]["fact_load_sm2/m"] == pytest.approx(expected, rel=0.05)
+
+
+def test_window_makes_elements_read_their_zones_value_regardless_of_edges():
+    # ø25 @ 100 with a ø18 background every 300 mm: 57.6 cm²/m per period; elements 480 mm wide
+    # placed at different offsets in the pattern read 54-59 without the window, 57.6 with it
+    bars = [_bar((x, -500.0), (x, 3500.0), 25) for x in range(77, 3600, 100)] + [_bar((x, -500.0), (x, 3500.0), 18) for x in range(0, 3600, 300)]
+    elements = [_poly([(x0, 600), (x0 + 480, 600), (x0 + 480, 1000), (x0, 1000)], 55.0, index=k) for k, x0 in enumerate(range(600, 1800, 40))]
+    rows_plain = reinforcement_rows(_field(55.0, extra=elements), bars, steel_density_kg_m3=RHO, t_mm=T, cover_mm=COVER)[:len(elements)]
+    rows_window = reinforcement_rows(_field(55.0, extra=elements), bars, steel_density_kg_m3=RHO, t_mm=T, cover_mm=COVER, smoothing_mm=300.0)[:len(elements)]
+    expected = 10.0 * (3 * _area(25) + _area(18)) / 300.0
+    plain = [r["fact_load_sm2/m"] for r in rows_plain]
+    assert max(plain) - min(plain) > 2.0  # the edge effect the window removes
+    assert all(r["fact_load_sm2/m"] == pytest.approx(expected, rel=0.01) for r in rows_window)
+
+
+def test_window_keeps_a_real_gap_visible():
+    # a 1000 mm hole in a ø20 @ 100 mesh (bands reach 200 mm into it from each side): the middle
+    # 200 mm of the hole reads 0 with or without the 300 mm window
+    bars = [_bar((x, 0.0), (x, 3000.0), 20) for x in list(range(0, 1001, 100)) + list(range(2000, 3001, 100))]
+    hole = _poly([(1400, 1000), (1600, 1000), (1600, 1300), (1400, 1300)], 20.0, index=0)  # x 1400..1600
+    for window in (None, 300.0):
+        row = reinforcement_rows(_field(20.0, extra=[hole]), bars, steel_density_kg_m3=RHO, t_mm=T, cover_mm=COVER, smoothing_mm=window)[0]
+        assert row["fact_load_sm2/m"] < 1.0

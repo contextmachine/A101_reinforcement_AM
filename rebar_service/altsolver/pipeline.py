@@ -26,9 +26,9 @@ from ..v2.verification import reinforcement_rows
 from .engine import SceneEngine, build_engine, cover_bounds, solve_n
 
 
-def _residual(rows: Any, bars: Any, cover_mm: float, tol: float = 0.5) -> tuple[int, float]:
+def _residual(rows: Any, bars: Any, cover_mm: float, tol: float = 0.5, smoothing_mm: float | None = 300.0) -> tuple[int, float]:
     """(short polygons, worst shortfall) of ``bars`` on ``rows`` by the verification model."""
-    verified = reinforcement_rows(rows, bars, steel_density_kg_m3=7850.0, t_mm=1000.0, cover_mm=cover_mm)
+    verified = reinforcement_rows(rows, bars, steel_density_kg_m3=7850.0, t_mm=1000.0, cover_mm=cover_mm, smoothing_mm=smoothing_mm)
     gaps = [v["need_load_sm2/m"] - v["fact_load_sm2/m"] for v in verified
             if v.get("need_load_sm2/m") is not None and v.get("fact_load_sm2/m") is not None]
     return (sum(1 for g in gaps if g > tol), max(gaps, default=0.0))
@@ -189,13 +189,14 @@ class AltSolverPipeline(V2Pipeline):
             out = fill_gaps(
                 rows, out, axis=scene.axis, anchor_factor=float(config.get("anchor_factor", 40.0)),
                 cover_mm=cover, steel_density_kg_m3=float(config.get("steel_density_kg_m3", 7850.0)),
+                smoothing_mm=float(config.get("smoothing_mm", 300.0)),
             )
             if self._cancelled(task_id, n):
                 return None
             short = out["repair"]["short_after"]
             residual = (int(short["polygons"]), float(short["worst_cm2_m"]))
         else:
-            residual = _residual(rows, out["bars"], cover)
+            residual = _residual(rows, out["bars"], cover, smoothing_mm=float(config.get("smoothing_mm", 300.0)))
         mass = float(out["mass_metrics"]["additional"]["with_anchorage_kg"])
         summary = {"band_policy": policy, "short_polygons": residual[0], "worst_cm2_m": round(residual[1], 2),
                    "additional_with_anchorage_kg": round(mass, 1), "solver_status": solution.status}
