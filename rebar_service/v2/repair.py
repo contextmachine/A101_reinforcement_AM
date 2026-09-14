@@ -210,16 +210,18 @@ def _clear_position(position, d, bars, l_lo, l_hi, cross, long):
         if b_hi <= l_lo + 1e-6 or b_lo >= l_hi - 1e-6:
             continue  # a rod that merely touches the extent end-to-end does not block it
         rods.append((0.5 * (s[cross] + e[cross]), float(b["d"])))
-    target = position
-    for _ in range(8):
-        blocking = [(p, rd) for p, rd in rods if abs(position - p) < (d + rd) / 2.0 - 1e-6]
-        if not blocking:
-            return position if abs(position - target) <= 100.0 else None
-        p, rd = min(blocking, key=lambda r: abs(position - r[0]))
-        clearance = (d + rd) / 2.0
-        up, down = p + clearance, p - clearance
-        position = up if abs(up - target) <= abs(down - target) else down
-    return None
+    target = float(position)
+
+    def clear(x: float) -> bool:
+        return all(abs(x - p) >= (d + rd) / 2.0 - 1e-6 for p, rd in rods)
+
+    if clear(target):
+        return target
+    # The free set is the complement of the rods' clearance intervals, so the nearest free point is
+    # an interval end: examine every ``p ± clearance`` within reach instead of pushing greedily (which
+    # oscillates between two blockers, e.g. a background bar and the next zone bar 39.5 mm apart).
+    candidates = [x for p, rd in rods for x in (p + (d + rd) / 2.0, p - (d + rd) / 2.0) if abs(x - target) <= 100.0 and clear(x)]
+    return min(candidates, key=lambda x: (abs(x - target), x)) if candidates else None
 
 
 def _merge_proposals(proposals, *, cross: int, long: int):

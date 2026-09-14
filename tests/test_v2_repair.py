@@ -50,7 +50,8 @@ def _layout_with_gap():
 
 
 def _short(rows, bars, tol=0.5):
-    res = reinforcement_rows(rows, bars, steel_density_kg_m3=RHO, t_mm=600.0, cover_mm=30.0)
+    # the same 300 mm window the filler itself uses to decide what is short
+    res = reinforcement_rows(rows, bars, steel_density_kg_m3=RHO, t_mm=600.0, cover_mm=30.0, smoothing_mm=300.0)
     return [(r["source_index"], r["need_load_sm2/m"] - r["fact_load_sm2/m"]) for r in res
             if r["need_load_sm2/m"] - r["fact_load_sm2/m"] > tol]
 
@@ -132,3 +133,14 @@ def test_rods_touching_the_extent_end_to_end_do_not_block():
     assert fixed["repair"]["rods_added"] == 1
     rod = fixed["bars"][-1]
     assert abs(rod["start"][0] - 1550.0) < 26.0 and rod["start"][1] >= 0.0 and rod["end"][1] <= FIELD
+
+
+def test_clear_position_finds_the_free_spot_between_two_close_blockers():
+    """ø25 zone bars at 7039.5 / 7139.5 and a ø18 background bar at 7100: the wanted position 7100
+    is blocked, +21.5 collides with the bar at 7139.5, and the greedy push used to bounce between
+    the two blockers forever; the free spot 7078.5 (21.5 from the background bar) must be found."""
+    from rebar_service.v2.repair import _clear_position
+
+    bars = [_bar(7039.5, 25, 1, y0=0.0, y1=3000.0), _bar(7139.5, 25, 1, y0=0.0, y1=3000.0), _bar(7100.0, 18, 0, y0=0.0, y1=3000.0)]
+    pos = _clear_position(7100.0, 25.0, bars, 500.0, 900.0, 0, 1)
+    assert pos == pytest.approx(7078.5)
